@@ -1,6 +1,7 @@
 package llmuxdriver
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"github.com/Viking602/venat/message"
 	hyprovider "github.com/Viking602/venat/provider"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/azem/internal/provider/responses"
 )
 
@@ -20,6 +22,10 @@ const (
 )
 
 func convertRequest(request hyprovider.Request, defaultReasoningEffort, providerID string) (sdk.Request, *toolNames, error) {
+	return convertRequestContext(context.Background(), request, defaultReasoningEffort, providerID)
+}
+
+func convertRequestContext(ctx context.Context, request hyprovider.Request, defaultReasoningEffort, providerID string) (sdk.Request, *toolNames, error) {
 	names := newToolNames(request.Tools)
 	anthropicProtocol := providerID == "anthropic"
 	developerMessages := providerID == "openai" || providerID == "xai"
@@ -29,7 +35,7 @@ func convertRequest(request hyprovider.Request, defaultReasoningEffort, provider
 	}
 	messages, instructions, err := convertMessages(
 		request.Messages,
-		responses.RequestAttachmentRoot(request),
+		responses.AttachmentRootFromContext(ctx),
 		names,
 		anthropicProtocol,
 		developerMessages,
@@ -152,7 +158,7 @@ func appendAnthropicSystemMessage(messages []sdk.Message, instructions []string,
 }
 
 func appendLeadingSystemMessage(messages []sdk.Message, instructions []string, current message.Message, developerMessages bool) ([]sdk.Message, []string) {
-	if current.Visibility == message.VisibilityPrivate && developerMessages {
+	if agentruntime.MessageVisibilityOf(current) == agentruntime.MessageVisibilityPrivate && developerMessages {
 		return append(messages, sdk.TextMessage(sdk.RoleDeveloper, current.Text)), instructions
 	}
 	return messages, append(instructions, current.Text)

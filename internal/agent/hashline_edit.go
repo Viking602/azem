@@ -19,7 +19,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/Viking602/venat/coding"
 	"github.com/Viking602/venat/tool"
 )
 
@@ -159,7 +158,7 @@ func newOMPHashlineDriver(root string, snapshotRead tool.Driver, clipboard *hash
 func (driver *ompHashlineDriver) Definition() tool.Definition {
 	additional := true
 	return tool.Definition{
-		Name:        coding.ToolEditHashline,
+		Name:        ToolEditHashline,
 		Description: hashlineEditToolDescription,
 		InputSchema: tool.Schema{
 			Type: "object", Required: []string{"input"}, AdditionalProperties: &additional,
@@ -167,7 +166,7 @@ func (driver *ompHashlineDriver) Definition() tool.Definition {
 				"input": {Type: "string", Description: "Complete *** Begin Patch / *** End Patch Hashline patch."},
 			},
 		},
-		EffectType: tool.EffectWrite, RequiresActionTask: true, RiskLevel: "medium", PolicyTags: []string{"coding", "edit", "hashline", "workspace"}, Concurrency: tool.ConcurrencyExclusive, ConcurrencyGroup: "workspace-files",
+		Concurrency: tool.ConcurrencyExclusive, ConcurrencyGroup: "workspace-files",
 	}
 }
 
@@ -198,8 +197,8 @@ func (driver *ompHashlineDriver) Execute(ctx context.Context, call tool.Call, si
 	driver.clipboard.commit(scope, pendingRegisters)
 	result := driver.buildHashlineResult(ctx, prepared)
 	if sink != nil {
-		_ = sink(tool.Update{Kind: coding.ToolEditHashline, Message: "applied hashline edit", Data: map[string]string{
-			"oldTags": strings.Join(result.OldTags, ","), "newTags": strings.Join(result.NewTags, ","),
+		_ = sink(tool.Update{Kind: tool.UpdateProgress, Message: "applied hashline edit", Data: map[string]string{
+			"phase": "applied", "oldTags": strings.Join(result.OldTags, ","), "newTags": strings.Join(result.NewTags, ","),
 			"firstChangedLines": joinHashlineInts(result.FirstChangedLines), "diffHash": result.DiffHash,
 		}})
 	}
@@ -833,8 +832,8 @@ func combineRollbackError(commit, rollback error) error {
 	return fmt.Errorf("commit failed: %v; rollback failed: %w", commit, rollback)
 }
 
-func (driver *ompHashlineDriver) buildHashlineResult(ctx context.Context, prepared []*ompPreparedFile) coding.EditHashlineResult {
-	sections := make([]coding.EditSectionResult, 0, len(prepared))
+func (driver *ompHashlineDriver) buildHashlineResult(ctx context.Context, prepared []*ompPreparedFile) EditHashlineResult {
+	sections := make([]EditSectionResult, 0, len(prepared))
 	var content strings.Builder
 	for index, file := range prepared {
 		operation := "put"
@@ -868,9 +867,9 @@ func (driver *ompHashlineDriver) buildHashlineResult(ctx context.Context, prepar
 		if file.diff != "" {
 			content.WriteString("\n\n--- compact diff ---\n" + file.diff)
 		}
-		sections = append(sections, coding.EditSectionResult{Path: path, Op: operation, OldTag: file.tag, NewTag: newTag, Header: header, FirstChangedLine: file.firstChanged, Diff: file.diff})
+		sections = append(sections, EditSectionResult{Path: path, Op: operation, OldTag: file.tag, NewTag: newTag, Header: header, FirstChangedLine: file.firstChanged, Diff: file.diff})
 	}
-	result := coding.EditHashlineResult{Sections: sections, Content: content.String()}
+	result := EditHashlineResult{Sections: sections, Content: content.String()}
 	for _, section := range sections {
 		result.OldTags = append(result.OldTags, section.OldTag)
 		result.NewTags = append(result.NewTags, section.NewTag)
@@ -888,9 +887,9 @@ func (driver *ompHashlineDriver) recordHashlineSnapshot(ctx context.Context, pat
 	tag := computeHashlineTag(content)
 	if driver.snapshotRead != nil {
 		arguments, _ := json.Marshal(map[string]any{"path": path, "startLine": 1, "endLine": 1})
-		result, err := driver.snapshotRead.Execute(ctx, tool.Call{ID: "edit-snapshot", Name: coding.ToolReadFile, Arguments: arguments}, nil)
+		result, err := driver.snapshotRead.Execute(ctx, tool.Call{ID: "edit-snapshot", Name: ToolReadFile, Arguments: arguments}, nil)
 		if err == nil && !result.IsError {
-			var observed coding.ReadFileToolResult
+			var observed ReadFileToolResult
 			if json.Unmarshal(result.Structured, &observed) == nil && observed.Tag != "" {
 				tag = observed.Tag
 			}
@@ -955,7 +954,7 @@ func firstChangedHashlineLine(before, after string) int {
 }
 
 func hashlineClipboardScope(ctx context.Context, root string) string {
-	caller, _ := tool.CallerFromContext(ctx)
+	caller, _ := InvocationFromContext(ctx)
 	for _, value := range []string{caller.SessionID, caller.TeamRunID, caller.AgentID} {
 		if value != "" {
 			return value
@@ -965,7 +964,7 @@ func hashlineClipboardScope(ctx context.Context, root string) string {
 }
 
 func hashlineError(call tool.Call, err error) tool.Result {
-	return tool.Result{ToolCallID: call.ID, Name: call.Name, Content: "coding.edit_hashline rejected: " + err.Error() + ". Re-read affected lines and use their current [PATH#TAG].", IsError: true}
+	return tool.Result{ToolCallID: call.ID, Name: call.Name, Content: "edit_hashline rejected: " + err.Error() + ". Re-read affected lines and use their current [PATH#TAG].", IsError: true}
 }
 
 func joinHashlineInts(values []int) string {

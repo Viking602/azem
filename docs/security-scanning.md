@@ -1,10 +1,11 @@
 # Security scanning
 
-Last verified: 2026-08-23
+Last verified: 2026-08-30
 
 Azem Security is a native, provider-independent source audit runtime. It uses
-Azem's configured provider drivers, Venat runs/tasks/leases, governed tools,
-subagents, SQLite store, and desktop/TUI event contracts. Production scanning
+Azem's configured provider drivers, application-owned scan/workers,
+request-scoped direct Venat engines through the shared durable runtime,
+governed tools, Subagents, SQLite, and desktop/TUI events. Production scanning
 does not invoke Codex CLI, `@openai/codex-sdk`, Node, or Python.
 
 ## Architecture
@@ -150,9 +151,9 @@ go test ./internal/securityscan ./internal/app ./internal/store/sqlite ./interna
 make contracts-check
 make architecture-check
 make test
-make test-gui
+make test-gpui
 ```
 
-Desktop changes additionally require building and launching the real Wails app
+Desktop changes additionally require building and launching the real GPUI app
 and exercising scan list, start, progress, cancellation, finding detail, export,
 and keyboard navigation.

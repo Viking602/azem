@@ -6,16 +6,18 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	agentservice "github.com/Viking602/azem/internal/agent"
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/hooks"
 	"github.com/Viking602/azem/internal/provider/codex"
 	"github.com/Viking602/azem/internal/session"
 	hyagent "github.com/Viking602/venat/agent"
-	"github.com/Viking602/venat/api"
-	"github.com/Viking602/venat/coding"
+	"github.com/Viking602/venat/message"
+	hyprovider "github.com/Viking602/venat/provider"
 	"github.com/Viking602/venat/tool"
 )
 
@@ -31,60 +33,176 @@ type governedAgentTool struct {
 	parentToolCallID string
 	streamRunID      string
 	update           func(tool.Update)
+	approvalGate     *approvalGate
 }
+
+type preparedGovernedCall struct {
+	result agentservice.ExecutionResult
+	ready  bool
+}
+
+type approvalGate struct {
+	mu       sync.Mutex
+	tools    map[string]*governedAgentTool
+	prepared map[string]preparedGovernedCall
+}
+
+type suspendableApprovalHost interface {
+	awaitSuspendableApproval(context.Context, string, string, string, *agentservice.Run, tool.Call, agentservice.PendingApproval) (approvalResolution, error)
+}
+
+func governedOperationKey(call tool.Call) string {
+	if strings.TrimSpace(call.OperationID) != "" {
+		return call.OperationID
+	}
+	return call.ID
+}
+
+func (d *governedAgentTool) invocationContext(ctx context.Context) context.Context {
+	return agentservice.WithInvocation(ctx, agentservice.Invocation{
+		SessionID:        d.sessionID,
+		RunID:            firstNonempty(d.streamRunID, d.run.RunID),
+		TeamRunID:        firstNonempty(d.streamRunID, d.run.RunID),
+		AgentID:          firstNonempty(d.agentID, "main"),
+		ParentToolCallID: d.parentToolCallID,
+		TaskID:           d.run.TaskID,
+	})
+}
+
+func (gate *approvalGate) store(call tool.Call, prepared preparedGovernedCall) {
+	gate.mu.Lock()
+	gate.prepared[governedOperationKey(call)] = prepared
+	gate.mu.Unlock()
+}
+
+func (gate *approvalGate) take(call tool.Call) (preparedGovernedCall, bool) {
+	key := governedOperationKey(call)
+	gate.mu.Lock()
+	prepared, ok := gate.prepared[key]
+	delete(gate.prepared, key)
+	gate.mu.Unlock()
+	return prepared, ok
+}
+
+func (*approvalGate) TransformContext(_ context.Context, messages []message.Message) ([]message.Message, error) {
+	return messages, nil
+}
+
+func (*approvalGate) BeforeModelCall(context.Context, *hyprovider.Request) error { return nil }
+
+func (gate *approvalGate) BeforeToolCall(ctx context.Context, call *tool.Call) error {
+	if call == nil {
+		return fmt.Errorf("tool call is nil")
+	}
+	driver := gate.tools[call.Name]
+	if driver == nil {
+		return nil
+	}
+	ctx = driver.invocationContext(ctx)
+	policyDriver := driver.driver
+	if hooks.PreToolPermissionFromContext(ctx) == "ask" && policyDriver != nil {
+		policyDriver = approvalRequiredDriver{inner: policyDriver}
+	}
+	execution, ready, err := driver.coding.PrepareDriver(ctx, driver.run, policyDriver, *call)
+	if err != nil {
+		return err
+	}
+	if !ready && execution.Approval != nil {
+		if driver.host == nil {
+			return errors.New("approval UI is unavailable")
+		}
+		var resolution approvalResolution
+		if suspendable, ok := driver.host.(suspendableApprovalHost); ok {
+			resolution, err = suspendable.awaitSuspendableApproval(
+				ctx, driver.sessionID, driver.agentID, driver.agentType, driver.run, *call, *execution.Approval,
+			)
+		} else {
+			resolution, err = driver.host.AwaitApproval(
+				ctx, driver.sessionID, driver.agentID, driver.agentType, driver.run, *call, *execution.Approval,
+			)
+		}
+		if err != nil {
+			return err
+		}
+		if resolution.Mode == agentservice.ApprovalDenied {
+			if resolution.Prevent {
+				return hooks.ErrPreventContinuation
+			}
+			text := firstNonempty(resolution.DenialMessage, "Denied by user")
+			if resolution.Retry {
+				text += " PermissionDenied hook permits retrying this tool request."
+			}
+			execution = agentservice.ExecutionResult{Result: tool.Result{
+				ToolCallID: call.ID, Name: call.Name, Content: text, IsError: true,
+			}}
+			ready = false
+		} else {
+			execution, ready, err = driver.coding.PrepareDriver(ctx, driver.run, driver.driver, *call)
+			if err != nil {
+				return err
+			}
+			if !ready && execution.Approval != nil {
+				return errors.New("approval remained pending after resolution")
+			}
+		}
+	}
+	gate.store(*call, preparedGovernedCall{result: execution, ready: ready})
+	return nil
+}
+
+func (*approvalGate) AfterToolCall(context.Context, *tool.Result) error { return nil }
+func (*approvalGate) OnEvent(context.Context, hyprovider.Event) error   { return nil }
 
 type callerToolDriver struct {
 	inner  tool.Driver
-	caller tool.CallerInfo
+	caller agentservice.Invocation
 }
 
 func (d callerToolDriver) Definition() tool.Definition { return d.inner.Definition() }
-func (d callerToolDriver) Execute(ctx context.Context, call tool.Call, sink tool.UpdateSink) (tool.Result, error) {
-	return d.inner.Execute(tool.WithCaller(ctx, d.caller), call, sink)
+
+func (d callerToolDriver) PolicyForCall(call tool.Call) agentruntime.ToolPolicy {
+	descriptor, err := agentservice.DescribeTool(d.inner)
+	if err != nil {
+		return agentruntime.ToolPolicy{
+			Effect: agentruntime.ToolEffectExternalSideEffect, RequiresApproval: true,
+			RequiresActionTask: true, RiskLevel: "high",
+		}
+	}
+	return descriptor.PolicyForCall(call)
 }
 
-func (d callerToolDriver) Prepare(ctx context.Context, call tool.Call, sink tool.UpdateSink) (tool.PreparedExecution, error) {
-	ctx = tool.WithCaller(ctx, d.caller)
-	if preparing, ok := d.inner.(tool.PreparingDriver); ok {
-		return preparing.Prepare(ctx, call, sink)
-	}
-	return tool.PreparedExecution{
-		Call: call,
-		Execute: func(runCtx context.Context) (tool.Result, error) {
-			return d.inner.Execute(tool.WithCaller(runCtx, d.caller), call, sink)
-		},
-	}, nil
+func (d callerToolDriver) Execute(ctx context.Context, call tool.Call, sink tool.UpdateSink) (tool.Result, error) {
+	return d.inner.Execute(agentservice.WithInvocation(ctx, d.caller), call, sink)
 }
 
 func (d *governedAgentTool) Definition() tool.Definition { return d.definition }
 
-func (d *governedAgentTool) Execute(ctx context.Context, call tool.Call, sink tool.UpdateSink) (tool.Result, error) {
-	prepared, err := d.Prepare(ctx, call, sink)
+func (d *governedAgentTool) PolicyForCall(call tool.Call) agentruntime.ToolPolicy {
+	descriptor, err := agentservice.DescribeTool(d.driver)
 	if err != nil {
-		return prepared.Result, err
+		return agentruntime.ToolPolicy{
+			Effect: agentruntime.ToolEffectExternalSideEffect, RequiresApproval: true,
+			RequiresActionTask: true, RiskLevel: "high",
+		}
 	}
-	if prepared.Complete {
-		return prepared.Result, nil
-	}
-	return prepared.Execute(ctx)
+	return descriptor.PolicyForCall(call)
 }
 
-func (d *governedAgentTool) Prepare(ctx context.Context, call tool.Call, sink tool.UpdateSink) (tool.PreparedExecution, error) {
-	ctx = tool.WithCaller(ctx, tool.CallerInfo{
-		SessionID: d.sessionID,
-		TeamRunID: firstNonempty(d.streamRunID, d.run.RunID),
-		AgentID:   firstNonempty(d.agentID, "main"),
-		TaskID:    d.parentToolCallID,
-	})
+func (d *governedAgentTool) Execute(ctx context.Context, call tool.Call, sink tool.UpdateSink) (tool.Result, error) {
+	ctx = d.invocationContext(ctx)
 	updates := func(update tool.Update) error {
-		if d.update != nil {
+		if d.approvalGate == nil && d.update != nil {
 			d.update(update)
 		}
-		if d.host != nil {
+		if d.approvalGate == nil && d.host != nil {
 			runID := firstNonempty(d.streamRunID, d.run.RunID)
+			state := string(update.Kind)
+			if update.Kind == tool.UpdateProgress && update.Message == "running" {
+				state = "running"
+			}
 			if !d.host.EmitEvent(ctx, Event{
 				Kind: EventToolUpdate, SessionID: d.sessionID, RunID: runID, AgentID: d.agentID,
-				ToolCallID: call.ID, State: update.Kind, Text: update.Message,
+				ToolCallID: call.ID, State: state, Text: update.Message,
 				Data: childFrameData("child:"+d.agentID, d.parentToolCallID, update.Data),
 			}) {
 				return eventDeliveryError(ctx)
@@ -95,64 +213,72 @@ func (d *governedAgentTool) Prepare(ctx context.Context, call tool.Call, sink to
 		}
 		return nil
 	}
-	policyDriver := d.driver
-	if hooks.PreToolPermissionFromContext(ctx) == "ask" && d.driver != nil {
-		policyDriver = approvalRequiredDriver{inner: d.driver}
-	}
-	execution, ready, err := d.coding.PrepareDriver(ctx, d.run, policyDriver, call)
-	if err != nil {
-		return tool.PreparedExecution{Call: call, Result: execution.Result}, errors.Join(tool.ErrNotExecuted, err)
+	var execution agentservice.ExecutionResult
+	var ready bool
+	var err error
+	if d.approvalGate != nil {
+		var found bool
+		prepared, ok := d.approvalGate.take(call)
+		if ok {
+			execution, ready, found = prepared.result, prepared.ready, true
+		}
+		if !found {
+			return tool.Result{
+				ToolCallID: call.ID, Name: call.Name, Content: "tool governance was not prepared", IsError: true,
+			}, errors.Join(tool.ErrNotExecuted, errors.New("approval hook did not prepare the operation"))
+		}
+	} else {
+		policyDriver := d.driver
+		if hooks.PreToolPermissionFromContext(ctx) == "ask" && d.driver != nil {
+			policyDriver = approvalRequiredDriver{inner: d.driver}
+		}
+		execution, ready, err = d.coding.PrepareDriver(ctx, d.run, policyDriver, call)
+		if err != nil {
+			return execution.Result, errors.Join(tool.ErrNotExecuted, err)
+		}
+		if !ready && execution.Approval != nil {
+			if d.host == nil {
+				return tool.Result{
+					ToolCallID: call.ID, Name: call.Name, Content: "approval UI is unavailable", IsError: true,
+				}, nil
+			}
+			resolution, approvalErr := d.host.AwaitApproval(ctx, d.sessionID, d.agentID, d.agentType, d.run, call, *execution.Approval)
+			if approvalErr != nil {
+				return tool.Result{
+					ToolCallID: call.ID, Name: call.Name, Content: approvalErr.Error(), IsError: true,
+				}, errors.Join(tool.ErrNotExecuted, approvalErr)
+			}
+			if resolution.Mode == agentservice.ApprovalDenied {
+				if resolution.Prevent {
+					return tool.Result{
+						ToolCallID: call.ID, Name: call.Name, IsError: true, Content: "Hook prevented continuation",
+					}, errors.Join(tool.ErrNotExecuted, hooks.ErrPreventContinuation)
+				}
+				text := firstNonempty(resolution.DenialMessage, "Denied by user")
+				if resolution.Retry {
+					text += " PermissionDenied hook permits retrying this tool request."
+				}
+				return tool.Result{ToolCallID: call.ID, Name: call.Name, Content: text, IsError: true}, nil
+			}
+			execution, ready, err = d.coding.PrepareDriver(ctx, d.run, d.driver, call)
+			if err != nil {
+				return execution.Result, errors.Join(tool.ErrNotExecuted, err)
+			}
+			if !ready && execution.Approval != nil {
+				return tool.Result{}, errors.Join(tool.ErrNotExecuted, errors.New("approval remained pending after resolution"))
+			}
+		}
 	}
 	if !ready {
-		if execution.Approval == nil {
-			return tool.PreparedExecution{Call: call, Result: execution.Result, Complete: true}, nil
-		}
-		if d.host == nil {
-			return tool.PreparedExecution{Call: call, Result: tool.Result{
-				ToolCallID: call.ID, Name: call.Name, Content: "approval UI is unavailable", IsError: true,
-			}, Complete: true}, nil
-		}
-		resolution, approvalErr := d.host.AwaitApproval(ctx, d.sessionID, d.agentID, d.agentType, d.run, call, *execution.Approval)
-		if approvalErr != nil {
-			result := tool.Result{ToolCallID: call.ID, Name: call.Name, Content: approvalErr.Error(), IsError: true}
-			return tool.PreparedExecution{Call: call, Result: result}, errors.Join(tool.ErrNotExecuted, approvalErr)
-		}
-		if resolution.Mode == agentservice.ApprovalDenied {
-			if resolution.Prevent {
-				result := tool.Result{ToolCallID: call.ID, Name: call.Name, IsError: true, Content: "Hook prevented continuation"}
-				return tool.PreparedExecution{Call: call, Result: result}, errors.Join(tool.ErrNotExecuted, hooks.ErrPreventContinuation)
-			}
-			message := firstNonempty(resolution.DenialMessage, "Denied by user")
-			if resolution.Retry {
-				message += " PermissionDenied hook permits retrying this tool request."
-			}
-			return tool.PreparedExecution{Call: call, Result: tool.Result{
-				ToolCallID: call.ID, Name: call.Name, Content: message, IsError: true,
-			}, Complete: true}, nil
-		}
-		execution, ready, err = d.coding.PrepareDriver(ctx, d.run, d.driver, call)
-		if err != nil {
-			return tool.PreparedExecution{Call: call, Result: execution.Result}, errors.Join(tool.ErrNotExecuted, err)
-		}
-		if !ready {
-			if execution.Approval != nil {
-				return tool.PreparedExecution{Call: call}, errors.Join(tool.ErrNotExecuted, errors.New("approval remained pending after resolution"))
-			}
-			return tool.PreparedExecution{Call: call, Result: execution.Result, Complete: true}, nil
-		}
+		return execution.Result, nil
 	}
-	return tool.PreparedExecution{
-		Call: call,
-		Execute: func(runCtx context.Context) (tool.Result, error) {
-			if updateErr := updates(tool.Update{Kind: "running"}); updateErr != nil {
-				return tool.Result{
-					ToolCallID: call.ID, Name: call.Name, Content: updateErr.Error(), IsError: true,
-				}, updateErr
-			}
-			executed, executeErr := d.coding.ExecutePreparedDriver(runCtx, d.run, d.driver, call, updates)
-			return spillAgentToolResult(runCtx, d.spillStore(), d.sessionID, firstNonempty(d.streamRunID, d.run.RunID), executed.Result), executeErr
-		},
-	}, nil
+	if updateErr := updates(tool.Update{Kind: tool.UpdateProgress, Message: "running"}); updateErr != nil {
+		return tool.Result{
+			ToolCallID: call.ID, Name: call.Name, Content: updateErr.Error(), IsError: true,
+		}, updateErr
+	}
+	executed, executeErr := d.coding.ExecutePreparedDriver(ctx, d.run, d.driver, call, updates)
+	return spillAgentToolResult(ctx, d.spillStore(), d.sessionID, firstNonempty(d.streamRunID, d.run.RunID), executed.Result), executeErr
 }
 
 // spillStore returns the durable artifact store used to spill oversized tool
@@ -208,9 +334,9 @@ func durableApprovalKey(call tool.Call) string {
 	return firstNonempty(call.OperationID, call.ID)
 }
 
-func teamApprovalReviewRequest(goal, runID string, call tool.Call, definition tool.Definition) approvalReviewRequest {
+func teamApprovalReviewRequest(goal, runID string, call tool.Call, policy agentruntime.ToolPolicy) approvalReviewRequest {
 	target := teamToolTarget(call)
-	risk := firstNonempty(definition.RiskLevel, definition.Security.RiskLevel, "medium")
+	risk := firstNonempty(policy.RiskLevel, "medium")
 	if call.Name == agentservice.ToolShell {
 		var input struct {
 			Command string `json:"command"`
@@ -221,7 +347,7 @@ func teamApprovalReviewRequest(goal, runID string, call tool.Call, definition to
 	}
 	return approvalReviewRequest{
 		Goal: goal, AgentID: runID, AgentType: "team", ToolName: call.Name, Arguments: call.Arguments,
-		Target: target, Effect: string(definition.EffectType), Risk: risk,
+		Target: target, Effect: string(policy.Effect), Risk: risk,
 		RequestedAction: call.Name + " · " + target, RequestedReason: "team agent requested a governed tool action",
 	}
 }
@@ -331,6 +457,7 @@ func (e *AutoReviewDenialLimitError) Error() string {
 
 type teamApprovalDriver struct {
 	inner     tool.Driver
+	coding    *agentservice.Service
 	host      providerHost
 	sessionID string
 	runID     string
@@ -340,11 +467,19 @@ type teamApprovalDriver struct {
 
 type approvalRequiredDriver struct{ inner tool.Driver }
 
-func (d approvalRequiredDriver) Definition() tool.Definition {
-	definition := d.inner.Definition()
-	definition.RequiresApproval = true
-	definition.Security.RequiresApproval = true
-	return definition
+func (d approvalRequiredDriver) Definition() tool.Definition { return d.inner.Definition() }
+
+func (d approvalRequiredDriver) PolicyForCall(call tool.Call) agentruntime.ToolPolicy {
+	descriptor, err := agentservice.DescribeTool(d.inner)
+	if err != nil {
+		return agentruntime.ToolPolicy{
+			Effect: agentruntime.ToolEffectExternalSideEffect, RequiresApproval: true,
+			RequiresActionTask: true, RiskLevel: "high",
+		}
+	}
+	policy := descriptor.PolicyForCall(call)
+	policy.RequiresApproval = true
+	return policy
 }
 
 func (d approvalRequiredDriver) Execute(ctx context.Context, call tool.Call, sink tool.UpdateSink) (tool.Result, error) {
@@ -353,53 +488,49 @@ func (d approvalRequiredDriver) Execute(ctx context.Context, call tool.Call, sin
 
 func (d *teamApprovalDriver) Definition() tool.Definition { return d.inner.Definition() }
 
-func (d *teamApprovalDriver) Execute(ctx context.Context, call tool.Call, sink tool.UpdateSink) (tool.Result, error) {
-	prepared, err := d.Prepare(ctx, call, sink)
+func (d *teamApprovalDriver) PolicyForCall(call tool.Call) agentruntime.ToolPolicy {
+	descriptor, err := agentservice.DescribeTool(d.inner)
 	if err != nil {
-		return prepared.Result, err
+		return agentruntime.ToolPolicy{
+			Effect: agentruntime.ToolEffectExternalSideEffect, RequiresApproval: true,
+			RequiresActionTask: true, RiskLevel: "high",
+		}
 	}
-	if prepared.Complete {
-		return prepared.Result, nil
-	}
-	return prepared.Execute(ctx)
+	return descriptor.PolicyForCall(call)
 }
 
-func (d *teamApprovalDriver) Prepare(ctx context.Context, call tool.Call, sink tool.UpdateSink) (tool.PreparedExecution, error) {
-	definition := d.inner.Definition()
-	if blocked, required := d.recovery.BlockedEdit(call); required {
-		return tool.PreparedExecution{Call: call, Result: blocked, Complete: true}, nil
+func (d *teamApprovalDriver) Execute(ctx context.Context, call tool.Call, sink tool.UpdateSink) (tool.Result, error) {
+	descriptor, err := agentservice.DescribeTool(d.inner)
+	if err != nil {
+		return tool.Result{}, errors.Join(tool.ErrNotExecuted, err)
 	}
-	if hooks.PreToolPermissionFromContext(ctx) == "ask" || teamToolRequiresApproval(definition, call) {
-		resolution, err := d.host.AwaitTeamApproval(ctx, d.sessionID, d.runID, d.goal, call, definition)
-		if err != nil {
-			result := tool.Result{ToolCallID: call.ID, Name: call.Name, Content: err.Error(), IsError: true}
-			return tool.PreparedExecution{Call: call, Result: result}, errors.Join(tool.ErrNotExecuted, err)
+	policy := descriptor.PolicyForCall(call)
+	if blocked, required := d.recovery.BlockedEdit(call); required {
+		return blocked, nil
+	}
+	if hooks.PreToolPermissionFromContext(ctx) == "ask" || teamToolRequiresApproval(policy, call) {
+		resolution, approvalErr := d.host.AwaitTeamApproval(ctx, d.sessionID, d.runID, d.goal, call, policy)
+		if approvalErr != nil {
+			return tool.Result{
+				ToolCallID: call.ID, Name: call.Name, Content: approvalErr.Error(), IsError: true,
+			}, errors.Join(tool.ErrNotExecuted, approvalErr)
 		}
 		if resolution.Mode == agentservice.ApprovalDenied {
 			if resolution.Prevent {
-				result := tool.Result{ToolCallID: call.ID, Name: call.Name, IsError: true, Content: "Hook prevented continuation"}
-				return tool.PreparedExecution{Call: call, Result: result}, errors.Join(tool.ErrNotExecuted, hooks.ErrPreventContinuation)
+				return tool.Result{
+					ToolCallID: call.ID, Name: call.Name, IsError: true, Content: "Hook prevented continuation",
+				}, errors.Join(tool.ErrNotExecuted, hooks.ErrPreventContinuation)
 			}
 			message := firstNonempty(resolution.DenialMessage, "Denied by user")
 			if resolution.Retry {
 				message += " PermissionDenied hook permits retrying this tool request."
 			}
-			return tool.PreparedExecution{Call: call, Result: tool.Result{
-				ToolCallID: call.ID, Name: call.Name, Content: message, IsError: true,
-			}, Complete: true}, nil
+			return tool.Result{ToolCallID: call.ID, Name: call.Name, Content: message, IsError: true}, nil
 		}
 	}
-	if preparing, ok := d.inner.(tool.PreparingDriver); ok {
-		return preparing.Prepare(ctx, call, sink)
-	}
-	return tool.PreparedExecution{
-		Call: call,
-		Execute: func(runCtx context.Context) (tool.Result, error) {
-			result, err := d.inner.Execute(runCtx, call, sink)
-			d.recovery.Observe(call, result, err)
-			return result, err
-		},
-	}, nil
+	result, executeErr := d.coding.ExecutePolicyCall(ctx, d.inner, call, sink)
+	d.recovery.Observe(call, result, executeErr)
+	return result, executeErr
 }
 
 func (s *Service) teamToolBus(ctx context.Context, sessionID, runID, goal string, recovery *agentservice.EditRecovery) (*tool.Bus, error) {
@@ -415,22 +546,23 @@ func (s *Service) teamToolBus(ctx context.Context, sessionID, runID, goal string
 	}
 	governed := make([]tool.Driver, 0, len(drivers))
 	for _, driver := range drivers {
-		approval := &teamApprovalDriver{inner: driver, host: s, sessionID: sessionID, runID: runID, goal: goal, recovery: recovery}
+		approval := &teamApprovalDriver{inner: driver, coding: s.coding, host: s, sessionID: sessionID, runID: runID, goal: goal, recovery: recovery}
 		metadata := hooks.Metadata{SessionID: sessionID, RunID: runID, AgentID: "team", AgentType: "team", CWD: s.cfg.Workspace.Root}
 		governed = append(governed, hooks.WrapDriver(s.hooks, metadata, approval))
 	}
 	return tool.NewBus(governed...), nil
 }
 
-func teamToolHasSideEffect(definition tool.Definition) bool {
-	return definition.RequiresActionTask || definition.EffectType == tool.EffectWrite || definition.EffectType == tool.EffectExternalSideEffect
+func teamToolHasSideEffect(policy agentruntime.ToolPolicy) bool {
+	return policy.RequiresActionTask ||
+		policy.Effect == agentruntime.ToolEffectWrite || policy.Effect == agentruntime.ToolEffectExternalSideEffect
 }
 
-func teamToolRequiresApproval(definition tool.Definition, call tool.Call) bool {
-	required := definition.RequiresApproval || definition.Security.RequiresApproval || definition.RequiresActionTask ||
-		definition.EffectType == tool.EffectWrite || definition.EffectType == tool.EffectExternalSideEffect
-	if definition.Metadata["approval"] == "allow" {
-		required = definition.Metadata["network"] == "prompt" && toolArgumentsRequestNetwork(call.Arguments)
+func teamToolRequiresApproval(policy agentruntime.ToolPolicy, call tool.Call) bool {
+	required := policy.RequiresApproval || policy.RequiresActionTask ||
+		policy.Effect == agentruntime.ToolEffectWrite || policy.Effect == agentruntime.ToolEffectExternalSideEffect
+	if policy.Metadata["approval"] == "allow" {
+		required = policy.Metadata["network"] == "prompt" && toolArgumentsRequestNetwork(call.Arguments)
 	}
 	return required
 }
@@ -454,11 +586,11 @@ func teamToolTarget(call tool.Call) string {
 	return "workspace"
 }
 
-func teamToolFingerprint(definition tool.Definition, call tool.Call) string {
-	return call.Name + "\x00" + string(definition.EffectType) + "\x00" + teamToolTarget(call)
+func teamToolFingerprint(policy agentruntime.ToolPolicy, call tool.Call) string {
+	return call.Name + "\x00" + string(policy.Effect) + "\x00" + teamToolTarget(call)
 }
 
-func (s *Service) awaitTeamApproval(ctx context.Context, sessionID, runID, goal string, call tool.Call, definition tool.Definition) (approvalResolution, error) {
+func (s *Service) awaitTeamApproval(ctx context.Context, sessionID, runID, goal string, call tool.Call, policy agentruntime.ToolPolicy) (approvalResolution, error) {
 	if strings.TrimSpace(call.ID) == "" {
 		return approvalResolution{}, fmt.Errorf("team tool %q requires a call ID for approval", call.Name)
 	}
@@ -466,8 +598,8 @@ func (s *Service) awaitTeamApproval(ctx context.Context, sessionID, runID, goal 
 	if err != nil {
 		return approvalResolution{}, err
 	}
-	request := teamApprovalReviewRequest(goal, runID, call, definition)
-	fingerprint := teamToolFingerprint(definition, call)
+	request := teamApprovalReviewRequest(goal, runID, call, policy)
+	fingerprint := teamToolFingerprint(policy, call)
 	target := request.Target
 	action := request.RequestedAction
 	event := Event{
@@ -552,6 +684,10 @@ func (s *Service) bindProviderEngine(engine hyagent.Engine) hyagent.Engine {
 	if engine.Tools == nil {
 		return engine
 	}
+	gate := &approvalGate{
+		tools:    make(map[string]*governedAgentTool),
+		prepared: make(map[string]preparedGovernedCall),
+	}
 	bound := make([]tool.Driver, 0)
 	for _, definition := range engine.Tools.Definitions() {
 		driver, ok := engine.Tools.Driver(definition.Name)
@@ -561,19 +697,36 @@ func (s *Service) bindProviderEngine(engine hyagent.Engine) hyagent.Engine {
 		if governed, ok := driver.(*governedAgentTool); ok {
 			clone := *governed
 			clone.host = s
+			clone.approvalGate = gate
+			gate.tools[definition.Name] = &clone
 			bound = append(bound, &clone)
 		} else {
 			bound = append(bound, driver)
 		}
 	}
 	engine.Tools = tool.NewBus(bound...)
+	if len(gate.tools) > 0 {
+		engine.Hooks = engine.Hooks.Prepend(gate)
+	}
 	return engine
 }
 
 func (s *Service) awaitApproval(ctx context.Context, sessionID, agentID, agentType string, run *agentservice.Run, call tool.Call, pending agentservice.PendingApproval) (approvalResolution, error) {
-	approvalID, err := randomID("approval")
-	if err != nil {
-		return approvalResolution{}, err
+	return s.awaitApprovalMode(ctx, sessionID, agentID, agentType, run, call, pending, false)
+}
+
+func (s *Service) awaitSuspendableApproval(ctx context.Context, sessionID, agentID, agentType string, run *agentservice.Run, call tool.Call, pending agentservice.PendingApproval) (approvalResolution, error) {
+	return s.awaitApprovalMode(ctx, sessionID, agentID, agentType, run, call, pending, true)
+}
+
+func (s *Service) awaitApprovalMode(ctx context.Context, sessionID, agentID, agentType string, run *agentservice.Run, call tool.Call, pending agentservice.PendingApproval, suspendable bool) (approvalResolution, error) {
+	approvalID := strings.TrimSpace(pending.Request.ApprovalID)
+	if approvalID == "" {
+		var err error
+		approvalID, err = randomID("approval")
+		if err != nil {
+			return approvalResolution{}, err
+		}
 	}
 	request := runApprovalReviewRequest(run, agentID, agentType, call, pending)
 	event := Event{
@@ -632,16 +785,26 @@ func (s *Service) awaitApproval(ctx context.Context, sessionID, agentID, agentTy
 	}
 	live := &liveApproval{
 		approvalID: approvalID, agentID: agentID, agentType: agentType, run: run, runID: run.RunID,
-		callID: durableApprovalKey(call), sessionID: sessionID, decision: make(chan agentservice.ApprovalMode, 1),
+		callID: call.ID, operationID: durableApprovalKey(call), sessionID: sessionID, pending: pending,
+		decision: make(chan agentservice.ApprovalMode, 1), suspension: make(chan error, 1), suspendable: suspendable,
 	}
 	s.mu.Lock()
 	if _, exists := s.liveApprovals[approvalID]; exists {
 		s.mu.Unlock()
 		return approvalResolution{}, fmt.Errorf("approval ID collision")
 	}
+	if s.shuttingDown {
+		s.mu.Unlock()
+		return approvalResolution{}, context.Canceled
+	}
 	s.liveApprovals[approvalID] = live
 	s.mu.Unlock()
-	defer s.finishLiveApproval(live)
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			s.finishLiveApproval(live)
+		}
+	}()
 	if !s.emit(ctx, Event{
 		Kind: EventToolUpdate, SessionID: sessionID, RunID: run.RunID, AgentID: agentID,
 		ToolCallID: call.ID, State: "awaiting_approval",
@@ -653,9 +816,25 @@ func (s *Service) awaitApproval(ctx context.Context, sessionID, agentID, agentTy
 	if !s.emit(ctx, event) {
 		return approvalResolution{}, eventDeliveryError(ctx)
 	}
+	if suspendable {
+		s.mu.Lock()
+		if s.shuttingDown {
+			s.mu.Unlock()
+			return approvalResolution{}, context.Canceled
+		}
+		s.wg.Add(1)
+		s.mu.Unlock()
+		go func() {
+			defer s.wg.Done()
+			live.suspension <- s.coding.SuspendRun(s.ctx, run)
+		}()
+		handedOff = true
+		<-ctx.Done()
+		return approvalResolution{}, context.Cause(ctx)
+	}
 	select {
 	case <-ctx.Done():
-		return approvalResolution{}, ctx.Err()
+		return approvalResolution{}, context.Cause(ctx)
 	case resolvedMode := <-live.decision:
 		if resolvedMode == agentservice.ApprovalDenied {
 			retry, prevent := s.observePermissionDenied(ctx, metadata, call, "Denied by user", false)
@@ -679,8 +858,8 @@ func (s *Service) recordTeamApprovalDecision(
 	if mode == agentservice.ApprovalOnce || mode == agentservice.ApprovalSession {
 		decision = "approved"
 	}
-	return s.coding.Runner().AppendEvent(ctx, api.Event{
-		RunID: event.RunID, Type: api.EventApprovalDecided, RecordedAt: time.Now().UTC(),
+	return s.coding.AppendEvent(ctx, agentruntime.Event{
+		RunID: event.RunID, Type: agentruntime.EventApprovalDecided, RecordedAt: time.Now().UTC(),
 		Payload: map[string]any{
 			"approvalId": event.ApprovalID, "actionId": event.ToolCallID,
 			"decidedBy": decidedBy, "decision": decision, "reason": request.RequestedReason,
@@ -691,7 +870,7 @@ func (s *Service) recordTeamApprovalDecision(
 
 func toolStartsWithoutApproval(toolName string) bool {
 	switch toolName {
-	case coding.ToolReadFile, coding.ToolListFiles, coding.ToolSearch, coding.ToolGitDiff:
+	case agentservice.ToolReadFile, agentservice.ToolListFiles, agentservice.ToolSearch, agentservice.ToolGitDiff:
 		return true
 	default:
 		return false
@@ -1142,9 +1321,12 @@ func (s *Service) resolveLiveApproval(ctx context.Context, approvalID, decision,
 	}
 	live.resolving = true
 	s.mu.Unlock()
+	if live.suspendable {
+		return s.resolveSuspendedLiveApproval(ctx, live, decision, decidedBy, mode)
+	}
 
 	if live.run != nil {
-		if err := s.coding.ResolveApproval(ctx, live.run, live.callID, mode, decidedBy); err != nil {
+		if err := s.coding.ResolveApproval(ctx, live.run, live.operationID, mode, decidedBy); err != nil {
 			s.mu.Lock()
 			if current := s.liveApprovals[approvalID]; current == live {
 				live.resolving = false
@@ -1187,6 +1369,68 @@ func (s *Service) resolveLiveApproval(ctx context.Context, approvalID, decision,
 		s.providers.AutoWakePending(live.sessionID)
 	}
 	return true, nil
+}
+
+func (s *Service) resolveSuspendedLiveApproval(
+	ctx context.Context,
+	live *liveApproval,
+	decision string,
+	decidedBy string,
+	mode agentservice.ApprovalMode,
+) (bool, error) {
+	select {
+	case err := <-live.suspension:
+		if err != nil {
+			s.resetLiveApprovalResolution(live)
+			return true, err
+		}
+	case <-ctx.Done():
+		s.resetLiveApprovalResolution(live)
+		return true, context.Cause(ctx)
+	}
+	if s.coding == nil {
+		s.resetLiveApprovalResolution(live)
+		return true, fmt.Errorf("coding runtime is unavailable")
+	}
+	if err := s.coding.ResolveRecoveredApproval(
+		ctx, live.pending.Request, live.pending.Token.TokenID, decision,
+	); err != nil {
+		s.resetLiveApprovalResolution(live)
+		return true, err
+	}
+	s.mu.Lock()
+	if current := s.liveApprovals[live.approvalID]; current != live {
+		s.mu.Unlock()
+		return true, fmt.Errorf("approval %q is no longer pending", live.approvalID)
+	}
+	live.resolving = false
+	live.resolved = true
+	delete(s.liveApprovals, live.approvalID)
+	s.mu.Unlock()
+	s.emit(ctx, Event{
+		Kind: EventApprovalResolved, SessionID: live.sessionID, RunID: live.runID, AgentID: live.agentID,
+		ToolCallID: live.callID, ApprovalID: live.approvalID, State: decision, Data: map[string]string{"decided_by": decidedBy},
+	})
+	if s.providers == nil {
+		return true, fmt.Errorf("provider runtime is unavailable")
+	}
+	if err := s.providers.ResumeRecoveredRunAtOperation(ctx, live.runID, live.operationID); err != nil {
+		return true, err
+	}
+	if mode == agentservice.ApprovalDenied {
+		s.notifyHook(ctx, hooks.Metadata{
+			SessionID: live.sessionID, RunID: live.runID, AgentID: live.agentID, AgentType: live.agentType, CWD: s.cfg.Workspace.Root,
+		}, "permission_denied", "Approval denied", live.pending.Request.RequestedAction)
+	}
+	return true, nil
+}
+
+func (s *Service) resetLiveApprovalResolution(live *liveApproval) {
+	s.mu.Lock()
+	if current := s.liveApprovals[live.approvalID]; current == live {
+		live.resolving = false
+	}
+	s.mu.Unlock()
 }
 
 func approvalDecisionMode(decision string) (agentservice.ApprovalMode, error) {

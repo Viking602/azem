@@ -14,11 +14,11 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/venat/message"
 	"github.com/Viking602/venat/tool"
-	"github.com/Viking602/venat/tool/kit"
-	mcpclient "github.com/Viking602/venat/transport/mcp/client"
-	"github.com/Viking602/venat/transport/mcpcontract"
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
+	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/Viking602/azem/internal/config"
 )
@@ -87,10 +87,10 @@ type ResourceTemplateSnapshot struct {
 }
 
 type PromptSnapshot struct {
-	Server      string                       `json:"server"`
-	Name        string                       `json:"name"`
-	Description string                       `json:"description,omitempty"`
-	Arguments   []mcpcontract.PromptArgument `json:"arguments,omitempty"`
+	Server      string           `json:"server"`
+	Name        string           `json:"name"`
+	Description string           `json:"description,omitempty"`
+	Arguments   []PromptArgument `json:"arguments,omitempty"`
 }
 
 type ToolSnapshot struct {
@@ -114,7 +114,7 @@ type ServerSnapshot struct {
 
 type (
 	SecretResolver func(context.Context, string) (string, error)
-	DialFunc       func(context.Context, string, config.MCPServerConfig, map[string]string, http.Header) (mcpcontract.Client, error)
+	DialFunc       func(context.Context, string, config.MCPServerConfig, map[string]string, http.Header) (Client, error)
 	SleepFunc      func(context.Context, time.Duration) error
 )
 
@@ -122,7 +122,7 @@ type Options struct {
 	Dial         DialFunc
 	Sleep        SleepFunc
 	Sink         func(Event)
-	Elicitation  func(context.Context, string, mcpcontract.Elicitation) (mcpcontract.ElicitationResult, error)
+	Elicitation  func(context.Context, string, Elicitation) (ElicitationResult, error)
 	Notification func(Notification)
 	OAuth        *OAuthBroker
 }
@@ -144,7 +144,7 @@ type Manager struct {
 }
 
 type connectionAttempt struct {
-	client mcpcontract.Client
+	client Client
 	cancel context.CancelFunc
 	ready  chan struct{}
 	once   sync.Once
@@ -152,7 +152,7 @@ type connectionAttempt struct {
 	err    error
 }
 
-func newConnectionAttempt(client mcpcontract.Client) *connectionAttempt {
+func newConnectionAttempt(client Client) *connectionAttempt {
 	ready := make(chan struct{})
 	close(ready)
 	return &connectionAttempt{client: client, ready: ready, done: make(chan struct{})}
@@ -162,7 +162,7 @@ func newDialAttempt(cancel context.CancelFunc) *connectionAttempt {
 	return &connectionAttempt{cancel: cancel, ready: make(chan struct{}), done: make(chan struct{})}
 }
 
-func (a *connectionAttempt) finishDial(client mcpcontract.Client) {
+func (a *connectionAttempt) finishDial(client Client) {
 	if isNilMCPClient(client) {
 		client = nil
 	}
@@ -213,7 +213,7 @@ func (a *connectionAttempt) waitClosed(ctx context.Context) error {
 
 type server struct {
 	state       State
-	client      mcpcontract.Client
+	client      Client
 	connection  *connectionAttempt
 	tools       []tool.Driver
 	diagnostics []Diagnostic
@@ -244,8 +244,8 @@ func NewManager(servers map[string]config.MCPServerConfig, version string, resol
 	if options.Dial != nil {
 		manager.dial = options.Dial
 	} else {
-		manager.dial = func(ctx context.Context, name string, serverConfig config.MCPServerConfig, environment map[string]string, headers http.Header) (mcpcontract.Client, error) {
-			return defaultDial(ctx, name, serverConfig, environment, headers, options.Elicitation, func(handlerCtx context.Context, notification mcpcontract.Notification) {
+		manager.dial = func(ctx context.Context, name string, serverConfig config.MCPServerConfig, environment map[string]string, headers http.Header) (Client, error) {
+			return defaultDial(ctx, name, serverConfig, environment, headers, options.Elicitation, func(handlerCtx context.Context, notification ProtocolNotification) {
 				manager.handleNotification(handlerCtx, name, notification)
 			})
 		}
@@ -439,7 +439,7 @@ func (m *Manager) Refresh(ctx context.Context, name string) error {
 		return ErrManagerClosed
 	}
 	current := m.servers[name]
-	var client mcpcontract.Client
+	var client Client
 	var connection *connectionAttempt
 	if current != nil {
 		client = current.client
@@ -549,7 +549,7 @@ func (m *Manager) Prompts(serverName string) []PromptSnapshot {
 	return result
 }
 
-func (m *Manager) ReadResource(ctx context.Context, serverName, uri string) ([]mcpcontract.ResourceContent, error) {
+func (m *Manager) ReadResource(ctx context.Context, serverName, uri string) ([]ResourceContent, error) {
 	client, serverConfig, err := m.featureClient(serverName)
 	if err != nil {
 		return nil, err
@@ -570,7 +570,7 @@ func (m *Manager) ReadResource(ctx context.Context, serverName, uri string) ([]m
 	return content, nil
 }
 
-func (m *Manager) GetPrompt(ctx context.Context, serverName, name string, arguments map[string]string) ([]mcpcontract.PromptMessage, error) {
+func (m *Manager) GetPrompt(ctx context.Context, serverName, name string, arguments map[string]string) ([]PromptMessage, error) {
 	client, serverConfig, err := m.featureClient(serverName)
 	if err != nil {
 		return nil, err
@@ -596,7 +596,7 @@ func (m *Manager) SubscribeResource(ctx context.Context, serverName, uri string)
 	if err != nil {
 		return err
 	}
-	subscriber, ok := client.(mcpcontract.SubscriptionClient)
+	subscriber, ok := client.(SubscriptionClient)
 	if !ok {
 		return fmt.Errorf("MCP server %q client does not support resource subscriptions", serverName)
 	}
@@ -610,7 +610,7 @@ func (m *Manager) UnsubscribeResource(ctx context.Context, serverName, uri strin
 	if err != nil {
 		return err
 	}
-	subscriber, ok := client.(mcpcontract.SubscriptionClient)
+	subscriber, ok := client.(SubscriptionClient)
 	if !ok {
 		return fmt.Errorf("MCP server %q client does not support resource subscriptions", serverName)
 	}
@@ -619,11 +619,11 @@ func (m *Manager) UnsubscribeResource(ctx context.Context, serverName, uri strin
 	return subscriber.UnsubscribeResource(callCtx, uri)
 }
 
-func (m *Manager) featureClient(serverName string) (mcpcontract.Client, config.MCPServerConfig, error) {
+func (m *Manager) featureClient(serverName string) (Client, config.MCPServerConfig, error) {
 	serverName = strings.TrimSpace(serverName)
 	m.mu.RLock()
 	current := m.servers[serverName]
-	client := mcpcontract.Client(nil)
+	client := Client(nil)
 	if current != nil {
 		client = current.client
 	}
@@ -667,10 +667,18 @@ func (m *Manager) Servers() []ServerSnapshot {
 		tools := make([]ToolSnapshot, 0, len(current.tools))
 		for _, driver := range current.tools {
 			definition := driver.Definition()
+			policy := agentruntime.ToolPolicy{
+				Effect: agentruntime.ToolEffectExternalSideEffect, RequiresApproval: true,
+			}
+			if provider, ok := driver.(interface {
+				ToolPolicy() agentruntime.ToolPolicy
+			}); ok {
+				policy = provider.ToolPolicy()
+			}
 			toolName := strings.TrimPrefix(definition.Name, "mcp__"+name+"__")
 			tools = append(tools, ToolSnapshot{
-				Name: toolName, Description: definition.Description, Effect: string(definition.EffectType),
-				RequiresApproval: definition.RequiresApproval || definition.Security.RequiresApproval,
+				Name: toolName, Description: definition.Description, Effect: string(policy.Effect),
+				RequiresApproval: policy.RequiresApproval,
 			})
 		}
 		result = append(result, ServerSnapshot{
@@ -873,7 +881,7 @@ func (m *Manager) connectOnce(ctx context.Context, name string) error {
 	return nil
 }
 
-func isNilMCPClient(client mcpcontract.Client) bool {
+func isNilMCPClient(client Client) bool {
 	if client == nil {
 		return true
 	}
@@ -886,8 +894,8 @@ func isNilMCPClient(client mcpcontract.Client) bool {
 	}
 }
 
-func (m *Manager) importTools(ctx context.Context, name string, serverConfig config.MCPServerConfig, client mcpcontract.Client) ([]tool.Driver, []Diagnostic, error) {
-	imported, err := kit.ImportMCPTools(ctx, client)
+func (m *Manager) importTools(ctx context.Context, name string, serverConfig config.MCPServerConfig, client Client) ([]tool.Driver, []Diagnostic, error) {
+	imported, err := importMCPTools(ctx, client)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -912,37 +920,35 @@ func (m *Manager) importTools(ctx context.Context, name string, serverConfig con
 			continue
 		}
 		seen[visible] = true
-		override, overridden := serverConfig.ToolOverrides[original]
+		policy := agentruntime.ToolPolicy{
+			Effect: agentruntime.ToolEffectExternalSideEffect, RequiresApproval: true,
+			RequiresActionTask: true, RiskLevel: "high", Origin: "mcp:" + name,
+			Concurrency: tool.ConcurrencyParallel, ConcurrencyGroup: "mcp:" + name,
+			MaxConcurrency: max(1, serverConfig.MaxConcurrency),
+		}
 		definition.Name = visible
-		definition.Origin = "mcp:" + name
-		definition.EffectType = tool.EffectExternalSideEffect
-		definition.RequiresApproval = true
-		definition.RequiresActionTask = true
-		definition.RiskLevel = "high"
-		definition.Security.RequiresApproval = true
-		definition.Security.RiskLevel = "high"
-		definition.Idempotent = false
 		definition.Timeout = callTimeout(serverConfig)
-		if overridden {
-			definition.EffectType = tool.EffectType(override.Effect)
-			definition.RequiresApproval = override.Approval != "never"
-			definition.Security.RequiresApproval = definition.RequiresApproval
-			if definition.EffectType == tool.EffectReadOnly {
-				definition.RequiresActionTask = false
-				definition.RiskLevel = "low"
-				definition.Security.RiskLevel = "low"
+		definition.Concurrency = tool.ConcurrencyParallel
+		definition.ConcurrencyGroup = policy.ConcurrencyGroup
+		definition.MaxConcurrency = policy.MaxConcurrency
+		if override, overridden := serverConfig.ToolOverrides[original]; overridden {
+			policy.Effect = agentruntime.ToolEffectType(override.Effect)
+			policy.RequiresApproval = override.Approval != "never"
+			if policy.Effect == agentruntime.ToolEffectReadOnly {
+				policy.RequiresActionTask = false
+				policy.RiskLevel = "low"
 			}
 		}
 		drivers = append(drivers, &remoteDriver{
 			manager: m, server: name, inner: remote, original: original, definition: definition,
-			semaphore: make(chan struct{}, max(1, serverConfig.MaxConcurrency)), timeout: callTimeout(serverConfig),
+			policy: policy, semaphore: make(chan struct{}, policy.MaxConcurrency), timeout: callTimeout(serverConfig),
 		})
 	}
 	sort.Slice(drivers, func(i, j int) bool { return drivers[i].Definition().Name < drivers[j].Definition().Name })
 	return drivers, diagnostics, nil
 }
 
-func (m *Manager) importFeatures(ctx context.Context, name string, client mcpcontract.Client) ([]ResourceSnapshot, []ResourceTemplateSnapshot, []PromptSnapshot, []Diagnostic) {
+func (m *Manager) importFeatures(ctx context.Context, name string, client Client) ([]ResourceSnapshot, []ResourceTemplateSnapshot, []PromptSnapshot, []Diagnostic) {
 	var diagnostics []Diagnostic
 	var resources []ResourceSnapshot
 	listedResources, err := client.ListResources(ctx)
@@ -957,7 +963,7 @@ func (m *Manager) importFeatures(ctx context.Context, name string, client mcpcon
 		sort.Slice(resources, func(i, j int) bool { return resources[i].URI < resources[j].URI })
 	}
 	var templates []ResourceTemplateSnapshot
-	if templateClient, ok := client.(mcpcontract.ResourceTemplateClient); ok {
+	if templateClient, ok := client.(ResourceTemplateClient); ok {
 		listedTemplates, templateErr := templateClient.ListResourceTemplates(ctx)
 		if templateErr != nil {
 			diagnostics = append(diagnostics, Diagnostic{Server: name, Error: "list resource templates: " + templateErr.Error()})
@@ -979,7 +985,7 @@ func (m *Manager) importFeatures(ctx context.Context, name string, client mcpcon
 		for _, prompt := range listedPrompts {
 			prompts = append(prompts, PromptSnapshot{
 				Server: name, Name: prompt.Name, Description: prompt.Description,
-				Arguments: append([]mcpcontract.PromptArgument(nil), prompt.Arguments...),
+				Arguments: append([]PromptArgument(nil), prompt.Arguments...),
 			})
 		}
 		sort.Slice(prompts, func(i, j int) bool { return prompts[i].Name < prompts[j].Name })
@@ -1032,7 +1038,7 @@ func (m *Manager) transition(name string, state State, cause error) {
 	}
 }
 
-func (m *Manager) handleNotification(ctx context.Context, serverName string, incoming mcpcontract.Notification) {
+func (m *Manager) handleNotification(ctx context.Context, serverName string, incoming ProtocolNotification) {
 	notification := Notification{
 		Server: serverName, Kind: incoming.Kind, URI: incoming.URI, Level: incoming.Level,
 		Logger: incoming.Logger, Message: incoming.Message, ProgressToken: incoming.ProgressToken,
@@ -1107,11 +1113,14 @@ type remoteDriver struct {
 	inner      tool.Driver
 	original   string
 	definition tool.Definition
+	policy     agentruntime.ToolPolicy
 	semaphore  chan struct{}
 	timeout    time.Duration
 }
 
 func (d *remoteDriver) Definition() tool.Definition { return d.definition }
+
+func (d *remoteDriver) ToolPolicy() agentruntime.ToolPolicy { return d.policy.Clone() }
 
 func (d *remoteDriver) Execute(ctx context.Context, call tool.Call, sink tool.UpdateSink) (tool.Result, error) {
 	select {
@@ -1129,12 +1138,12 @@ func (d *remoteDriver) Execute(ctx context.Context, call tool.Call, sink tool.Up
 	if err == nil {
 		return boundMCPModelOutput(result), nil
 	}
-	var rpcErr *mcpclient.RPCError
+	var rpcErr *jsonrpc.Error
 	if errors.As(err, &rpcErr) && rpcErr.Code == mcpTransportRejectedCode {
 		return boundMCPModelOutput(tool.Result{
 			ToolCallID: call.ID,
 			Name:       d.definition.Name,
-			Content:    err.Error() + ". The MCP transport did not accept this request. The call was not replayed automatically.",
+			Content:    fmt.Sprintf("jsonrpc error %d: %s. The MCP transport did not accept this request. The call was not replayed automatically.", rpcErr.Code, rpcErr.Message),
 			IsError:    true,
 		}), nil
 	}
@@ -1181,31 +1190,75 @@ func mcpOutputEncodingError(result tool.Result) tool.Result {
 	}
 }
 
-func defaultDial(ctx context.Context, name string, serverConfig config.MCPServerConfig, environment map[string]string, headers http.Header, elicitation func(context.Context, string, mcpcontract.Elicitation) (mcpcontract.ElicitationResult, error), notification mcpcontract.NotificationHandler) (mcpcontract.Client, error) {
-	clientOptions := mcpclient.Options{}
+func defaultDial(_ context.Context, name string, serverConfig config.MCPServerConfig, environment map[string]string, headers http.Header, elicitation func(context.Context, string, Elicitation) (ElicitationResult, error), notification NotificationHandler) (Client, error) {
+	options := &sdkmcp.ClientOptions{}
 	if elicitation != nil {
-		clientOptions.ElicitationHandler = func(handlerCtx context.Context, request mcpcontract.Elicitation) (mcpcontract.ElicitationResult, error) {
-			return elicitation(handlerCtx, name, request)
+		options.ElicitationHandler = func(handlerCtx context.Context, request *sdkmcp.ElicitRequest) (*sdkmcp.ElicitResult, error) {
+			if request == nil || request.Params == nil {
+				return nil, errors.New("MCP elicitation request is empty")
+			}
+			result, err := elicitation(handlerCtx, name, Elicitation{
+				Mode: request.Params.Mode, Message: request.Params.Message, URL: request.Params.URL,
+				ElicitationID: request.Params.ElicitationID, RequestedSchema: request.Params.RequestedSchema,
+			})
+			if err != nil {
+				return nil, err
+			}
+			return &sdkmcp.ElicitResult{Action: result.Action, Content: result.Content}, nil
 		}
 	}
-	clientOptions.NotificationHandler = notification
+	if notification != nil {
+		options.ToolListChangedHandler = func(ctx context.Context, _ *sdkmcp.ToolListChangedRequest) {
+			notification(ctx, ProtocolNotification{Kind: "tools/list_changed"})
+		}
+		options.PromptListChangedHandler = func(ctx context.Context, _ *sdkmcp.PromptListChangedRequest) {
+			notification(ctx, ProtocolNotification{Kind: "prompts/list_changed"})
+		}
+		options.ResourceListChangedHandler = func(ctx context.Context, _ *sdkmcp.ResourceListChangedRequest) {
+			notification(ctx, ProtocolNotification{Kind: "resources/list_changed"})
+		}
+		options.ResourceUpdatedHandler = func(ctx context.Context, request *sdkmcp.ResourceUpdatedNotificationRequest) {
+			if request != nil && request.Params != nil {
+				notification(ctx, ProtocolNotification{Kind: "resources/updated", URI: request.Params.URI})
+			}
+		}
+		options.LoggingMessageHandler = func(ctx context.Context, request *sdkmcp.LoggingMessageRequest) {
+			if request == nil || request.Params == nil {
+				return
+			}
+			message := fmt.Sprint(request.Params.Data)
+			if raw, err := json.Marshal(request.Params.Data); err == nil {
+				message = string(raw)
+			}
+			notification(ctx, ProtocolNotification{
+				Kind: "logging/message", Level: string(request.Params.Level), Logger: request.Params.Logger,
+				Message: message, Data: request.Params.Data,
+			})
+		}
+		options.ProgressNotificationHandler = func(ctx context.Context, request *sdkmcp.ProgressNotificationClientRequest) {
+			if request != nil && request.Params != nil {
+				notification(ctx, ProtocolNotification{
+					Kind: "progress", ProgressToken: fmt.Sprint(request.Params.ProgressToken),
+					Message: request.Params.Message, Progress: request.Params.Progress, Total: request.Params.Total,
+				})
+			}
+		}
+	}
 	switch serverConfig.Transport {
 	case "stdio":
-		keys := make([]string, 0, len(environment))
-		for key := range environment {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		env := make([]string, 0, len(keys))
-		for _, key := range keys {
-			env = append(env, key+"="+environment[key])
-		}
-		return mcpclient.DialStdioWithOptions(ctx, mcpclient.StdioConfig{
-			Command: serverConfig.Command, Args: append([]string(nil), serverConfig.Args...),
-			Dir: serverConfig.CWD, Env: env, InheritEnv: serverConfig.InheritEnv,
-		}, clientOptions)
+		return newSDKClient(sdkCommandTransport(
+			serverConfig.Command, append([]string(nil), serverConfig.Args...), serverConfig.CWD,
+			environment, serverConfig.InheritEnv,
+		), options), nil
 	case "streamable_http":
-		return mcpclient.NewWithOptions(mcpclient.NewHTTPTransport(serverConfig.URL, headers), clientOptions), nil
+		base := http.DefaultTransport
+		if base == nil {
+			base = &http.Transport{}
+		}
+		client := &http.Client{Transport: headerTransport{base: base, headers: headers.Clone()}}
+		return newSDKClient(&sdkmcp.StreamableClientTransport{
+			Endpoint: serverConfig.URL, HTTPClient: client, MaxRetries: -1,
+		}, options), nil
 	default:
 		return nil, fmt.Errorf("unsupported MCP transport %q", serverConfig.Transport)
 	}

@@ -15,7 +15,7 @@ func TestSelectDeterministicChecksUsesTouchedSurfaceBeforeSemantics(t *testing.T
 	workspace := t.TempDir()
 	writeSelectorFile(t, workspace, "internal/demo/demo.go", "package demo\n")
 	writeSelectorFile(t, workspace, "internal/demo/testdata/case.json", "{}\n")
-	writeSelectorFile(t, workspace, "frontend/src/App.test.tsx", "export {}\n")
+	writeSelectorFile(t, workspace, "gpui/crates/example/src/lib.rs", "pub fn example() {}\n")
 	work, plan, err := CompileCriteria(CompileInput{
 		SessionID: "session", RunID: "run", Goal: "ship", RevisionID: "revision", SnapshotHash: "snapshot", CreatedAt: time.Unix(1, 0).UTC(),
 		UserCriteria: []CriterionInput{{ID: "behavior", Text: "behavior works", Required: true, Sources: []session.SourceRefV1{{Kind: "sequence", ID: "1"}}}, {ID: "quality", Text: "quality holds", Required: true, Sources: []session.SourceRefV1{{Kind: "sequence", ID: "1"}}}},
@@ -28,7 +28,7 @@ func TestSelectDeterministicChecksUsesTouchedSurfaceBeforeSemantics(t *testing.T
 		Touched: []TouchedFileV1{
 			{Path: "internal/demo/demo.go", Change: "modified"},
 			{Path: "internal/demo/testdata/case.json", Change: "modified"},
-			{Path: "frontend/src/App.test.tsx", Change: "modified"},
+			{Path: "gpui/crates/example/src/lib.rs", Change: "modified"},
 			{Path: "internal/demo/generated.gen.go", Change: "modified", Generated: true},
 		},
 	})
@@ -42,7 +42,7 @@ func TestSelectDeterministicChecksUsesTouchedSurfaceBeforeSemantics(t *testing.T
 			t.Fatalf("check %s has no criterion links", check.ID)
 		}
 	}
-	wantPrefix := []string{"gofmt", "go-test", "frontend-typecheck", "frontend-tests", "artifact:internal/demo/generated.gen.go"}
+	wantPrefix := []string{"gofmt", "go-test", "gpui-tests", "artifact:internal/demo/generated.gen.go"}
 	if len(ids) != len(wantPrefix)+2 || !reflect.DeepEqual(ids[:len(wantPrefix)], wantPrefix) {
 		t.Fatalf("check order = %v", ids)
 	}
@@ -53,9 +53,9 @@ func TestSelectDeterministicChecksUsesTouchedSurfaceBeforeSemantics(t *testing.T
 	if goTest.Environment["GOWORK"] != "off" || !reflect.DeepEqual(goTest.Command, []string{"go", "test", "./internal/demo"}) {
 		t.Fatalf("go test selection = %+v", goTest)
 	}
-	frontend := selected.Checks[3]
-	if frontend.CWD != "frontend" || !reflect.DeepEqual(frontend.Command, []string{"bun", "run", "test", "--", "src/App.test.tsx"}) {
-		t.Fatalf("frontend test selection = %+v", frontend)
+	gpui := selected.Checks[2]
+	if gpui.CWD != "gpui" || !reflect.DeepEqual(gpui.Command, []string{"cargo", "test", "--workspace", "--all-targets"}) {
+		t.Fatalf("GPUI test selection = %+v", gpui)
 	}
 }
 

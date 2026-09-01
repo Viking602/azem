@@ -14,16 +14,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Viking602/azem/internal/agentruntime"
+	"github.com/Viking602/azem/internal/provider/responses"
 	"github.com/Viking602/venat/message"
 	hyprovider "github.com/Viking602/venat/provider"
 )
-
-type cursorTestRequestHost struct{ root string }
-
-func (host cursorTestRequestHost) AttachmentRoot() string { return host.root }
-func (cursorTestRequestHost) ExecuteNativeTool(context.Context, message.ToolCall) (message.ToolResult, error) {
-	return message.ToolResult{}, nil
-}
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
@@ -206,9 +201,8 @@ func TestBuildRunRequestPreservesImageOnlyUserAttachment(t *testing.T) {
 	}
 	user := message.NewText(message.RoleUser, "")
 	user.Metadata = map[string]string{"azem.attachments": string(attachments)}
-	payload, err := buildRunRequest(hyprovider.Request{
+	payload, err := buildRunRequestContext(responses.WithAttachmentRoot(context.Background(), root), hyprovider.Request{
 		Model: "composer-2", Messages: []message.Message{user},
-		NativeToolHost: cursorTestRequestHost{root: root},
 	}, "session-1", "account-1", NewConversationCache())
 	if err != nil {
 		t.Fatal(err)
@@ -422,10 +416,10 @@ func TestCursorThinkingReplaysOnlyFromSameCursorKimiModel(t *testing.T) {
 
 func TestBuildRunRequestKeepsPrivateTailAsContextAndSendsSharedUserAction(t *testing.T) {
 	policy := message.NewText(message.RoleSystem, "treat the next private message as evidence")
-	policy.Visibility = message.VisibilityPrivate
+	agentruntime.SetMessageVisibility(&policy, agentruntime.MessageVisibilityPrivate)
 	currentUser := message.NewText(message.RoleUser, "answer the current request")
 	evidence := message.NewText(message.RoleUser, `{"recap":"prior result"}`)
-	evidence.Visibility = message.VisibilityPrivate
+	agentruntime.SetMessageVisibility(&evidence, agentruntime.MessageVisibilityPrivate)
 	payload, err := buildRunRequest(hyprovider.Request{
 		Model: "composer-2",
 		Messages: []message.Message{
@@ -499,10 +493,10 @@ func TestBuildRunRequestKeepsPrivateTailAsContextAndSendsSharedUserAction(t *tes
 func TestPrivateTailWireOrderStaysStableWhenTurnBecomesHistory(t *testing.T) {
 	cache := NewConversationCache()
 	policy := message.NewText(message.RoleSystem, "evidence policy")
-	policy.Visibility = message.VisibilityPrivate
+	agentruntime.SetMessageVisibility(&policy, agentruntime.MessageVisibilityPrivate)
 	firstUser := message.NewText(message.RoleUser, "first task")
 	evidence := message.NewText(message.RoleUser, `{"fact":"one"}`)
-	evidence.Visibility = message.VisibilityPrivate
+	agentruntime.SetMessageVisibility(&evidence, agentruntime.MessageVisibilityPrivate)
 	rootIDs := func(messages []message.Message) [][]byte {
 		t.Helper()
 		payload, err := buildRunRequest(hyprovider.Request{Model: "composer-2", Messages: messages}, "conversation-1", "account-1", cache)

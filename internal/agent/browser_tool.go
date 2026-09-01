@@ -81,8 +81,7 @@ func (driver *browserDriver) Definition() tool.Definition {
 				"all": {Type: "boolean"}, "kill": {Type: "boolean"},
 			},
 		},
-		EffectType: tool.EffectExternalSideEffect, RequiresApproval: true, RequiresActionTask: true, RiskLevel: "high",
-		PolicyTags: []string{"browser", "network", "execute"}, Concurrency: tool.ConcurrencyParallel,
+		Concurrency: tool.ConcurrencyParallel,
 	}
 }
 
@@ -119,7 +118,7 @@ func (driver *browserDriver) Execute(ctx context.Context, call tool.Call, _ tool
 	params := map[string]any{"action": input.Action, "name": input.Name, "timeout": input.Timeout}
 	encoded, _ := json.Marshal(input)
 	_ = json.Unmarshal(encoded, &params)
-	caller, _ := tool.CallerFromContext(ctx)
+	caller, _ := InvocationFromContext(ctx)
 	sessionID := caller.SessionID
 	if sessionID == "" {
 		sessionID = caller.TeamRunID

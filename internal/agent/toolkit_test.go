@@ -10,7 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Viking602/venat/coding"
 	"github.com/Viking602/venat/tool"
 )
 
@@ -26,7 +25,7 @@ func TestGlobFindsWorkspaceFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	args, _ := json.Marshal(map[string]string{"pattern": "*.go", "path": "internal"})
-	result, err := newGlobDriver(coding.NewLocalWorkspace(dir)).Execute(context.Background(), tool.Call{ID: "g1", Name: ToolGlob, Arguments: args}, nil)
+	result, err := newGlobDriver(NewLocalWorkspace(dir)).Execute(context.Background(), tool.Call{ID: "g1", Name: ToolGlob, Arguments: args}, nil)
 	if err != nil || result.IsError || !strings.Contains(result.Content, "internal/a.go") || strings.Contains(result.Content, "README.md") {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
@@ -65,21 +64,21 @@ func TestSearchSkipsIgnoredTreesInsteadOfTruncatingBeforeSource(t *testing.T) {
 	var search, editDriver tool.Driver
 	for _, candidate := range drivers {
 		switch candidate.Definition().Name {
-		case coding.ToolSearch:
+		case ToolSearch:
 			search = candidate
-		case coding.ToolEditHashline:
+		case ToolEditHashline:
 			editDriver = candidate
 		}
 	}
 	if search == nil || editDriver == nil {
-		t.Fatal("coding.search/edit_hashline driver unavailable")
+		t.Fatal("search/edit_hashline driver unavailable")
 	}
 	arguments := json.RawMessage(`{"query":"ReliableSearchNeedle"}`)
-	result, err := search.Execute(context.Background(), tool.Call{ID: "search", Name: coding.ToolSearch, Arguments: arguments}, nil)
+	result, err := search.Execute(context.Background(), tool.Call{ID: "search", Name: ToolSearch, Arguments: arguments}, nil)
 	if err != nil || result.IsError || !strings.Contains(result.Content, "internal/app/target.go") {
 		t.Fatalf("search result=%+v err=%v", result, err)
 	}
-	var searchResult coding.SearchToolResult
+	var searchResult SearchToolResult
 	if json.Unmarshal(result.Structured, &searchResult) != nil || searchResult.Truncated ||
 		len(searchResult.Files) != 1 || len(searchResult.Files[0].Matches) != 1 {
 		t.Fatalf("structured search result=%+v", searchResult)
@@ -87,7 +86,7 @@ func TestSearchSkipsIgnoredTreesInsteadOfTruncatingBeforeSource(t *testing.T) {
 	patch, _ := json.Marshal(map[string]string{
 		"input": ompTestPatch(searchResult.Files[0].Header, "PUT 3.=3:\n+const ReliableSearchNeedle = false"),
 	})
-	edited, err := editDriver.Execute(context.Background(), tool.Call{ID: "edit", Name: coding.ToolEditHashline, Arguments: patch}, nil)
+	edited, err := editDriver.Execute(context.Background(), tool.Call{ID: "edit", Name: ToolEditHashline, Arguments: patch}, nil)
 	if err != nil || edited.IsError {
 		t.Fatalf("edit from search anchors=%+v err=%v", edited, err)
 	}
@@ -147,8 +146,8 @@ func TestReplaceRejectsTruncatedReadWithoutMutation(t *testing.T) {
 func testReplaceDriver(t *testing.T, dir string) tool.Driver {
 	t.Helper()
 	var snapshotRead tool.Driver
-	for _, driver := range coding.NewToolSet(coding.NewLocalWorkspace(dir)) {
-		if driver.Definition().Name == coding.ToolReadFile {
+	for _, driver := range NewToolSet(NewLocalWorkspace(dir)) {
+		if driver.Definition().Name == ToolReadFile {
 			snapshotRead = driver
 			break
 		}
@@ -176,7 +175,7 @@ func TestGoTestFailureIsToolError(t *testing.T) {
 	}
 	var driver tool.Driver
 	for _, candidate := range drivers {
-		if candidate.Definition().Name == coding.ToolGoTest {
+		if candidate.Definition().Name == ToolGoTest {
 			driver = candidate
 			break
 		}
@@ -185,13 +184,13 @@ func TestGoTestFailureIsToolError(t *testing.T) {
 		t.Fatal("go_test driver unavailable")
 	}
 	args, _ := json.Marshal(map[string]string{"package": "./...", "run": "TestFailure"})
-	result, err := driver.Execute(context.Background(), tool.Call{ID: "test-fail", Name: coding.ToolGoTest, Arguments: args}, nil)
+	result, err := driver.Execute(context.Background(), tool.Call{ID: "test-fail", Name: ToolGoTest, Arguments: args}, nil)
 	if err != nil || !result.IsError {
 		t.Fatalf("go_test result=%+v err=%v", result, err)
 	}
-	var status coding.GoTestToolResult
+	var status GoTestToolResult
 	if json.Unmarshal(result.Structured, &status) != nil || status.Passed || status.ExitCode == 0 {
-		t.Fatalf("go_test status=%+v", status)
+		t.Fatalf("go_test status=%+v structured=%s result=%+v", status, result.Structured, result)
 	}
 }
 
@@ -280,7 +279,7 @@ func TestWorkspaceDriversExposeToolkit(t *testing.T) {
 	for _, driver := range drivers {
 		got[driver.Definition().Name] = true
 	}
-	for _, name := range []string{ToolGlob, ToolReplace, ToolDeleteFile, coding.ToolEditHashline, coding.ToolReadFile} {
+	for _, name := range []string{ToolGlob, ToolReplace, ToolDeleteFile, ToolEditHashline, ToolReadFile} {
 		if !got[name] {
 			t.Fatalf("missing %s in %v", name, got)
 		}

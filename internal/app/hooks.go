@@ -13,12 +13,12 @@ import (
 
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/hooks"
+	mcpruntime "github.com/Viking602/azem/internal/mcp"
 	"github.com/Viking602/azem/internal/plugins"
 	"github.com/Viking602/azem/internal/session"
 	hyagent "github.com/Viking602/venat/agent"
 	"github.com/Viking602/venat/message"
 	"github.com/Viking602/venat/tool"
-	"github.com/Viking602/venat/transport/mcpcontract"
 )
 
 func hookSourcesForDiscovery(cfg config.HooksConfig, discovery config.DiscoveryConfig, configDir, homeDir, workspace string) []hooks.Source {
@@ -351,8 +351,23 @@ func compactDescription(before, after int) string {
 func (s *Service) autoCompactHooks(metadata hooks.Metadata) func(context.Context, []message.Message, []message.Message, error) error {
 	return func(ctx context.Context, before, after []message.Message, compactErr error) error {
 		if after == nil && compactErr == nil {
-			return s.dispatchLifecycle(ctx, hooks.PreCompact, metadata, func(e *hooks.Envelope) { e.Trigger = "auto" })
+			if err := s.dispatchLifecycle(ctx, hooks.PreCompact, metadata, func(e *hooks.Envelope) { e.Trigger = "auto" }); err != nil {
+				return err
+			}
+			s.emit(ctx, Event{
+				Kind: EventContextUsage, SessionID: metadata.SessionID, RunID: metadata.RunID, AgentID: metadata.AgentID,
+				State: "compacting", Data: map[string]string{"requestKind": "compaction"},
+			})
+			return nil
 		}
+		state := "compacted"
+		if compactErr != nil {
+			state = "failed"
+		}
+		s.emit(context.WithoutCancel(ctx), Event{
+			Kind: EventContextUsage, SessionID: metadata.SessionID, RunID: metadata.RunID, AgentID: metadata.AgentID,
+			State: state, Data: map[string]string{"requestKind": "compaction"},
+		})
 		if compactErr == nil {
 			_ = s.dispatchLifecycle(ctx, hooks.PostCompact, metadata, func(e *hooks.Envelope) {
 				e.Trigger = "auto"
@@ -431,7 +446,7 @@ func (s *Service) stopHookGuardrail(metadata hooks.Metadata, event hooks.Event, 
 	})
 }
 
-func (s *Service) handleMCPElicitation(ctx context.Context, server string, request mcpcontract.Elicitation) (mcpcontract.ElicitationResult, error) {
+func (s *Service) handleMCPElicitation(ctx context.Context, server string, request mcpruntime.Elicitation) (mcpruntime.ElicitationResult, error) {
 	s.mu.Lock()
 	sessionID := s.currentSession
 	s.mu.Unlock()
@@ -443,9 +458,9 @@ func (s *Service) handleMCPElicitation(ctx context.Context, server string, reque
 	}
 	decision := s.hooks.Dispatch(ctx, envelope)
 	if decision.PreventContinuation {
-		return mcpcontract.ElicitationResult{Action: "cancel"}, fmt.Errorf("%w: %s", hooks.ErrPreventContinuation, decision.StopReason)
+		return mcpruntime.ElicitationResult{Action: "cancel"}, fmt.Errorf("%w: %s", hooks.ErrPreventContinuation, decision.StopReason)
 	}
-	result := mcpcontract.ElicitationResult{Action: "cancel"}
+	result := mcpruntime.ElicitationResult{Action: "cancel"}
 	if decision.Denied {
 		result.Action = "decline"
 	} else {
@@ -455,16 +470,16 @@ func (s *Service) handleMCPElicitation(ctx context.Context, server string, reque
 	resultEnvelope.HookEventName, resultEnvelope.Action, resultEnvelope.Content = hooks.ElicitationResult, result.Action, result.Content
 	resultDecision := s.hooks.Dispatch(ctx, resultEnvelope)
 	if resultDecision.PreventContinuation {
-		return mcpcontract.ElicitationResult{Action: "cancel"}, fmt.Errorf("%w: %s", hooks.ErrPreventContinuation, resultDecision.StopReason)
+		return mcpruntime.ElicitationResult{Action: "cancel"}, fmt.Errorf("%w: %s", hooks.ErrPreventContinuation, resultDecision.StopReason)
 	}
 	if resultDecision.Denied {
-		return mcpcontract.ElicitationResult{Action: "decline"}, nil
+		return mcpruntime.ElicitationResult{Action: "decline"}, nil
 	}
 	result = aggregateElicitationRuns(result, resultDecision.Runs)
 	return result, nil
 }
 
-func aggregateElicitationRuns(current mcpcontract.ElicitationResult, runs []hooks.RunResult) mcpcontract.ElicitationResult {
+func aggregateElicitationRuns(current mcpruntime.ElicitationResult, runs []hooks.RunResult) mcpruntime.ElicitationResult {
 	priority := map[string]int{"accept": 1, "cancel": 2, "decline": 3}
 	if current.Action == "decline" {
 		return current

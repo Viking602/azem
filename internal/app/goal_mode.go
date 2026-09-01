@@ -77,7 +77,7 @@ func (driver *goalDriver) Definition() tool.Definition {
 			"objective":    {Type: "string", Description: "Required only for create."},
 			"token_budget": {Type: "integer", Description: "Optional positive autonomous-work token budget."},
 		}},
-		EffectType: tool.EffectReadOnly, RiskLevel: "low", PolicyTags: []string{"goal", "control"}, Concurrency: tool.ConcurrencyExclusive, ConcurrencyGroup: "session-goal",
+		Concurrency: tool.ConcurrencyExclusive, ConcurrencyGroup: "session-goal",
 	}
 }
 
@@ -334,14 +334,14 @@ func goalOutputGuardrail(store *session.Service, sessionID, runID string) hyagen
 			if !budgetSteered {
 				budgetSteered = true
 				value := message.NewText(message.RoleSystem, renderGoalModeMessage("budget-limit", state.Goal))
-				value.Visibility = message.VisibilityPrivate
-				return hyagent.RetryOutput(value), nil
+				markPrivateMessage(&value)
+				return hyagent.RetryOutputWithPolicy(hyagent.RetryPolicy{IncludeRejectedOutput: true}, value), nil
 			}
 			return hyagent.AllowOutput(), nil
 		}
 		value := message.NewText(message.RoleSystem, renderGoalModeMessage("continuation", state.Goal))
-		value.Visibility = message.VisibilityPrivate
-		return hyagent.RetryOutput(value), nil
+		markPrivateMessage(&value)
+		return hyagent.RetryOutputWithPolicy(hyagent.RetryPolicy{IncludeRejectedOutput: true}, value), nil
 	})
 }
 

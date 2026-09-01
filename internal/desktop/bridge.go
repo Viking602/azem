@@ -714,7 +714,7 @@ func allowedAction(kind azemapp.ActionKind) bool {
 	switch kind {
 	case azemapp.ActionLogin, azemapp.ActionLogout,
 		azemapp.ActionNewSession, azemapp.ActionListSessions, azemapp.ActionListUsage, azemapp.ActionResumeSession, azemapp.ActionRefreshSession,
-		azemapp.ActionRenameSession, azemapp.ActionPinSession, azemapp.ActionArchiveSession, azemapp.ActionArchiveInactiveSessions, azemapp.ActionMarkSessionUnread,
+		azemapp.ActionRenameSession, azemapp.ActionPinSession, azemapp.ActionArchiveSession, azemapp.ActionArchiveInactiveSessions, azemapp.ActionRemoveProject, azemapp.ActionMarkSessionUnread,
 		azemapp.ActionCompact, azemapp.ActionResolveApproval, azemapp.ActionResolveUserInput, azemapp.ActionResolvePlan, azemapp.ActionSetApprovalMode,
 		azemapp.ActionSetLanguage, azemapp.ActionSetQueueMode, azemapp.ActionReconcileAttempt,
 		azemapp.ActionInspectAgent, azemapp.ActionListAgentTypes, azemapp.ActionListPersonas,

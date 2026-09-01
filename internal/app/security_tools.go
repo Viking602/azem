@@ -44,8 +44,6 @@ func (d *securityProgressDriver) Definition() tool.Definition {
 			"reviewedPaths": {Type: "array", Items: &tool.Schema{Type: "string"}},
 			"message":       {Type: "string"},
 		}, Required: []string{"phase", "reviewedPaths"}, AdditionalProperties: &additional},
-		EffectType: tool.EffectReadOnly, RequiresApproval: false, RequiresActionTask: false, RiskLevel: "low",
-		Metadata: map[string]string{"approval": "allow", "security_scan": "progress"}, PolicyTags: []string{"security", "progress"},
 	}
 }
 
@@ -75,8 +73,6 @@ func (d *securitySubmitDriver) Definition() tool.Definition {
 		InputSchema: tool.Schema{Type: "object", Properties: map[string]tool.Schema{
 			"draft": {Type: "object"},
 		}, Required: []string{"draft"}, AdditionalProperties: &additional},
-		EffectType: tool.EffectWrite, RequiresApproval: false, RequiresActionTask: false, RiskLevel: "low",
-		Metadata: map[string]string{"approval": "allow", "security_scan": "draft"}, PolicyTags: []string{"security", "state"},
 	}
 }
 
@@ -106,8 +102,7 @@ func (d *securityReducerInputsDriver) Definition() tool.Definition {
 	additional := false
 	return tool.Definition{
 		Name: securityReducerInputsTool, Description: "Read the previous aggregate and newly completed Standard scan drafts assigned to this reducer.",
-		InputSchema: tool.Schema{Type: "object", AdditionalProperties: &additional}, EffectType: tool.EffectReadOnly,
-		RequiresApproval: false, RequiresActionTask: false, RiskLevel: "low", Metadata: map[string]string{"approval": "allow"}, PolicyTags: []string{"security", "reducer"},
+		InputSchema: tool.Schema{Type: "object", AdditionalProperties: &additional},
 	}
 }
 
@@ -137,8 +132,6 @@ func (d *securitySubmitMatchesDriver) Definition() tool.Definition {
 	return tool.Definition{
 		Name: securitySubmitMatchesTool, Description: "Submit one-to-one semantic matches for the host-assigned unmatched finding sets.",
 		InputSchema: tool.Schema{Type: "object", Properties: map[string]tool.Schema{"pairs": {Type: "array", Items: &pair}}, Required: []string{"pairs"}, AdditionalProperties: &additional},
-		EffectType:  tool.EffectWrite, RequiresApproval: false, RequiresActionTask: false, RiskLevel: "low",
-		Metadata: map[string]string{"approval": "allow"}, PolicyTags: []string{"security", "matching"},
 	}
 }
 
@@ -176,8 +169,6 @@ func (d *securitySubmitPatchDriver) Definition() tool.Definition {
 			"files":        {Type: "array", Items: &tool.Schema{Type: "string"}},
 			"verification": {Type: "string"}, "reason": {Type: "string"},
 		}, Required: []string{"occurrenceId", "status", "files"}, AdditionalProperties: &additional},
-		EffectType: tool.EffectWrite, RequiresApproval: false, RequiresActionTask: false, RiskLevel: "low",
-		Metadata: map[string]string{"approval": "allow"}, PolicyTags: []string{"security", "remediation"},
 	}
 }
 

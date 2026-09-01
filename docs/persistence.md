@@ -1,11 +1,12 @@
 # Persistence and Recovery
 
-Last verified: 2026-08-24
+Last verified: 2026-08-30
 
 Azem stores configuration and durable runtime state locally. SQLite is the
-authoritative catalog, search index, and Venat control plane. Large opaque
-payloads live in a content-addressed file store so one `azem.db` does not grow
-without bound. Current schema version: **26**.
+authoritative catalog, search index, application control plane, and Venat
+v0.16.1 durable backend. Large opaque payloads live in a content-addressed
+file store so one `azem.db` does not grow without bound. Current schema
+version: **27**.
 
 ## Paths and permissions
 
@@ -39,8 +40,8 @@ FTS, project ownership, and Venat leases must commit together.
 | Stays in SQLite | Lives in `~/.azem/blobs` |
 |---|---|
 | Session catalog, UI flags, project ownership | Context artifact payloads (always) |
-| Event/record catalog rows (`run_id`, sequence, SHA-256) | Venat `events.data` larger than 4 KiB |
-| Leases, reservations, claims metadata | Venat `records.data` larger than 4 KiB |
+| Event/record catalog rows (`run_id`, sequence, SHA-256) | Legacy event/record bodies larger than 4 KiB |
+| App runs/tasks, approvals, claims, Team/Subagent state | Venat v0.16 execution, attempt, receipt, and binding payloads above the inline limit |
 | `history_fts` / `memories_fts` | Tool content and structured results larger than 4 KiB |
 | Todos, recaps, usage, provider requests, auth, model catalog | Subagent output and transcript larger than 4 KiB |
 | Context manifests and retained schema-20 semantic catalog rows | Provider `model_history` larger than 4 KiB |
@@ -108,15 +109,21 @@ automatic `.bak` file is an upgrade checkpoint, not a continuous backup plan.
 - Downgrading the application does not downgrade the database.
 - Never lower `PRAGMA user_version`, remove tables, or delete a user database to
   make an old binary start.
+- Schema 27 execution state has no v0.15 representation. After the first v1
+  execution spec, checkpoint, attempt, or result is written, the only supported
+  rollback to a pre-v0.16 binary is to stop every Azem process and restore the
+  complete pre-upgrade database backup with a binary that supports that
+  backup's schema. This discards work created after the backup. Never merge v1
+  rows into the older database or lower `user_version`.
 
-Schema 18 adds the durable control-plane stores and their indexes:
 
-- `agent_definition_snapshots`
-- `admission_reservations`
-- `resource_claims`
+Schema 18 introduced durable application control-plane tables and indexes:
 
-These tables satisfy current Venat definition, admission, and resource-claim
-contracts and must remain aligned with the declared `go.mod` version.
+- `agent_definition_snapshots` is retained for forward-compatible historical
+  data; the v0.16 direct-engine runtime does not deploy or write definitions.
+- `admission_reservations` and `resource_claims` remain Azem-owned application
+  scheduling facts. They are separate from Venat v0.16 execution leases and
+  durable effect attempts.
 
 Schema 19 adds desktop project ownership:
 
@@ -182,8 +189,8 @@ Schema 23 adds the native security-scan catalog:
   attempts, and publications provide stable cross-scan indexing. Publication
   claims are exclusive; indeterminate or failed external effects are retained
   for reconciliation and never replayed automatically.
-- Security model transcripts remain Venat run artifacts and are not hidden
-  sessions.
+- Security model work uses Azem-owned scan/worker artifacts and direct v1
+  execution bindings; it does not create hidden conversation sessions.
 
 Schema 24 adds the durable conversation graph:
 
@@ -204,14 +211,45 @@ Schema 25 adds auth-broker control state:
 Schema 26 adds `github_webhook_deliveries`. The signed delivery ID and payload
 digest are inserted before a repair trigger, making webhook redelivery
 idempotent across restart.
+Schema 27 is the clean Venat v0.16 execution boundary:
+
+- `agent_executions` stores one immutable execution spec plus its current
+  status, fenced lease, continuation/result payload, version, and digest.
+- `agent_effect_attempts` records versioned model/tool attempts as
+  `running`, `succeeded`, `failed`, `unknown`, or `abandoned`. A claim after
+  response loss moves the uncertain attempt to `unknown`; it is never replayed
+  without an explicit reconciliation receipt.
+- `agent_execution_receipts` makes start/resume/release/settlement commands
+  idempotent by request hash, command key, and lease token.
+- `agent_execution_bindings` maps an Azem session/run/agent/kind/segment to
+  the immutable executable manifest and profile hash. This is the only bridge
+  between application orchestration and Venat durable execution.
+
+All four payload families use the schema-21 BlobStore threshold and verify
+SHA-256 on hydration. Schema 27 does not delete the v0.15 application tables:
+terminal history remains readable, while non-terminal legacy rows without a
+v1 binding are marked `reconcile_required` instead of being replayed.
+
+Schema 28 adds app-only project catalog visibility:
+
+- `desktop_projects.visible=0` hides a project from navigation without deleting
+  its workspace, sessions, or immutable `session_workspaces` ownership.
+- Startup access updates recency without changing visibility. Explicitly opening
+  the project sets visibility back to 1.
+- If the active project is removed, the single GPUI window switches to another
+  visible project. The only active project cannot be removed.
+- The migration marks non-terminal `subagent_runs` stranded by older shutdown
+  races as `interrupted`; current runtime recovery may requeue only a valid
+  durable child owned by a recovered parent.
 
 
 ### Revision, evidence, and learning records
 
 The adaptive coding records continue to reuse `context_artifacts`; native
 security scanning is the schema-23 domain above, session graphs are schema 24,
-auth-broker control state is schema 25, and webhook receipts are schema 26.
-Adaptive artifact kinds remain versioned and purpose-specific:
+auth-broker control state is schema 25, webhook receipts are schema 26,
+Venat v0.16 execution durability is schema 27, and project-catalog visibility
+is schema 28.
 
 - `work_revision_v1:*`, `action_intent_v1:*`,
   `observation_envelope_v1:*`, `work_disposition_v1:*`, and
@@ -226,9 +264,9 @@ Adaptive artifact kinds remain versioned and purpose-specific:
 
 Adaptive records remain strict JSON inside the existing session/run ownership
 and SHA-256 boundaries. Large payload behavior, deletion, fork behavior, and
-blob verification remain schema-21 behavior. Schemas 22–26 add provider-model
-catalogs, security scans, session graphs, auth-broker state, and webhook
-delivery receipts. The trajectory
+blob verification remain schema-21 behavior. Schemas 22–27 add provider-model
+catalogs, security scans, session graphs, auth-broker state, webhook delivery
+receipts, and v1 execution durability. The trajectory
 exporter opens the database read-only at the service boundary and writes a
 detached JSON export. Replay, noise, routing, training, tool-lab, and adapter
 artifacts remain offline files or in-process control-plane inputs.
@@ -244,7 +282,7 @@ global search. Insert, update, delete, and session-cascade triggers keep
 canonical user blocks and completed assistant blocks synchronized. Global
 search never indexes mutable agent/process output or cancelled partial answers,
 and it returns FTS snippets rather than loading complete block payloads into
-React. Session-title matching scans only the short local title column; content
+the renderer. Session-title matching scans only the short local title column; content
 matching and ranking remain on FTS5.
 
 ## Stored data groups
@@ -252,9 +290,10 @@ matching and ranking remain on FTS5.
 | Group | Examples | Owner |
 |---|---|---|
 | Conversation | sessions, canonical blocks, projections, provider requests, attachments | `internal/session` |
-| Tool timeline | tool records, file evidence, action attempts, tool-call charges | `internal/session`, `internal/app`, Venat adapters |
-| Agent execution | runs, tasks, leases, approvals, resume tokens, team state | Venat through `internal/store/sqlite` |
-| Control plane | definition snapshots, admission reservations, resource claims | Venat through `stores_control_plane.go` |
+| Tool timeline | tool records, file evidence, legacy action attempts, tool-call charges | `internal/session`, `internal/app` |
+| Application orchestration | runs, tasks, approvals, resume tokens, resource claims, Team/Subagent lifecycle | Azem through `internal/agentruntime` and focused services |
+| Venat execution | execution spec/status/lease/checkpoint/result, model/tool attempts, receipts | Venat `durable.Runtime` through `internal/store/sqlite.DurableBackend` |
+| Execution binding | session/run/agent/kind/segment, immutable manifest, profile hash | `internal/agent` |
 | Context | archive manifests, memories, recaps, history FTS, context artifacts, work revisions, verification records, evidence ledgers, coding-memory catalogs; retained legacy semantic tables | `internal/app`, `internal/contextarchive`, `internal/memory`, `internal/recap`, `internal/session`, `internal/workrevision`, `internal/evidence`, `internal/codingmemory` |
 | Product state | authentication metadata, model catalog cache, usage | corresponding internal services |
 | Desktop navigation | project catalog, session-to-project ownership, last workspace session | `internal/session`, `internal/app`, `internal/desktop` |
@@ -268,30 +307,37 @@ queries.
 
 ## Crash recovery
 
-Before `PrepareRecovery`, each process acquires `azem.db.runtime.lock`. The
-first live process holds it exclusively while recovering, then downgrades it to
-a shared lock for the rest of its lifetime. Additional desktop windows wait
-for that boundary and hold only a shared lock, so they cannot expire leases,
-interrupt Subagents, or quarantine provider requests owned by another live
-process. If the exclusive owner exits before publishing a completed recovery,
-one waiter takes over recovery instead of accepting a partial boundary.
+Bootstrap resolves the destination database path without migration or open,
+then acquires `azem.db.runtime.lock`. The first live process holds it
+exclusively across legacy-home relocation, SQLite open/backup/schema upgrade,
+legacy crash preparation, durable runtime construction, and replay. It
+downgrades to a shared lifetime lock only after the recovery projection is
+published. Additional windows wait for that boundary and receive
+`shouldRecover == false`; they never expire work owned by the live process.
+If the exclusive owner exits early, one waiter takes over.
 
-Only an exclusive owner treats active leases as belonging to a prior process
-and expires them immediately. It also expires leftover active resource claims
-so a dead workspace lock cannot queue later sessions. It quarantines
-incomplete action attempts and provider requests so the runtime does not
-replay unknown side effects blindly.
+The exclusive sequence is:
 
-Recovery then:
+1. Open SQLite, take the upgrade lock, create the backup when required, and
+   migrate through schema 28.
+2. Before constructing `durable.Runtime`, expire dead legacy leases/resource
+   claims and quarantine incomplete legacy action/provider-request records.
+3. Construct the single service-lifetime durable runtime, enumerate
+   non-terminal runs, and validate every v1 execution binding and manifest.
+4. Leave a suspended approval waiting; start a pending binding; resume a
+   persisted continuation with exact target facts; replay a terminal result;
+   or surface an unknown attempt for explicit reconciliation.
+5. Mark every non-terminal v0.15 row without a binding
+   `reconcile_required`. Preserve its evidence; never synthesize a
+   continuation or execute its pending tool.
+6. Interrupt and requeue app-owned Subagent lifecycle rows, resume
+   application-owned Team orchestration, repair tool projections, publish
+   recovery state, then call `FinishRecovery`.
 
-1. Interrupts incomplete subagent projections.
-2. Loads non-terminal runs and pending approval tokens.
-3. Restores durable projections.
-4. Resumes Team runs and eligible Single-Agent runs.
-5. Leaves `reconcile_required` runs and unknown action attempts paused for an
-   explicit reconciliation decision.
-6. Uses succeeded action attempts as an anti-replay ledger when a resumed model
-   emits a fresh call ID for an already completed non-idempotent input.
+Succeeded attempts remain anti-replay evidence when a recovered model emits a
+fresh call ID for a completed non-idempotent input. Unknown attempts retain
+execution ID, operation ID, attempt number/version, checkpoint sequence, and
+continuation phase until an explicit resolution.
 
 The UI must display recovered and reconciliation-required state; it must not
 hide it by converting the run to success or starting a replacement session.
@@ -320,15 +366,16 @@ before declaring those operations fully supported.
 Run the persistence suite:
 
 ```bash
-go test ./internal/store/sqlite
+GOWORK=off go test ./internal/store/sqlite
 ```
 
 Required coverage includes runtime-fence ownership and failed-owner takeover,
-previous-schema upgrade, schema 18 control-plane
-tables and indexes, schema 19 project ownership backfill, schema 20 compaction-state
-invalidation with canonical data retention, schema 21 blob extraction with
-payload-column removal, schema 22 `llmux_provider_models`, schema 23 native
-security scans, schema 24 graph backfill/branch retention, schema 25 auth-broker
-state, schema 26 webhook receipt deduplication, current-version reopen,
-automatic backup, and rejection of a future schema. Run
+previous-schema upgrade, schema 18 legacy control-plane retention, schema 19
+project ownership, schema 20 context invalidation with canonical retention,
+schema 21 blob extraction, schema 22 model catalogs, schema 23 security scans,
+schema 24 graphs, schema 25 auth-broker state, schema 26 webhook deduplication,
+schema 27 durable backend contract/binding/blob/response-loss behavior, and
+schema 28 project visibility with retained session ownership.
+Also verify current-version reopen, automatic backup, retained legacy
+run/tool/approval rows, and future-schema rejection. Run
 `GOWORK=off go test ./...` before release.

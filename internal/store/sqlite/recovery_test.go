@@ -5,8 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Viking602/venat"
-	"github.com/Viking602/venat/api"
+	"github.com/Viking602/azem/internal/agentruntime"
 )
 
 func TestPrepareRecoveryExpiresLeasesAndQuarantinesIncompleteActions(t *testing.T) {
@@ -22,11 +21,11 @@ func TestPrepareRecoveryExpiresLeasesAndQuarantinesIncompleteActions(t *testing.
 		t.Fatal(err)
 	}
 	expires := time.Now().UTC().Add(-time.Minute)
-	lease := api.TaskExecutionLease{ID: "lease-1", RunID: "run-1", TaskID: "task-1", HolderType: api.HolderAgent, HolderID: "agent-1", Status: api.LeaseStatusActive, ExpiresAt: expires, Version: 1}
+	lease := agentruntime.TaskExecutionLease{ID: "lease-1", RunID: "run-1", TaskID: "task-1", HolderType: agentruntime.HolderAgent, HolderID: "agent-1", Status: agentruntime.LeaseStatusActive, ExpiresAt: expires, Version: 1}
 	if err := uow.Leases().SaveLease(ctx, lease); err != nil {
 		t.Fatal(err)
 	}
-	attempt := api.ActionAttempt{AttemptID: "attempt-1", ActionID: "action-1", RunID: "run-1", TaskID: "task-1", ToolName: "coding.write_file", Status: api.ActionAttemptRunning, IdempotencyKey: "key-1"}
+	attempt := agentruntime.ActionAttempt{AttemptID: "attempt-1", ActionID: "action-1", RunID: "run-1", TaskID: "task-1", ToolName: "coding.write_file", Status: agentruntime.ActionAttemptRunning, IdempotencyKey: "key-1"}
 	if err := uow.ActionAttempts().SaveActionAttempt(ctx, attempt); err != nil {
 		t.Fatal(err)
 	}
@@ -64,10 +63,10 @@ func TestPrepareRecoveryExpiresLeasesAndQuarantinesIncompleteActions(t *testing.
 	if err := uow.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if loadedLease.Status != api.LeaseStatusExpired {
+	if loadedLease.Status != agentruntime.LeaseStatusExpired {
 		t.Fatalf("lease status = %q", loadedLease.Status)
 	}
-	if loadedAttempt.Status != api.ActionAttemptUnknown || !loadedAttempt.RequiresReconcile {
+	if loadedAttempt.Status != agentruntime.ActionAttemptUnknown || !loadedAttempt.RequiresReconcile {
 		t.Fatalf("attempt = %+v", loadedAttempt)
 	}
 	var providerStatus string
@@ -99,14 +98,14 @@ func TestPrepareRecoveryExpiresOrphanWorkspaceClaims(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	claimStore, ok := uow.(api.ResourceClaimUnitOfWork)
+	claimStore, ok := uow.(agentruntime.ResourceClaimUnitOfWork)
 	if !ok {
 		t.Fatal("unit of work does not expose resource claims")
 	}
-	decision, err := claimStore.ResourceClaims().AcquireResourceClaims(ctx, api.ResourceClaimRequest{
+	decision, err := claimStore.ResourceClaims().AcquireResourceClaims(ctx, agentruntime.ResourceClaimRequest{
 		RunID: "run-1", TaskID: "task-1", LeaseID: "lease-1", HolderID: "azem-main",
 		RequestedAt: now, ExpiresAt: now.Add(time.Minute),
-		Claims: []api.ResourceClaimSpec{{ID: "claim-1", Key: "azem:workspace-write:/tmp/azem", Mode: api.ResourceClaimExclusive}},
+		Claims: []agentruntime.ResourceClaimSpec{{ID: "claim-1", Key: "azem:workspace-write:/tmp/azem", Mode: agentruntime.ResourceClaimExclusive}},
 	})
 	if err != nil || !decision.Acquired {
 		t.Fatalf("acquire claim=%#v error=%v", decision, err)
@@ -121,7 +120,7 @@ func TestPrepareRecoveryExpiresOrphanWorkspaceClaims(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	claimStore, ok = uow.(api.ResourceClaimUnitOfWork)
+	claimStore, ok = uow.(agentruntime.ResourceClaimUnitOfWork)
 	if !ok {
 		t.Fatal("unit of work does not expose resource claims")
 	}
@@ -132,74 +131,7 @@ func TestPrepareRecoveryExpiresOrphanWorkspaceClaims(t *testing.T) {
 	if err := uow.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if claim.State != api.ResourceClaimExpired {
+	if claim.State != agentruntime.ResourceClaimExpired {
 		t.Fatalf("recovered claim state = %q, want expired", claim.State)
-	}
-}
-
-func TestResolveReconcileAttemptRequiresExplicitTerminalOutcome(t *testing.T) {
-	ctx := context.Background()
-	store, err := Open(ctx, ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close(ctx)
-	uow, err := store.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	attempt := api.ActionAttempt{AttemptID: "attempt-1", ActionID: "action-1", RunID: "run-1", TaskID: "task-1", ToolName: "coding.shell", Status: api.ActionAttemptUnknown, RequiresReconcile: true}
-	if err := uow.Runs().SaveRun(ctx, api.Run{ID: attempt.RunID, RootTaskID: attempt.TaskID, Status: api.RunStatusReconcileRequired}); err != nil {
-		t.Fatal(err)
-	}
-	if err := uow.Tasks().SaveTask(ctx, api.Task{ID: attempt.TaskID, RunID: attempt.RunID, Status: api.TaskStatusReconcileRequired}); err != nil {
-		t.Fatal(err)
-	}
-	if err := uow.ActionAttempts().SaveActionAttempt(ctx, attempt); err != nil {
-		t.Fatal(err)
-	}
-	if err := uow.Commit(ctx); err != nil {
-		t.Fatal(err)
-	}
-
-	runner := venat.NewDevelopment(api.Config{StoreProvider: store})
-	if _, err := runner.ResolveActionAttempt(ctx, api.ResolveActionAttemptCommand{AttemptID: attempt.AttemptID, Status: api.ActionAttemptRunning}); err == nil {
-		t.Fatal("nonterminal reconciliation status accepted")
-	}
-	if _, err := runner.ResolveActionAttempt(ctx, api.ResolveActionAttemptCommand{AttemptID: attempt.AttemptID, Status: api.ActionAttemptSucceeded, ExternalResultRef: "receipt-1"}); err != nil {
-		t.Fatal(err)
-	}
-	pending, err := store.ListReconcileAttempts(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(pending) != 0 {
-		t.Fatalf("pending reconcile attempts = %+v", pending)
-	}
-
-	uow, err = store.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resolved, err := uow.ActionAttempts().LoadActionAttempt(ctx, attempt.AttemptID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resolved.Status != api.ActionAttemptSucceeded || resolved.RequiresReconcile || resolved.ExternalResultRef != "receipt-1" {
-		t.Fatalf("resolved attempt = %+v", resolved)
-	}
-	run, err := uow.Runs().LoadRun(ctx, attempt.RunID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	task, err := uow.Tasks().LoadTask(ctx, attempt.RunID, attempt.TaskID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := uow.Commit(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if run.Status != api.RunStatusRunning || task.Status != api.TaskStatusDispatched {
-		t.Fatalf("reconciled run/task = %s/%s", run.Status, task.Status)
 	}
 }

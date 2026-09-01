@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/venat/tool"
 )
 
@@ -15,7 +16,7 @@ func TestHubSupervisesLongRunningProcessLifecycle(t *testing.T) {
 	if err != nil {
 		t.Skip("python3 is unavailable")
 	}
-	ctx := tool.WithCaller(context.Background(), tool.CallerInfo{SessionID: "hub-process", AgentID: "Main"})
+	ctx := WithInvocation(context.Background(), Invocation{SessionID: "hub-process", AgentID: "Main"})
 	root := t.TempDir()
 	bridge := newLSPBridgeRuntime()
 	t.Cleanup(func() { _ = bridge.Close(context.Background()) })
@@ -73,7 +74,7 @@ func TestHubTracksWaitsAndCancelsBackgroundShellJobs(t *testing.T) {
 	shellRuntime := newShellRuntime(base, defaultShellOptions())
 	shell := newRuntimeShellDriver(t.TempDir(), "allow", "deny", shellRuntime, jobs)
 	hub := newHubDriver(t.TempDir(), newLSPBridgeRuntime(), jobs)
-	ctx := tool.WithCaller(context.Background(), tool.CallerInfo{AgentID: "Main"})
+	ctx := WithInvocation(context.Background(), Invocation{AgentID: "Main"})
 
 	arguments, _ := json.Marshal(shellInput{Command: "sleep 0.1; printf 'job-done\\n'", Async: true, WallClockSeconds: 5})
 	started, err := shell.Execute(ctx, tool.Call{ID: "shell-job", Name: ToolShell, Arguments: arguments}, nil)
@@ -103,13 +104,13 @@ func TestHubTracksWaitsAndCancelsBackgroundShellJobs(t *testing.T) {
 func TestHubUsesDynamicApprovalAndValidatesArgv(t *testing.T) {
 	driver := newHubDriver(t.TempDir(), newLSPBridgeRuntime())
 	readArgs := json.RawMessage(`{"op":"logs","name":"service"}`)
-	read := driver.DefinitionForCall(tool.Call{Name: ToolHub, Arguments: readArgs})
-	if read.EffectType != tool.EffectReadOnly || read.RequiresApproval {
+	read := driver.PolicyForCall(tool.Call{Name: ToolHub, Arguments: readArgs})
+	if read.Effect != agentruntime.ToolEffectReadOnly || read.RequiresApproval {
 		t.Fatalf("logs governance = %#v", read)
 	}
 	startArgs := json.RawMessage(`{"op":"start","name":"service","application":"python3"}`)
-	start := driver.DefinitionForCall(tool.Call{Name: ToolHub, Arguments: startArgs})
-	if start.EffectType != tool.EffectExternalSideEffect || !start.RequiresApproval || !start.RequiresActionTask {
+	start := driver.PolicyForCall(tool.Call{Name: ToolHub, Arguments: startArgs})
+	if start.Effect != agentruntime.ToolEffectExternalSideEffect || !start.RequiresApproval || !start.RequiresActionTask {
 		t.Fatalf("start governance = %#v", start)
 	}
 	invalid := callHub(context.Background(), driver, map[string]any{"op": "start", "name": "bad name", "application": "python3"})
@@ -134,16 +135,16 @@ func TestHubRoutesPeerMessagingWithoutProcessApproval(t *testing.T) {
 	ref.set(broker)
 	driver := newHubDriver(t.TempDir(), newLSPBridgeRuntime())
 	driver.peers = ref
-	ctx := tool.WithCaller(context.Background(), tool.CallerInfo{AgentID: "Main", TeamRunID: "parent"})
+	ctx := WithInvocation(context.Background(), Invocation{AgentID: "Main", TeamRunID: "parent"})
 
 	sent := callHub(ctx, driver, map[string]any{"op": "send", "to": "Reviewer", "message": "check the change", "replyTo": "peer-0"})
 	if sent.IsError || sent.Content != "peer-send" || len(broker.requests) != 1 ||
 		broker.requests[0].Caller.AgentID != "Main" || broker.requests[0].Params["to"] != "Reviewer" {
 		t.Fatalf("peer send = %#v requests=%#v", sent, broker.requests)
 	}
-	definition := driver.DefinitionForCall(tool.Call{Name: ToolHub, Arguments: json.RawMessage(`{"op":"send","to":"Reviewer","message":"check"}`)})
-	if definition.EffectType != tool.EffectReadOnly || definition.RequiresApproval {
-		t.Fatalf("peer send governance = %#v", definition)
+	policy := driver.PolicyForCall(tool.Call{Name: ToolHub, Arguments: json.RawMessage(`{"op":"send","to":"Reviewer","message":"check"}`)})
+	if policy.Effect != agentruntime.ToolEffectReadOnly || policy.RequiresApproval {
+		t.Fatalf("peer send governance = %#v", policy)
 	}
 	listed := callHub(ctx, driver, map[string]any{"op": "list"})
 	if listed.IsError || listed.Content != "peer-list" || len(broker.requests) != 2 {

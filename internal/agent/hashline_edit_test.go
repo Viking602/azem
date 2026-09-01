@@ -8,15 +8,14 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Viking602/venat/coding"
 	"github.com/Viking602/venat/tool"
 )
 
 func TestOMPHashlineAppliesBlocksRegistersMovesAndRemovals(t *testing.T) {
-	ctx := tool.WithCaller(context.Background(), tool.CallerInfo{SessionID: "hashline-session"})
+	ctx := WithInvocation(context.Background(), Invocation{SessionID: "hashline-session"})
 	root := t.TempDir()
 	service := newWriteTestService(t, ctx, root)
-	edit := findWorkspaceTool(t, service, root, coding.ToolEditHashline)
+	edit := findWorkspaceTool(t, service, root, ToolEditHashline)
 
 	writeTestFile(t, filepath.Join(root, "source.py"), "def greet():\n    return 'hi'\n\nprint(greet())\n")
 	writeTestFile(t, filepath.Join(root, "target.py"), "# target\n")
@@ -56,7 +55,7 @@ func TestOMPHashlineSupportsOriginalLineGapsAndMarkdownBlocks(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	service := newWriteTestService(t, ctx, root)
-	edit := findWorkspaceTool(t, service, root, coding.ToolEditHashline)
+	edit := findWorkspaceTool(t, service, root, ToolEditHashline)
 	content := "# One\na\n## Child\nb\n# Two\nc\n"
 	writeTestFile(t, filepath.Join(root, "notes.md"), content)
 	patch := "*** Begin Patch\n" + sectionHeader("notes.md", content) + "\n" +
@@ -71,7 +70,7 @@ func TestOMPHashlineSupportsAnonymousMovesAndAfterBlockInsertion(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	service := newWriteTestService(t, ctx, root)
-	edit := findWorkspaceTool(t, service, root, coding.ToolEditHashline)
+	edit := findWorkspaceTool(t, service, root, ToolEditHashline)
 	source := "function one() {\n  return 1;\n}\nconst tail = 2;\n"
 	writeTestFile(t, filepath.Join(root, "move.ts"), source)
 	executeHashline(t, ctx, edit, "*** Begin Patch\n"+sectionHeader("move.ts", source)+"\nCUT 1*\nPUT >4\n*** End Patch\n")
@@ -87,7 +86,7 @@ func TestOMPHashlineRejectsStaleTagsOverlapAndExistingMoveDestinationWithoutMuta
 	ctx := context.Background()
 	root := t.TempDir()
 	service := newWriteTestService(t, ctx, root)
-	edit := findWorkspaceTool(t, service, root, coding.ToolEditHashline)
+	edit := findWorkspaceTool(t, service, root, ToolEditHashline)
 	writeTestFile(t, filepath.Join(root, "a.txt"), "one\ntwo\n")
 	writeTestFile(t, filepath.Join(root, "occupied.txt"), "occupied\n")
 
@@ -122,7 +121,7 @@ func executeHashline(t *testing.T, ctx context.Context, driver tool.Driver, patc
 
 func callHashline(ctx context.Context, driver tool.Driver, patch string) tool.Result {
 	arguments, _ := json.Marshal(map[string]string{"input": patch})
-	result, err := driver.Execute(ctx, tool.Call{ID: "edit", Name: coding.ToolEditHashline, Arguments: arguments}, nil)
+	result, err := driver.Execute(ctx, tool.Call{ID: "edit", Name: ToolEditHashline, Arguments: arguments}, nil)
 	if err != nil {
 		return tool.Result{IsError: true, Content: err.Error()}
 	}

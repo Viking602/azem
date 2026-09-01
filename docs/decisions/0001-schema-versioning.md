@@ -6,12 +6,15 @@ Date: 2026-08-06
 ## Context
 
 Azem stores sessions, governed execution, recovery state, and desktop project
-ownership in one local SQLite database. Schema 20 also stores semantic context
-snapshots, append-only semantic events, and context manifests. Schema 21 keeps
-those catalog and control-plane rows in SQLite and stores large opaque payloads
-as content-addressed files. Runtime migrations and SQLC require
-separate schema representations. Older binaries cannot safely interpret state
-written by newer schemas.
+ownership in one local SQLite database. Schema 20 stores retained semantic
+context catalogs and manifests. Schema 21 keeps catalog/control-plane rows in
+SQLite and stores large opaque payloads as content-addressed files. Schema 27
+uses the same BlobStore boundary for Venat v0.16 execution
+continuations/results and immutable application bindings. Schema 28 adds
+reversible project-catalog visibility without deleting session ownership.
+Runtime migrations
+and SQLC require separate schema representations. Older binaries cannot safely
+interpret state written by newer schemas.
 
 ## Decision
 
@@ -28,6 +31,10 @@ written by newer schemas.
   pre-release Provider `ModelHistory`, only when authoritative transcript,
   Todo, tool, Artifact, Memory, and recovery records remain intact and the
   invalidation is covered by an upgrade test.
+- A breaking execution-runtime upgrade must introduce a versioned binding and
+  migration. Preserve terminal legacy history. Mark non-terminal legacy rows
+  without enough identity for exact replay `reconcile_required`; never
+  manufacture a new checkpoint or lower the schema to run old code.
 
 ## Consequences
 

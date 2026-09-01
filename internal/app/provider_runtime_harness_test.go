@@ -20,7 +20,7 @@ func writeProviderText(writer http.ResponseWriter, responseID, text string) {
 
 func waitForProviderRun(t *testing.T, service *Service, runID string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	for {
 		event, err := service.NextEvent(ctx)

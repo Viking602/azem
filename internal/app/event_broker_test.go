@@ -9,11 +9,10 @@ import (
 	"time"
 
 	agentservice "github.com/Viking602/azem/internal/agent"
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/session"
-	"github.com/Viking602/venat/api"
-	"github.com/Viking602/venat/multiagent"
-	"github.com/Viking602/venat/stream"
+	hyagent "github.com/Viking602/venat/agent"
 	"github.com/Viking602/venat/tool"
 )
 
@@ -418,7 +417,7 @@ func TestProviderStreamContinuesAfterEventBacklogCompaction(t *testing.T) {
 	service := NewService(context.Background(), config.Default())
 	service.events.maxBytes = 32
 	sink := service.providerStreamSink("session", "run", "grok", "model", "high", "responses")
-	err := sink.Emit(context.Background(), stream.Frame{Kind: stream.FrameText, Text: strings.Repeat("x", 64)})
+	err := sink.Emit(context.Background(), hyagent.Frame{Kind: hyagent.FrameText, Text: strings.Repeat("x", 64)})
 	if err != nil {
 		t.Fatalf("provider sink stopped on UI backlog: %v", err)
 	}
@@ -439,7 +438,7 @@ func TestProviderToolResultUsesBoundedUIProjection(t *testing.T) {
 		Content:    strings.Repeat("x", maxToolRecordPreviewBytes*2),
 		Structured: json.RawMessage(strings.Repeat("y", maxInlineToolRecordBytes*2)),
 	}
-	if err := sink.Emit(context.Background(), stream.Frame{Kind: stream.FrameToolResult, ToolResult: &result}); err != nil {
+	if err := sink.Emit(context.Background(), hyagent.Frame{Kind: hyagent.FrameToolResult, ToolResult: &result}); err != nil {
 		t.Fatal(err)
 	}
 	event, err := service.NextEvent(context.Background())
@@ -448,6 +447,21 @@ func TestProviderToolResultUsesBoundedUIProjection(t *testing.T) {
 	}
 	if event.Kind != EventToolFinished || len(event.Text) > maxToolRecordPreviewBytes+64 || event.Data["structured"] != "" || event.Data["projection_truncated"] != "true" {
 		t.Fatalf("bounded tool projection=%#v", event)
+	}
+}
+
+func TestProviderToolResultPublishesAfterRunCancellation(t *testing.T) {
+	service := NewService(context.Background(), config.Default())
+	sink := service.providerStreamSink("session", "run", "grok", "model", "high", "responses")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	result := tool.Result{ToolCallID: "tool", Name: "coding.read_file", Content: "done"}
+	if err := sink.Emit(ctx, hyagent.Frame{Kind: hyagent.FrameToolResult, ToolResult: &result}); err != nil {
+		t.Fatal(err)
+	}
+	event, err := service.NextEvent(context.Background())
+	if err != nil || event.Kind != EventToolFinished || event.State != "completed" {
+		t.Fatalf("tool result after cancellation=%#v error=%v", event, err)
 	}
 }
 
@@ -498,8 +512,8 @@ func TestTeamAnswerBacklogDoesNotChangeSuccessfulOutcome(t *testing.T) {
 	if !service.emit(context.Background(), Event{Kind: EventTextDelta, SessionID: "session", RunID: "run", Text: strings.Repeat("x", 64)}) {
 		t.Fatal("UI backlog rejected replaceable projection")
 	}
-	execution := agentservice.TeamExecution{Result: multiagent.DriveResult{State: multiagent.TeamState{Tasks: []api.Task{{
-		Result: &api.TypedReport{Structured: map[string]any{"answer": "team answer"}},
+	execution := agentservice.TeamExecution{Result: agentruntime.TeamExecutionResult{State: agentruntime.TeamState{Tasks: []agentruntime.Task{{
+		Result: &agentruntime.TypedReport{Structured: map[string]any{"answer": "team answer"}},
 	}}}}}
 	service.finishProviderTeam(context.Background(), "session", "run", "goal", session.TodoList{}, execution, nil)
 	service.events.Close()
@@ -536,7 +550,7 @@ func TestApprovalRequestRemainsDeliverableAfterProjectionCompaction(t *testing.T
 	_, err := service.awaitTeamApproval(
 		ctx, "session", "run", "goal",
 		tool.Call{ID: "call", Name: "coding.write_file"},
-		tool.Definition{Name: "coding.write_file", EffectType: tool.EffectWrite},
+		agentruntime.ToolPolicy{Effect: agentruntime.ToolEffectWrite, RequiresApproval: true},
 	)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("approval error=%v", err)

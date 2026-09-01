@@ -71,7 +71,7 @@ func newVibeDrivers(runtime *subagentRuntime, parent subagentParentRuntime, rout
 
 func (driver *vibeDriver) Definition() tool.Definition {
 	additional := false
-	definition := tool.Definition{EffectType: tool.EffectReadOnly, RiskLevel: "low", PolicyTags: []string{"vibe", "subagent"}, Concurrency: tool.ConcurrencyParallel}
+	definition := tool.Definition{Concurrency: tool.ConcurrencyParallel}
 	switch driver.operation {
 	case vibeSpawnTool:
 		definition.Name, definition.Description = vibeSpawnTool, "Start one persistent Vibe worker session. fast uses the low-latency route for mechanical work; good uses the strong route for design and difficult debugging. The worker starts blank, so prompt must include files, constraints, acceptance, and evidence. Returns immediately."
@@ -188,7 +188,7 @@ func (driver *vibeDriver) send(ctx context.Context, call tool.Call) tool.Result 
 	if driver.activeRunID(input.Session) != "" {
 		mode = "steered"
 	}
-	response, err := driver.runtime.ExecuteHubPeer(ctx, agentservice.HubPeerRequest{Operation: "send", Caller: tool.CallerInfo{AgentID: "azem-main", TeamRunID: driver.parent.ParentRunID}, Params: map[string]any{"to": input.Session, "message": input.Message}})
+	response, err := driver.runtime.ExecuteHubPeer(ctx, agentservice.HubPeerRequest{Operation: "send", Caller: agentservice.Invocation{AgentID: "azem-main", TeamRunID: driver.parent.ParentRunID}, Params: map[string]any{"to": input.Session, "message": input.Message}})
 	if err != nil || response.IsError {
 		if err == nil {
 			err = fmt.Errorf("%s", response.Content)

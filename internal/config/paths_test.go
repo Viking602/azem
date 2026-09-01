@@ -48,6 +48,27 @@ func TestResolvePathsHonorsAzemHome(t *testing.T) {
 	}
 }
 
+func TestRuntimeDatabasePathDoesNotMigrateLegacyState(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv(HomeEnv, "")
+	legacy := filepath.Join(home, ".config", "azem", "azem.db")
+	writeFile(t, legacy, "legacy")
+
+	path, err := RuntimeDatabasePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(defaultHome(home), "azem.db"); path != want {
+		t.Fatalf("runtime database = %q, want %q", path, want)
+	}
+	assertFile(t, legacy, "legacy")
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("preflight path lookup migrated the database: %v", err)
+	}
+}
+
 func TestLegacyHomeRootsCoverPreviousPlatformLocations(t *testing.T) {
 	if got := legacyHomeRoots("darwin", "/Users/user", "/Users/user/.azem"); !containsPath(got, filepath.Join("/Users/user", "Library", "Application Support", "azem")) {
 		t.Fatalf("darwin roots = %#v", got)

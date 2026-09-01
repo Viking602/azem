@@ -1,6 +1,6 @@
 # Security
 
-Last verified: 2026-08-25
+Last verified: 2026-08-30
 
 Azem is a local development agent. Its approvals, typed Bridge, credential
 stores, and durable action ledger are governance boundaries, not an operating-
@@ -9,7 +9,7 @@ matches the work you intend to authorize.
 
 ## Trust boundaries
 
-- The TUI, React desktop, and GPUI desktop request operations;
+- The TUI and GPUI desktop request operations;
   `internal/app` validates them and owns durable state.
 - The desktop Bridge exposes a closed action allowlist. Its workspace viewer
   has only bounded read methods; it does not expose an arbitrary shell, write,
@@ -31,13 +31,12 @@ matches the work you intend to authorize.
   Execute allowlist, and are not agent tools. The model cannot inject
   keystrokes into this PTY. Spawn uses a process argv for the user shell;
   typed input is written as bytes to the PTY. The initial `cwd` is the
-  workspace; the user may `cd` afterwards. Wails reaps PTYs when its owning
-  runtime closes. GPUI keeps PTYs in the daemon across renderer detach and
+  workspace; the user may `cd` afterwards. GPUI keeps PTYs in the daemon across renderer detach and
   reaps them on typed close or daemon shutdown. This does not replace
   `coding.shell` approvals.
 - Global session search is a separate read-only Bridge method. It accepts at
   most 200 characters and returns at most 30 title/message matches. Message
-  content remains in SQLite; the WebView receives only a short FTS snippet,
+  content remains in SQLite; GPUI receives only a short FTS snippet,
   session/project identity, and the stable block sequence needed to navigate.
   Cross-project launch arguments contain the sequence but never the search
   query or matched conversation text.
@@ -45,11 +44,12 @@ matches the work you intend to authorize.
   updates the current workspace-session pointer, and returns the same bounded
   durable projection already used by the event stream. It does not add a new
   filesystem, shell, provider, or external-network capability.
+- Project removal is catalog-only. The typed `remove_project` action flips
+  SQLite visibility and cannot delete workspace files, sessions, or immutable
+  session ownership. Reopening the project restores visibility.
 - On macOS, an inactive Azem window keeps AppKit's activation-only first click.
-  Azem does not enable WebView-wide click-through, because that same event could
-  trigger Stop, approval, deletion, or navigation controls. Losing focus closes
-  the model picker instead of preserving an actionable overlay in the inactive
-  window.
+  Losing focus closes the model picker instead of preserving an actionable
+  overlay in the inactive window.
 - Built-in tools, MCP tools, hooks, and GitHub operations are separate external
   boundaries and remain subject to their own validation and approval policy.
 - Model output, repository text, PR content, tool output, and remote responses
@@ -92,7 +92,7 @@ The desktop workspace viewer resolves every requested relative path and every
 symlink against the active workspace before reading. Absolute paths, parent
 escapes, NUL bytes, and links resolving outside the workspace are rejected.
 Directory listings and previews have fixed limits; binary files are not copied
-into the WebView, and supported raster images have a separate 8 MiB cap. This
+into the renderer, and supported raster images have a separate 8 MiB cap. This
 boundary is read-only and does not replace approval for agent file tools.
 
 The image-assistance route reuses the same trusted-root, symlink, regular-file,
@@ -125,7 +125,7 @@ Local composer and transcript thumbnails use the focused `AttachmentDataURL`
 Bridge method. It accepts the complete attachment record, validates that its
 resolved path belongs to the requested session's durable attachment directory,
 reapplies supported-image content detection, and only then returns a local
-data URL to the WebView. It is not an arbitrary path reader and does not send
+data URL to the renderer. It is not an arbitrary path reader and does not send
 preview bytes over the network.
 
 Workspace change review is also read-only. It runs fixed Git subcommands with
@@ -166,7 +166,7 @@ bytes, not a second credential store.
 
 llmux API keys are write-only in Model settings. The UI submits a new key in a
 single typed action; `config.yaml`, runtime events, logs, model metadata, and
-frontend state contain only provider identity and credential availability.
+renderer state contain only provider identity and credential availability.
 Environment variables named by llmux profiles are supported and are inherited
 by the Azem process and any child process allowed to receive the environment.
 

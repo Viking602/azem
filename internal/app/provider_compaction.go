@@ -9,46 +9,14 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/provider/catalog"
 	"github.com/Viking602/azem/internal/session"
 	hyagent "github.com/Viking602/venat/agent"
-	"github.com/Viking602/venat/api"
 	"github.com/Viking602/venat/message"
 	hyprovider "github.com/Viking602/venat/provider"
 )
-
-type providerUsageBudget struct {
-	mu        sync.Mutex
-	maxTokens int64
-	used      int64
-}
-
-func (b *providerUsageBudget) beforeRequest() error {
-	if b == nil || b.maxTokens <= 0 {
-		return nil
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.used >= b.maxTokens {
-		return fmt.Errorf("%w: max tokens (%d/%d)", hyagent.ErrBudgetExhausted, b.used, b.maxTokens)
-	}
-	return nil
-}
-
-func (b *providerUsageBudget) add(usage hyprovider.Usage) {
-	if b == nil {
-		return
-	}
-	b.mu.Lock()
-	b.used += int64(usage.TotalTokens)
-	b.mu.Unlock()
-}
-
-type budgetedProviderDriver struct {
-	inner  hyprovider.Driver
-	budget *providerUsageBudget
-}
 
 type advisoryBudgetDriver struct {
 	inner   hyprovider.Driver
@@ -82,7 +50,7 @@ func (d *advisoryBudgetDriver) shouldInjectNotice() bool {
 func withAdvisoryRequestNotice(messages []message.Message) []message.Message {
 	notice := message.NewText(message.RoleSystem,
 		"[Advisory request budget reached] Finish through the shortest correct path and summarize the result. This is not a cancellation or hard limit; continue when more work is required for correctness.")
-	notice.Visibility = message.VisibilityPrivate
+	markPrivateMessage(&notice)
 	insertAt := 0
 	for insertAt < len(messages) && messages[insertAt].Role == message.RoleSystem {
 		insertAt++
@@ -91,32 +59,6 @@ func withAdvisoryRequestNotice(messages []message.Message) []message.Message {
 	result = append(result, messages[:insertAt]...)
 	result = append(result, notice)
 	return append(result, messages[insertAt:]...)
-}
-
-func (d *budgetedProviderDriver) Metadata() hyprovider.Metadata { return d.inner.Metadata() }
-
-func (d *budgetedProviderDriver) Stream(ctx context.Context, request hyprovider.Request) (hyprovider.Stream, error) {
-	if err := d.budget.beforeRequest(); err != nil {
-		return nil, err
-	}
-	stream, err := d.inner.Stream(ctx, request)
-	if err != nil {
-		return nil, err
-	}
-	return &budgetedProviderStream{Stream: stream, budget: d.budget}, nil
-}
-
-type budgetedProviderStream struct {
-	hyprovider.Stream
-	budget *providerUsageBudget
-}
-
-func (s *budgetedProviderStream) Recv() (hyprovider.Event, error) {
-	event, err := s.Stream.Recv()
-	if err == nil && event.Kind == hyprovider.EventDone {
-		s.budget.add(event.Usage)
-	}
-	return event, err
 }
 
 func configuredManualCompactionModel(models []config.LLMuxModelConfig, modelID string) (catalog.Model, bool) {
@@ -189,7 +131,7 @@ func manualCompactionMessages(ctx context.Context, manager turnContext, projecti
 	if len(projection.ToolRecords) > 0 && !source.savedModelHistoryCompatible() {
 		return nil, fmt.Errorf("manual compaction cannot preserve durable tool messages: current model history is unavailable")
 	}
-	messages, err := source.Build(ctx, api.Task{})
+	messages, err := source.Build(ctx, hyagent.Request{})
 	if err != nil {
 		return nil, err
 	}
@@ -306,10 +248,9 @@ func manualCompactionToolPair(
 			Name:      record.Name,
 			Arguments: append(json.RawMessage(nil), record.Arguments...),
 		}},
-		RunID:      record.RunID,
-		Visibility: message.VisibilityShared,
-		CreatedAt:  record.StartedAt.UTC(),
 	}
+	agentruntime.SetMessageIdentity(&call, "", "", record.RunID, "")
+	setMessageCreatedAt(&call, record.StartedAt.UTC())
 	result := message.NewToolResult(message.ToolResult{
 		ToolCallID: record.ToolCallID,
 		Name:       record.Name,
@@ -317,8 +258,8 @@ func manualCompactionToolPair(
 		Structured: structured,
 		IsError:    record.State == session.ToolFailed,
 	})
-	result.RunID = record.RunID
-	result.CreatedAt = record.CompletedAt.UTC()
+	agentruntime.SetMessageIdentity(&result, "", "", record.RunID, "")
+	setMessageCreatedAt(&result, record.CompletedAt.UTC())
 	if record.AnchorSequence >= 0 {
 		call.Metadata = copyMessageMetadata(call.Metadata, record.AnchorSequence)
 		result.Metadata = copyMessageMetadata(result.Metadata, record.AnchorSequence)

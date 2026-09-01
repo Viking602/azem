@@ -13,7 +13,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/Viking602/azem/internal/resource"
-	"github.com/Viking602/venat/coding"
 	"github.com/Viking602/venat/tool"
 )
 
@@ -33,19 +32,19 @@ type reliableSearchInput struct {
 
 type reliableSearchDriver struct {
 	root      string
-	ws        coding.Workspace
+	ws        Workspace
 	read      tool.Driver
 	resources *resource.Router
 }
 
-func newReliableSearchDriver(root string, ws coding.Workspace, read tool.Driver, resources *resource.Router) tool.Driver {
+func newReliableSearchDriver(root string, ws Workspace, read tool.Driver, resources *resource.Router) tool.Driver {
 	return reliableSearchDriver{root: root, ws: ws, read: read, resources: resources}
 }
 
 func (d reliableSearchDriver) Definition() tool.Definition {
 	additional := false
 	return tool.Definition{
-		Name:        coding.ToolSearch,
+		Name:        ToolSearch,
 		Description: "Search Git-tracked/unignored workspace text or one exact internal resource URI (including ssh://) for a case-sensitive substring or Go regexp. Returns grouped [PATH#TAG] matches; maxResults caps matched lines, not files scanned.",
 		InputSchema: tool.Schema{
 			Type: "object",
@@ -59,10 +58,6 @@ func (d reliableSearchDriver) Definition() tool.Definition {
 			Required:             []string{"query"},
 			AdditionalProperties: &additional,
 		},
-		EffectType:         tool.EffectReadOnly,
-		RequiresActionTask: false,
-		RiskLevel:          "low",
-		PolicyTags:         []string{"coding", "search"},
 	}
 }
 
@@ -94,25 +89,25 @@ func (d reliableSearchDriver) Execute(ctx context.Context, call tool.Call, _ too
 		return reliableSearchError(call, err.Error()), nil
 	}
 
-	result := coding.SearchToolResult{Truncated: listedTruncated}
+	result := SearchToolResult{Truncated: listedTruncated}
 	total := 0
 	for _, path := range paths {
 		if err := ctx.Err(); err != nil {
 			return tool.Result{}, err
 		}
-		candidate, err := d.ws.ReadFile(ctx, coding.ReadFileRequest{Path: path})
+		candidate, err := d.ws.ReadFile(ctx, ReadFileRequest{Path: path})
 		if err != nil || strings.IndexByte(candidate.Text, 0) >= 0 || !searchTextMatches(candidate.Text, input.Query, expression) {
 			continue
 		}
 		arguments, _ := json.Marshal(map[string]string{"path": path})
-		readResult, err := d.read.Execute(ctx, tool.Call{ID: call.ID + "-read", Name: coding.ToolReadFile, Arguments: arguments}, nil)
+		readResult, err := d.read.Execute(ctx, tool.Call{ID: call.ID + "-read", Name: ToolReadFile, Arguments: arguments}, nil)
 		if err != nil {
 			return tool.Result{}, err
 		}
 		if readResult.IsError {
 			continue
 		}
-		var read coding.ReadFileToolResult
+		var read ReadFileToolResult
 		if json.Unmarshal(readResult.Structured, &read) != nil {
 			continue
 		}
@@ -120,7 +115,7 @@ func (d reliableSearchDriver) Execute(ctx context.Context, call tool.Call, _ too
 		if len(matches) == 0 {
 			continue
 		}
-		result.Files = append(result.Files, coding.SearchToolFile{Path: read.Path, Tag: read.Tag, Header: "[" + read.Path + "#" + read.Tag + "]", Matches: matches})
+		result.Files = append(result.Files, SearchToolFile{Path: read.Path, Tag: read.Tag, Header: "[" + read.Path + "#" + read.Tag + "]", Matches: matches})
 		total += len(matches)
 		if total >= maxResults {
 			result.Truncated = true
@@ -136,7 +131,7 @@ func (d reliableSearchDriver) searchInternalResource(ctx context.Context, call t
 	if d.resources == nil {
 		return reliableSearchError(call, "internal resources are unavailable")
 	}
-	caller, _ := tool.CallerFromContext(ctx)
+	caller, _ := InvocationFromContext(ctx)
 	result, err := d.resources.Read(ctx, input.Path, "raw", resource.Scope{SessionID: caller.SessionID, RunID: caller.TeamRunID, Workspace: d.root})
 	if err != nil {
 		return reliableSearchError(call, err.Error())
@@ -149,19 +144,19 @@ func (d reliableSearchDriver) searchInternalResource(ctx context.Context, call t
 	}
 	text := string(result.Data)
 	lines := strings.Split(text, "\n")
-	matches := make([]coding.SearchMatch, 0)
+	matches := make([]SearchMatch, 0)
 	for index, line := range lines {
 		matched := expression != nil && expression.MatchString(line) || expression == nil && strings.Contains(line, input.Query)
 		if matched {
-			matches = append(matches, coding.SearchMatch{LineNumber: index + 1, Line: line})
+			matches = append(matches, SearchMatch{LineNumber: index + 1, Line: line})
 			if len(matches) >= maxResults {
 				break
 			}
 		}
 	}
 	tag := computeHashlineTag(normalizeHashlineText(result.Data))
-	file := coding.SearchToolFile{Path: input.Path, Tag: tag, Header: "[" + input.Path + "#" + tag + "]", Matches: matches}
-	output := coding.SearchToolResult{Files: []coding.SearchToolFile{file}, Truncated: len(matches) >= maxResults}
+	file := SearchToolFile{Path: input.Path, Tag: tag, Header: "[" + input.Path + "#" + tag + "]", Matches: matches}
+	output := SearchToolResult{Files: []SearchToolFile{file}, Truncated: len(matches) >= maxResults}
 	if len(matches) == 0 {
 		output.Files = nil
 	}
@@ -174,7 +169,7 @@ func (d reliableSearchDriver) searchPaths(ctx context.Context, pattern string) (
 	paths, err := gitSearchPaths(ctx, d.root)
 	truncated := false
 	if err != nil {
-		listed, listErr := d.ws.ListFiles(ctx, coding.ListFilesRequest{
+		listed, listErr := d.ws.ListFiles(ctx, ListFilesRequest{
 			Ignore: []string{"node_modules", "*/node_modules", "vendor", "*/vendor", "dist", "*/dist", "build", "*/build"},
 			Limit:  reliableSearchFileListLimit,
 		})
@@ -233,12 +228,12 @@ func searchTextMatches(text, query string, expression *regexp.Regexp) bool {
 	return strings.Contains(text, query)
 }
 
-func searchNumberedContent(content, query string, expression *regexp.Regexp, remaining int) []coding.SearchMatch {
+func searchNumberedContent(content, query string, expression *regexp.Regexp, remaining int) []SearchMatch {
 	if remaining <= 0 {
 		return nil
 	}
 	lines := strings.Split(content, "\n")
-	matches := make([]coding.SearchMatch, 0)
+	matches := make([]SearchMatch, 0)
 	for _, line := range lines[1:] {
 		separator := strings.IndexByte(line, ':')
 		if separator <= 0 {
@@ -253,7 +248,7 @@ func searchNumberedContent(content, query string, expression *regexp.Regexp, rem
 		if !matched {
 			continue
 		}
-		matches = append(matches, coding.SearchMatch{LineNumber: lineNumber, Line: text})
+		matches = append(matches, SearchMatch{LineNumber: lineNumber, Line: text})
 		if len(matches) >= remaining {
 			break
 		}
@@ -261,7 +256,7 @@ func searchNumberedContent(content, query string, expression *regexp.Regexp, rem
 	return matches
 }
 
-func renderReliableSearch(files []coding.SearchToolFile) string {
+func renderReliableSearch(files []SearchToolFile) string {
 	var output strings.Builder
 	for index, file := range files {
 		if index > 0 {
@@ -277,5 +272,5 @@ func renderReliableSearch(files []coding.SearchToolFile) string {
 }
 
 func reliableSearchError(call tool.Call, message string) tool.Result {
-	return tool.Result{ToolCallID: call.ID, Name: call.Name, Content: "coding.search failed: " + message, IsError: true}
+	return tool.Result{ToolCallID: call.ID, Name: call.Name, Content: "search failed: " + message, IsError: true}
 }

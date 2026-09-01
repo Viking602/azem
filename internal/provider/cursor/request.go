@@ -2,6 +2,7 @@ package cursor
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/binary"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/azem/internal/provider/responses"
 	"github.com/Viking602/venat/message"
 	hyprovider "github.com/Viking602/venat/provider"
@@ -202,6 +204,10 @@ type promptLayout struct {
 }
 
 func buildRunRequest(request hyprovider.Request, conversationID, accountScope string, conversations *ConversationCache) (runPayload, error) {
+	return buildRunRequestContext(context.Background(), request, conversationID, accountScope, conversations)
+}
+
+func buildRunRequestContext(ctx context.Context, request hyprovider.Request, conversationID, accountScope string, conversations *ConversationCache) (runPayload, error) {
 	if conversations == nil {
 		return runPayload{}, fmt.Errorf("cursor conversation cache is required")
 	}
@@ -215,11 +221,11 @@ func buildRunRequest(request hyprovider.Request, conversationID, accountScope st
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 
-	layout, err := promptBlobs(request, entry.blobs)
+	layout, err := promptBlobs(ctx, request, entry.blobs)
 	if err != nil {
 		return runPayload{}, err
 	}
-	turns, err := buildConversationTurns(request.Messages, layout.activeUser, request.Model, requestAttachmentRoot(request), entry.blobs)
+	turns, err := buildConversationTurns(request.Messages, layout.activeUser, request.Model, requestAttachmentRoot(ctx), entry.blobs)
 	if err != nil {
 		return runPayload{}, err
 	}
@@ -280,13 +286,13 @@ func requestConversationID(request hyprovider.Request, explicit string) string {
 	return randomID()
 }
 
-func requestAttachmentRoot(request hyprovider.Request) string {
-	return responses.RequestAttachmentRoot(request)
+func requestAttachmentRoot(ctx context.Context) string {
+	return responses.AttachmentRootFromContext(ctx)
 }
 
-func promptBlobs(request hyprovider.Request, blobs *blobStore) (promptLayout, error) {
+func promptBlobs(ctx context.Context, request hyprovider.Request, blobs *blobStore) (promptLayout, error) {
 	layout := promptLayout{activeUser: activeUserIndex(request.Messages)}
-	attachmentRoot := requestAttachmentRoot(request)
+	attachmentRoot := requestAttachmentRoot(ctx)
 	if layout.activeUser >= 0 {
 		layout.userText = strings.TrimSpace(request.Messages[layout.activeUser].Text)
 		var err error
@@ -355,7 +361,7 @@ func cursorRootMessages(messages []message.Message, activeUser int) []message.Me
 			continue
 		}
 		tailEnd := index + 1
-		for tailEnd < len(messages) && messages[tailEnd].Visibility == message.VisibilityPrivate {
+		for tailEnd < len(messages) && agentruntime.MessageVisibilityOf(messages[tailEnd]) == agentruntime.MessageVisibilityPrivate {
 			tailEnd++
 		}
 		ordered = append(ordered, messages[index+1:tailEnd]...)
@@ -368,14 +374,14 @@ func cursorRootMessages(messages []message.Message, activeUser int) []message.Me
 }
 
 func isSharedUser(current message.Message) bool {
-	return current.Visibility != message.VisibilityPrivate &&
+	return agentruntime.MessageVisibilityOf(current) != agentruntime.MessageVisibilityPrivate &&
 		(current.Role == message.RoleUser || current.Role == message.RoleCustom)
 }
 
 func activeUserIndex(messages []message.Message) int {
 	for index := len(messages) - 1; index >= 0; index-- {
 		current := messages[index]
-		if current.Visibility == message.VisibilityPrivate {
+		if agentruntime.MessageVisibilityOf(current) == agentruntime.MessageVisibilityPrivate {
 			continue
 		}
 		if isSharedUser(current) {

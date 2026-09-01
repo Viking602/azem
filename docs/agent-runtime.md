@@ -1,92 +1,101 @@
 # Agent Runtime
 
-Last verified: 2026-08-24
+Last verified: 2026-08-29
 
-Azem executes every conversation turn through the Venat agent framework
-(`github.com/Viking602/venat` in `go.mod`). `internal/agent` wraps Venat's
-durable runner and worker APIs behind `agent.Service`; `internal/app` rebuilds
-a transient provider engine for each turn and binds it to the durable run.
-`go.mod` is authoritative for the framework version; final validation runs with
-`GOWORK=off` (AGENTS.md RUNTIME-001).
+Azem executes conversation, Team-role, Subagent, and security-automation model
+work through Venat v0.16.1 (`github.com/Viking602/venat` in `go.mod`).
+`internal/app` builds a direct `agent.Engine`; `internal/agent` binds that
+transient engine to one stable `durable.Runtime` execution and projects the
+result into Azem's application state. `go.mod` is authoritative; framework
+verification always runs with `GOWORK=off` (AGENTS.md RUNTIME-001).
 
 ## Venat integration
 
-`agent.NewService` (`internal/agent/service.go`) constructs the production
-runner with `venat.NewProduction(api.Config{StoreProvider, PolicyEngine})`.
-The store provider is the SQLite adapter set in `internal/store/sqlite`; the
-policy engine is Azem's `ApprovalPolicy`. The main agent registers as profile
-`azem-main` with role `coding`; each subagent type registers on demand as
-`azem-subagent-<type>`.
+`agent.NewService` (`internal/agent/service.go`) constructs exactly one
+`durable.Runtime` for the service lifetime over
+`internal/store/sqlite.DurableBackend`. No legacy `Runner`, worker deployment,
+or compatibility facade participates in execution.
 
 Division of ownership:
 
-- Venat owns runs, tasks, leases, admission, resource claims, retries,
-  approvals, resume tokens, and action attempts. Azem persists all of them
-  through the SQLite store adapters (`docs/persistence.md`).
-- Azem owns providers, tools, sessions, context management, and UI projection.
-- Venat is the single retry owner. Configured `retry` maps to
-  `api.RetryPolicy{MaxAttempts: MaxRetries + 1, Backoff, MaxBackoff}` on run
-  start (`ProviderRuntime.Start`); llmux drivers pin
-  `sdk.RetryPolicy{MaxAttempts: 1}` so providers never retry internally.
-- Main and subagent definitions declare `ToolMode: api.ToolModeParallel`
-  (`agentDefinitionForSpec`), so Venat dispatches whole tool batches in
-  parallel (CONCURRENCY-001). Shell execution and subagent scheduling still
-  enforce their own concurrency limits, and skill-activation batches remain
-  sequential inside Venat.
+- Azem owns policy, application runs/tasks, approvals and resume tokens,
+  resource claims, provider routing, tools, Team/Subagent orchestration,
+  sessions, persistence composition, and UI projection.
+- Venat durable owns one execution's immutable spec, lease, continuation
+  checkpoint, model/tool effect attempts, settlement receipts, and exact
+  start/resume/reconcile mechanics.
+- The versioned `agent_execution_bindings` row connects those domains. Its
+  immutable manifest identifies session, run, agent, execution kind, segment,
+  provider/account/model, reasoning, Skills, tool schema, workspace, budgets,
+  and static prompt identity.
+- `retryProviderDriver` is the one pre-stream transport retry owner. llmux
+  internal retries remain disabled. The durable interceptor records each model
+  and tool effect independently, so retry cannot bypass response-loss or
+  unknown-attempt handling.
+- Main, Team-role, Subagent, and automation engines set
+  `tool.ModeParallel`. Shell and Subagent schedulers retain their independent
+  concurrency limits; Skill activation dependencies remain serialized.
 
-## Engine construction per turn
+This is a clean ownership cut, not a compatibility layer: Azem never asks
+Venat to own sessions, Team/Subagent lifecycle, policy, or UI state, and Azem
+never reimplements Venat's execution lease/checkpoint/attempt settlement. A
+v0.15 non-terminal row has no implicit v1 continuation; only a new versioned
+binding may enter the v0.16 runtime.
 
-Durable coordination and transient execution are separate objects:
 
-1. `ProviderRuntime.Start` (`internal/app/provider_runtime.go`) resolves the
-   provider driver, then calls `agent.Service.StartRunWithMetadata`. That
-   creates a `hyworker.SingleRunner` (runner + `hyworker.AgentWorker` with the
-   10-minute `defaultRunLeaseTTL` + `hyworker.StandardAdmissionController`)
-   and starts the durable run with the budget, retry policy, and resource
-   claims from `RunExecutionPolicy`. Agent ID, agent version, and governance
-   are persisted in run metadata (`azem.single_agent_*` keys) so a later
-   process can rebuild the same coordinator.
-2. `buildSingleRun` rebuilds the transient side: workspace tool drivers,
-   Todo/plan/context-artifact/MCP/subagent tools, Skills, instructions, the
-   semantic `ContextManager`, and the immutable static-identity hash. It wraps
-   the provider driver with `budgetedProviderDriver` and stores an immutable
-   `singleRunManifest` (version 2: provider, account, model, reasoning, active
-   skills, plan state, `StaticIdentity`, budgets, `StartedAt`) in run metadata
-   for resume.
-   Completed Skill activations restore resource-read authorization on later
-   turns without adding eager Skill bodies or changing the advertised
-   activation/resource schemas. Venat v0.15.4 therefore keeps the provider
-   system/tool prefix byte-stable across activation replay.
-3. `materializeAgentDefinition` deploys the content-hashed agent definition
-   through `hyworker.DefinitionDeployment`, which persists
-   `agent_definition_snapshots` rows (schema 18).
-4. `agent.Service.ExecuteRun` binds the engine and stream sink to the
-   coordinator. The lease is acquired only at this point; the
-   `OnLeaseAcquired` observer copies `EnvelopeID`, `LeaseID`, `TaskVersion`,
-   and `HolderID` into the tracked run so governed tools can prove
-   lease-scoped authorization.
+## Engine construction per execution
+
+Durable coordination and transient engine construction stay separate:
+
+1. `ProviderRuntime.Start` resolves the provider/account/model and calls
+   `agent.Service.StartRunWithMetadata`. That transaction creates the Azem
+   run, root task, envelope, and a pending v1 execution binding before any
+   provider or tool effect.
+2. `buildSingleRun` assembles workspace tools, Todo/plan/context-artifact/MCP/
+   Subagent tools, Skills, instructions, context management, provider retry,
+   and output guardrails, then builds a direct `agent.Engine`.
+3. `SealExecutionProfile` stores the complete immutable manifest and its hash
+   before `durable.Runtime.StartStream`. Completed Skill activations restore
+   resource-read authorization without changing the advertised Skill tools or
+   provider prefix. A model with provider-default reasoning stores the stable
+   identity `provider-default` while sending no fabricated reasoning value on
+   the provider wire.
+4. `agent.Service.ExecuteRun` uses `StartStream` for a pending binding and
+   `ResumeStreamWithOptions` for every persisted execution. Venat fences the
+   lease, saves a continuation before effects, and returns unknown effects as
+   `ErrReconcileRequired`; Azem never guesses or retries such an effect.
+5. The transient `agent.Sink` may replay frames after restart. Session blocks,
+   tool timeline rows, usage, and terminal projection therefore deduplicate by
+   durable execution/operation identity rather than treating frames as an
+   exactly-once log.
 
 ## Single and Team modes
 
-Single mode is the default (`defaults.agent_mode`). Team mode
-(`AgentMode == "team"`) runs through `agent.Service.StartTeamWithID`
-(`internal/agent/team.go`): a `worker.TeamRunner` executes the `multiagent`
-team `coding-team` with four classes — planner, implementer, reviewer,
-reporter — driven by the replay-safe `CodingScheduler`
-(`internal/agent/scheduler.go`), which permits one revision loop between
-reviewer and implementer. `agents.team.max_concurrency` (default 2) and
-`agents.team.max_ticks` (default 12) bound the runner. Only classes whose
-tools can mutate the workspace receive workspace resource claims
-(`codingClassMayMutateWorkspace`). Team runs are marked with run metadata
-`team=true`, a `workspace_anchor`, and provider/account bindings so recovery
-can route them to `ResumeTeam`.
+Single mode is the default (`defaults.agent_mode`). Team mode preserves the
+deterministic planner → implementer → reviewer → at most one revision →
+reviewer → reporter policy in `internal/agent/scheduler.go`.
+
+Team scheduling is application-owned. `team_runtime.go` calls
+`orchestration.Drive` with `MaxTicks: 1` and the persisted orchestration state,
+saves the returned state after every tick, then recomputes the next pure
+scheduler batch. Every dispatch has a globally stable ID and an independent
+v1 durable execution binding. A role's `agent.Result.Failure` becomes
+orchestration outcome data; only an infrastructure error aborts the drive.
+Azem remains authoritative for Team state, handoffs, role prompts/Skills/tool
+allowlists, workspace policy, approval/UI state, concurrency, and the
+configured tick ceiling.
 
 ## Subagent scheduling
 
-`subagentRuntime` (`internal/app/subagent_runtime.go`) schedules children
-outside Venat's admission controller but gives each child its own durable
-Venat run (`StartRunWithMetadata` with agent ID `azem-subagent-<type>`).
-Configuration lives under `agents.subagents` (`internal/config/config.go`):
+`subagentRuntime` (`internal/app/subagent_runtime.go`) remains the
+application-owned child lifecycle and scheduler. Each child worker is a
+direct `agent.Engine` with its own v1 durable execution
+(`StartRunWithMetadata` using a stable Subagent agent ID). The
+`subagent_runs` store—not Venat—is authoritative for queueing, foreground/
+background state, watchdog activity, peer delivery, completion, cancellation,
+and wake batching. `subagent.spawn`, `subagent.get_output`, and
+`subagent.kill` remain app tools; they are not replaced by synchronous
+`agent.NewAgentTool` calls. Configuration lives under `agents.subagents`:
 
 - `enabled` default true; `max_depth` default 2, `-1` unlimited, 0 disables
   delegation entirely. Spawn tools are re-exposed to children at `Depth+1`
@@ -117,6 +126,12 @@ re-entrant child so synchronous recursive delegation cannot deadlock
 cancelled by `subagent.kill`, an explicit include-children stop, application
 shutdown (SUBAGENT-001), or an optional configured `idle_timeout`
 (SUBAGENT-005).
+
+Every active child serializes its own durable state writes without holding the
+global scheduler mutex. Cancellation uses a bounded lifecycle-independent
+context, supersedes any in-flight `queued`/`running` save, and precedes the
+terminal save. Shutdown therefore cannot resurrect a cancelled child through a
+late startup or heartbeat write (SUBAGENT-009).
 
 The main agent prompt requires review or verification that gates later work
 to stay foreground. If any child of the current run is still non-terminal
@@ -157,61 +172,52 @@ second stream. The wake user block keeps `kind=user` so it remains in
 model context, but sets `state=subagent_wake` and structured `data.tasks`
 (UI-013). Wake turns set `DisableSubagents` to prevent a spawn loop.
 
-## Durable runs, tasks, and leases
+## Durable executions and resource claims
 
-Every run owns a root task; execution requires a task lease with the
-10-minute `defaultRunLeaseTTL`. Lease persistence uses compare-and-swap
-versioning in `internal/store/sqlite/stores_governance.go`
-(`AcquireWithExpectedVersion`, `ExtendLease`, `ReleaseExpiredLease`); the
-`leases` table's active-slot unique index guarantees one active lease per
-task. Schema 18 adds the control-plane tables `agent_definition_snapshots`,
-`admission_reservations`, and `resource_claims`
-(`internal/store/sqlite/migrations.go`). Only a process that first acquires
-the exclusive recovery fence may expire leases (RUNTIME-002,
-`docs/recovery.md`).
+Every app run has a root task and one or more versioned execution bindings.
+Each binding points to one stable Venat execution ID. Schema 27 persists the
+immutable execution spec, current lease and continuation, provider/tool
+attempts, settlement receipts, and the Azem binding. A single
+`agent.Service` owns one `durable.Runtime` until shutdown; it does not create a
+second runtime per turn or per resume.
 
-## Admission and resource claims
-
-`hyworker.StandardAdmissionController` persists admission reservations before
-execution. Workspace mutation is serialized through exclusive resource claims
-keyed `azem:workspace-write:<canonical-root>` (`internal/app/
-workspace_claims.go`); the root is symlink-resolved and case-folded on macOS
-and Windows. The main run requests the claim unless `workspace.allow_write`
-is false and `workspace.shell_policy` is `deny`
-(`topLevelWorkspaceWriteClaims`). Subagents with worktree isolation or
-read-only tools skip the claim.
-
-A denied claim is not a failure. `executeMainRunUntilAvailable`
-(`internal/app/provider_execution.go`) retries
-`hyworker.TaskExecutionUnavailableError` after `resourceClaimRetryDelay`
-(bounded between 100 ms and 1 s by the earliest conflicting claim expiry);
-the subagent execute loop waits the same way. Neither path persists a raw
-"resource claims denied" terminal block (RUNTIME-002).
-
+Azem's application resource claims remain separate from Venat's execution
+lease. Main sessions and shared-workspace Subagents do not take a global
+workspace-write claim (RUNTIME-003). Any remaining real transient claim
+conflict returns `TaskExecutionUnavailableError`; main and child loops wait and
+retry instead of persisting the conflict as a provider failure. Only the
+exclusive startup recovery owner expires orphaned legacy claims.
 ## Run resume
 
-`ProviderRuntime.ResumeRun` (`internal/app/provider_resume.go`) rebuilds a
-single-agent engine around the durable run:
+Startup and explicit resume classify the v1 binding before rebuilding an
+engine:
 
-1. Terminal and `reconcile_required` runs are left alone.
-2. The session named by run metadata must still own the run
-   (`projection.LastRunID == runID`); otherwise the run is marked for
-   reconciliation through `RequireRunReconciliation`.
-3. The immutable `singleRunManifest` restores provider/account/model/
-   reasoning, active skills, plan state, budgets, and `StaticIdentity`.
-   A missing or invalid manifest also forces reconciliation.
-4. `buildSingleRun` recomputes the static identity; a mismatch surfaces as
-   `errResumeProfileChanged`, which suspends the run via
-   `agent.Service.ReleaseRun` and marks it `reconcile_required` instead of
-   silently executing with a different profile.
-5. Consumed budget is restored: `ProviderRunTotalTokens` seeds the token
-   budget, elapsed wall clock is subtracted, and an already-exhausted budget
-   terminalizes the run explicitly (`terminalizeRecoveredBudget`) rather than
-   re-executing it.
+1. A non-terminal v0.15 run with no v1 binding is marked
+   `reconcile_required`. Its old lease, provider request, approval, and action
+   evidence remains available, but Azem does not synthesize a continuation or
+   execute a pending legacy tool.
+2. Pending v1 bindings start from their sealed manifest. Running or suspended
+   bindings load the persisted Venat execution and exact continuation.
+   Terminal bindings replay their recorded result into the idempotent Azem
+   projection.
+3. The manifest version, ownership fields, profile hash, provider/account/
+   model, reasoning, Skill/tool identities, workspace anchor, prompt identity,
+   and session ownership must still match. Missing or changed facts move the
+   run to reconciliation.
+4. A suspended approval remains waiting. After a durable decision, main and
+   recovered approval actions call `ResumeRunAtOperation`; app-owned child
+   controllers select the latest durable decision and resume that exact
+   operation. Parallel tool calls are never resumed through an ambiguous
+   generic target.
+5. Claiming a crashed execution atomically turns any in-flight model/tool
+   attempt into `unknown`. The run stays `reconcile_required` until the user
+   resolves the exact attempt number/version; no provider or tool replay occurs
+   first.
 
-`ResumeRecoveredRun` routes `team=true` metadata to `ResumeTeam`, which
-validates the stored `workspace_anchor` and provider account binding before
-resuming the `TeamRunner` checkpoint.
+Team recovery reloads application-owned orchestration state, then rebuilds an
+independent engine for each unfinished dispatch. Subagent recovery first marks
+the lifecycle row interrupted; rebuilding the parent runtime requeues its
+existing durable child execution without replacing `subagent_runs`.
 
 Session checkpoint ownership is separate from run resumption: run model
 history is persisted through `session.SaveRunCheckpoint`, which rejects stale
@@ -221,25 +227,24 @@ overwrite a newer one; `session.CompleteTurn` finalizes the durable turn
 
 ## Usage persistence
 
-`meteredProviderDriver` (`internal/app/provider_metering.go`) wraps every main
-provider driver and persists one `ProviderRequestFact` per request into the
-`provider_requests` table before and after streaming, including token and
-cache counters. Team and compaction requests report through their own usage
-reporters. `ProviderRunTotalTokens` aggregates the facts per run for budget
-restore. Venat's own usage store is served by `AppendUsage`/`QueryUsage` in
-`stores_governance.go`; aggregate query limits follow the current Venat
-contract and must not revert to the old semantics (RUNTIME-001).
+`meteredProviderDriver` (`internal/app/provider_metering.go`) wraps main,
+Team-role, Subagent, and automation provider drivers and persists one
+`ProviderRequestFact` per request before and after streaming, including token
+and cache counters. `ProviderRunTotalTokens` aggregates those facts for budget
+restore. Provider usage facts remain an Azem session concern; Venat durable
+attempt payloads are execution-settlement evidence and are not a second usage
+ledger.
 
 ## Budgets
 
 Hard budgets terminate; the soft budget only advises.
 
 - Main run: `agents.main.max_tokens`, `max_tool_calls`, `max_wall_clock`
-  (defaults 0 = unbounded) flow into `api.TaskBudget` and the run governance
-  snapshot. `budgetedProviderDriver` checks cumulative provider-reported
-  usage between requests — the request in flight may finish, the next one is
-  refused with `hyagent.ErrBudgetExhausted`. Compaction requests share the
-  same `providerUsageBudget`.
+  (defaults 0 = unbounded) flow into `agentruntime.TaskBudget`, governance,
+  and the immutable execution manifest. `budgetedProviderDriver` checks
+  cumulative provider-reported usage between requests—the request in flight
+  may finish, and the next is refused with `hyagent.ErrBudgetExhausted`.
+  Compaction requests share the same `providerUsageBudget`.
 - Subagents: `agents.subagents.budget.max_tokens`, `max_tool_calls`,
   `max_turns`, `max_wall_clock` (defaults 0 = unbounded) bound each child.
 - `agents.subagents.budget.soft_requests` (default 200, with
@@ -252,11 +257,15 @@ Budget failures are wrapped with configuration hints
 
 ## OMP-compatible run controls
 
-Azem keeps every mode on the same Venat run and durable session:
+Azem keeps every mode on the same application run, v1 durable execution, and
+durable session:
 
-- Steering and queued follow-ups use Venat's durable turn-control channel.
-  Steering is consumed before undispatched tool work; follow-ups remain ordered
-  for the next turn.
+- Steering, prewalk, loop guards, peer delivery, and queued follow-ups enter
+  one Azem FIFO. `BeforeModelCall` injects reserved messages; the boundary
+  observer acknowledges them only after the continuation is durable.
+  Undelivered reservations are released on suspension/error. A write or
+  external attempt with uncertain outcome blocks in reconciliation rather
+  than being discarded to honor a steer.
 - Goal state, checkpoint/rewind metadata, Todo, and provider-neutral loop-guard
   decisions persist with the session. Goal completion never bypasses unfinished
   Todo or verification guardrails.
@@ -291,10 +300,12 @@ that seam.
 ## Background security runs
 
 Security scans use `ProviderRuntime` through an internal automation profile,
-not `Service.StartConfiguredTurn`. The profile starts a normal Venat run with
-the host-resolved Azem route, a snapshot-rooted read-only tool set, native
-security submission tools, ordinary retry ownership, and zero Token/tool-call
-`TaskBudget` limits. Audit children are limited to bundled security roles,
+not `Service.StartConfiguredTurn`. The profile creates an application-owned
+run and v1 durable execution, uses the same engine coordinator and approval
+hook as main/Team/Subagent work, binds a snapshot-rooted read-only tool set,
+and retains the security store, deadline, native submission tools, and UI
+events as application-owned state and does not set `TaskBudget` Token/tool-call
+ceilings. Audit children are limited to bundled security roles,
 cannot nest, and receive no project Skills/MCP/hooks. The scan coordinator owns
 the persisted absolute deadline and convergence bounds. Native Desktop starts
 therefore cannot be terminated by Azem's partial provider-usage accounting.
@@ -311,12 +322,12 @@ sequence after restart rather than replaying accepted work. See
 ## Verification
 
 ```bash
-go test ./internal/agent ./internal/app ./internal/store/sqlite ./internal/config
+GOWORK=off go test ./internal/agent ./internal/app ./internal/recovery ./internal/store/sqlite ./internal/config
 ```
 
-Guarded coverage includes parallel tool dispatch
-(`TestAgentDefinitionUsesParallelToolDispatch`), workspace-claim wait/retry
-(`TestMainRunWaitsForWorkspaceClaimInsteadOfFailing`), recursive completion at
-concurrency one, unbounded-concurrency updates, advisory budgets, combined
-usage budgets, and resume manifest/budget restoration in
-`provider_runtime_test.go` and `subagent_runtime_test.go`.
+Guarded coverage includes direct-engine executable-spec/parallel-tool
+preservation (`TestDirectAgentBuildPreservesExecutableSpecAndSeparatesRequestBudget`),
+workspace-claim wait/retry, recursive completion at concurrency one,
+unbounded-concurrency updates, advisory/combined usage budgets, immutable
+binding/profile validation, exact approval resume, v0.15 reconciliation, and
+restart restoration in the agent, app, recovery, and SQLite suites.

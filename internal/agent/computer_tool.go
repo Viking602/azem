@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/venat/message"
 	"github.com/Viking602/venat/tool"
 )
@@ -52,23 +53,26 @@ func (driver *computerDriver) Definition() tool.Definition {
 				"timeout":   {Type: "integer", Description: "Run budget in seconds, default 30, range 1-300."},
 			},
 		},
-		EffectType: tool.EffectExternalSideEffect, RequiresApproval: true, RequiresActionTask: true, RiskLevel: "high",
-		PolicyTags: []string{"computer", "desktop", "execute"}, Concurrency: tool.ConcurrencyExclusive, ConcurrencyGroup: "computer-session",
+		Concurrency: tool.ConcurrencyExclusive, ConcurrencyGroup: "computer-session",
 	}
 }
 
-func (driver *computerDriver) DefinitionForCall(call tool.Call) tool.Definition {
-	definition := driver.Definition()
+func (driver *computerDriver) PolicyForCall(call tool.Call) agentruntime.ToolPolicy {
+	policy := agentruntime.ToolPolicy{
+		Effect: agentruntime.ToolEffectExternalSideEffect, RequiresApproval: true, RequiresActionTask: true,
+		RiskLevel: "high", PolicyTags: []string{"computer", "desktop", "execute"},
+		Concurrency: tool.ConcurrencyExclusive, ConcurrencyGroup: "computer-session",
+	}
 	var input struct {
 		ReadOnly bool `json:"read_only"`
 	}
 	if json.Unmarshal(call.Arguments, &input) == nil && input.ReadOnly {
-		definition.EffectType = tool.EffectReadOnly
-		definition.RequiresApproval = false
-		definition.RequiresActionTask = false
-		definition.RiskLevel = "low"
+		policy.Effect = agentruntime.ToolEffectReadOnly
+		policy.RequiresApproval = false
+		policy.RequiresActionTask = false
+		policy.RiskLevel = "low"
 	}
-	return definition
+	return policy
 }
 
 func (driver *computerDriver) Execute(ctx context.Context, call tool.Call, _ tool.UpdateSink) (tool.Result, error) {
@@ -88,7 +92,7 @@ func (driver *computerDriver) Execute(ctx context.Context, call tool.Call, _ too
 	if input.Timeout < 1 || input.Timeout > 300 {
 		return computerError(call, errors.New("timeout must be between 1 and 300 seconds")), nil
 	}
-	caller, _ := tool.CallerFromContext(ctx)
+	caller, _ := InvocationFromContext(ctx)
 	sessionID := caller.SessionID
 	if sessionID == "" {
 		sessionID = caller.TeamRunID

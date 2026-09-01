@@ -13,7 +13,7 @@ import (
 	"github.com/Viking602/azem/internal/contextarchive"
 	"github.com/Viking602/azem/internal/session"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
-	"github.com/Viking602/venat/api"
+	hyagent "github.com/Viking602/venat/agent"
 	"github.com/Viking602/venat/message"
 )
 
@@ -316,7 +316,7 @@ func TestArchiveFramesRepairFromDurableSourceAfterRestart(t *testing.T) {
 		ProviderID: "provider", ModelID: "model", InstructionFingerprint: "static", StaticPrefixHash: "static",
 		WireVersion: session.CurrentWireVersion, CoveredThroughSequence: &boundary, Messages: compacted,
 	}
-	rebuilt, err := restarted.Build(ctx, api.Task{})
+	rebuilt, err := restarted.Build(ctx, hyagent.Request{})
 	mustTestNoError(t, err)
 	repairedIndex := archiveCarrierIndex(rebuilt)
 	if repairedIndex < 0 {

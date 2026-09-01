@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -405,6 +406,19 @@ func TestCancelDuringStartAcceptsEitherMessageOrdering(t *testing.T) {
 	model.applyEvent(app.Event{Kind: app.EventRunCancelled, SessionID: "default", RunID: "run-event-first"})
 	if model.runID != "" || model.status != "Cancelled" {
 		t.Fatalf("event-first terminal runID=%q status=%q", model.runID, model.status)
+	}
+}
+
+func TestCancelDuringStartDoesNotRenderWrappedContextCancellationAsFailure(t *testing.T) {
+	for _, status := range []string{"Cancelling", "Cancelled"} {
+		model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
+		model.status = status
+		model.runID = "starting"
+		updated, _ := model.Update(startTurnResultMsg{Err: errors.Join(errors.New("load Goal mode state"), context.Canceled)})
+		model = updated.(AppModel)
+		if model.status != "Cancelled" || model.runID != "" || model.errorBanner != "" || len(model.transcript) != 0 {
+			t.Fatalf("status=%q result status=%q runID=%q banner=%q transcript=%#v", status, model.status, model.runID, model.errorBanner, model.transcript)
+		}
 	}
 }
 

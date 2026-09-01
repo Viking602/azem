@@ -218,7 +218,7 @@ finished:
 	if err != nil {
 		t.Fatal(err)
 	}
-	durableRun, err := coding.Runner().Run(ctx, runID)
+	durableRun, err := coding.LoadRun(ctx, runID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,12 +230,17 @@ finished:
 	if projection.Run.Status != "completed" {
 		t.Fatalf("team run status=%q", projection.Run.Status)
 	}
-	var actionAttempts int
-	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM records WHERE kind='action_attempt' AND run_id=?`, runID).Scan(&actionAttempts); err != nil {
+	var toolAttempts int
+	if err := store.DB().QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM agent_effect_attempts AS attempt
+		JOIN agent_execution_bindings AS binding USING (execution_id)
+		WHERE binding.run_id=? AND binding.kind='team' AND attempt.kind='tool' AND attempt.status='succeeded'
+	`, runID).Scan(&toolAttempts); err != nil {
 		t.Fatal(err)
 	}
-	if actionAttempts != 1 {
-		t.Fatalf("team action attempts=%d", actionAttempts)
+	if toolAttempts != 1 {
+		t.Fatalf("team durable tool attempts=%d", toolAttempts)
 	}
 	sessionProjection, err := sessions.LoadProjection(ctx, "default")
 	if err != nil {
@@ -295,7 +300,7 @@ func TestResumeTeamRequiresMatchingWorkspace(t *testing.T) {
 			if err := runtime.ResumeTeam(ctx, run.RunID); err != nil {
 				t.Fatalf("ResumeTeam() error = %v", err)
 			}
-			durable, err := coding.Runner().Run(ctx, run.RunID)
+			durable, err := coding.LoadRun(ctx, run.RunID)
 			if err != nil {
 				t.Fatal(err)
 			}

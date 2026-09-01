@@ -259,7 +259,7 @@
       "owner": "azem",
       "status": "complete",
       "ompEvidence": "packages/coding-agent/src/task",
-      "azemEvidence": "internal/app/subagent_runtime.go; internal/app/subagent_tools.go; github.com/Viking602/venat/worker"
+      "azemEvidence": "internal/app/subagent_runtime.go; internal/app/subagent_tools.go; internal/agentruntime/execution.go; internal/store/sqlite/durable_backend.go"
     },
     {
       "id": "agents.team",
@@ -280,10 +280,10 @@
     {
       "id": "agents.park-revive",
       "group": "agents",
-      "owner": "venat",
+      "owner": "azem",
       "status": "complete",
       "ompEvidence": "packages/coding-agent/src/registry; packages/coding-agent/src/task/persisted-revive.ts",
-      "azemEvidence": "internal/app/subagent_runtime.go; internal/app/subagent_hub.go; github.com/Viking602/venat/worker"
+      "azemEvidence": "internal/app/subagent_runtime.go; internal/app/subagent_hub.go; internal/agentruntime/execution_bindings.go; internal/store/sqlite/durable_backend.go"
     },
     {
       "id": "ext.context-files",
@@ -339,7 +339,7 @@
       "owner": "azem",
       "status": "complete",
       "ompEvidence": "packages/coding-agent/src/extensibility/plugins/marketplace; docs/marketplace.md",
-      "azemEvidence": "internal/plugins/marketplace.go; internal/app/marketplace.go; frontend/src/components/ExtensionsSettings.tsx"
+      "azemEvidence": "internal/plugins/marketplace.go; internal/app/marketplace.go; gpui/crates/azem-gpui/src/surfaces.rs"
     },
     {
       "id": "ext.custom-capabilities",
@@ -419,7 +419,7 @@
       "owner": "azem",
       "status": "complete",
       "ompEvidence": "packages/coding-agent/src/session/session-manager.ts; docs/tree.md",
-      "azemEvidence": "internal/session/session_graph.go; internal/store/sqlite/migrations.go; frontend/src/components/thread/SessionTreePanel.tsx"
+      "azemEvidence": "internal/session/session_graph.go; internal/store/sqlite/migrations.go; gpui/crates/azem-gpui/src/surfaces.rs"
     },
     {
       "id": "sessions.fork-label",
@@ -555,7 +555,7 @@
       "owner": "azem",
       "status": "stronger",
       "ompEvidence": "packages/collab-web",
-      "azemEvidence": "frontend/src; internal/desktop"
+      "azemEvidence": "gpui/crates/azem-gpui; internal/desktop; internal/desktopipc; internal/daemon"
     },
     {
       "id": "infra.browser-relay",

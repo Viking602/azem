@@ -2,32 +2,46 @@ package app
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	agentservice "github.com/Viking602/azem/internal/agent"
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/azem/internal/session"
 	hyagent "github.com/Viking602/venat/agent"
-	"github.com/Viking602/venat/api"
 )
 
 // ResumeRun rebuilds a single-agent engine around the durable run and task
-// recovered by Hydaelyn. It resumes only when this session still owns a
+// recovered by Venat. It resumes only when this session still owns a
 // checkpoint for the same run; runs requiring side-effect reconciliation stay
 // paused for explicit resolution.
-func (r *ProviderRuntime) ResumeRun(_ context.Context, runID string) error {
-	durable, err := r.coding.Runner().Run(context.Background(), runID)
+func (r *ProviderRuntime) ResumeRun(ctx context.Context, runID string) error {
+	return r.resumeRun(ctx, runID, "")
+}
+
+func (r *ProviderRuntime) ResumeRunAtOperation(ctx context.Context, runID, operationID string) error {
+	operationID = strings.TrimSpace(operationID)
+	if operationID == "" {
+		return fmt.Errorf("resume operation id is empty")
+	}
+	return r.resumeRun(ctx, runID, operationID)
+}
+
+func (r *ProviderRuntime) resumeRun(ctx context.Context, runID, operationID string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	durable, err := r.coding.LoadRun(ctx, runID)
 	if err != nil {
 		return err
 	}
-	if durable.Status == api.RunStatusReconcileRequired {
+	if durable.Status == agentruntime.RunStatusReconcileRequired {
 		return nil
 	}
 	switch durable.Status {
-	case api.RunStatusCompleted, api.RunStatusFailed, api.RunStatusCancelled:
+	case agentruntime.RunStatusCompleted, agentruntime.RunStatusFailed, agentruntime.RunStatusCancelled:
 		return nil
 	}
 	sessionID := strings.TrimSpace(durable.Metadata["session_id"])
@@ -53,14 +67,17 @@ func (r *ProviderRuntime) ResumeRun(_ context.Context, runID string) error {
 	if projection.LastRunID != runID {
 		return r.coding.RequireRunReconciliation(host.BaseContext(), runID, "session projection does not own the recovered run")
 	}
-	manifest, err := decodeSingleRunManifest(durable.Metadata["single_run_manifest"])
+	manifest, err := r.coding.LoadRunExecutionManifest(host.BaseContext(), runID)
 	if err != nil {
-		return r.coding.RequireRunReconciliation(host.BaseContext(), runID, "immutable single-run manifest is missing or invalid")
+		return r.coding.RequireRunReconciliation(host.BaseContext(), runID, "immutable execution manifest is missing or invalid")
+	}
+	if manifest.WorkspaceAnchor != canonicalWorkspaceAnchor(r.cfg.Workspace.Root) {
+		return r.coding.RequireRunReconciliation(host.BaseContext(), runID, "immutable execution workspace no longer matches")
 	}
 	request := TurnRequest{
 		SessionID: sessionID, Prompt: durable.Request,
-		Provider: manifest.Provider, Model: manifest.Model,
-		Reasoning: manifest.Reasoning, AgentMode: projection.Session.AgentMode,
+		Provider: manifest.Provider, Model: manifest.RawModel,
+		Reasoning: requestedReasoning(manifest.Reasoning), AgentMode: projection.Session.AgentMode,
 		History: append([]session.Block(nil), projection.Blocks...), modelHistory: projection.ModelHistory,
 		toolRecords:        append([]session.ToolRecord(nil), projection.ToolRecords...),
 		checkpointBoundary: projection.ModelHistory.CoveredThroughSequence, resuming: true,
@@ -75,10 +92,9 @@ func (r *ProviderRuntime) ResumeRun(_ context.Context, runID string) error {
 		}
 	}
 	request.DisableSubagents = manifest.DisableSubagents
-	request.immutableIdentity = manifest.StaticIdentity
 	request.budgetRestored = true
-	request.maxTokens, request.maxToolCalls = manifest.MaxTokens, manifest.MaxToolCalls
-	request.maxWallClock = time.Duration(manifest.MaxWallClockNS)
+	request.maxTokens, request.maxToolCalls = manifest.Budget.MaxTokens, manifest.Budget.MaxToolCalls
+	request.maxWallClock = manifest.Budget.MaxWallClock
 	request.startedAt = manifest.StartedAt
 	request.usedTokens, err = host.Sessions().ProviderRunTotalTokens(host.BaseContext(), sessionID, runID)
 	if err != nil {
@@ -102,11 +118,34 @@ func (r *ProviderRuntime) ResumeRun(_ context.Context, runID string) error {
 		return err
 	}
 	runCtx, cancel := context.WithCancel(host.BaseContext())
-	if err := host.ClaimActiveRun(runID, sessionID, cancel, true); err != nil {
-		cancel()
-		return err
+	for {
+		claimErr := host.ClaimActiveRun(runID, sessionID, cancel, true)
+		if claimErr == nil {
+			break
+		}
+		if !errors.Is(claimErr, ErrRunActive) {
+			cancel()
+			return claimErr
+		}
+		timer := time.NewTimer(10 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			cancel()
+			return context.Cause(ctx)
+		case <-host.BaseContext().Done():
+			timer.Stop()
+			cancel()
+			return context.Cause(host.BaseContext())
+		case <-timer.C:
+		}
 	}
-	run, err := r.coding.ResumeRun(runCtx, runID)
+	var run *agentservice.Run
+	if operationID != "" {
+		run, err = r.coding.ResumeRunAtOperation(runCtx, runID, operationID)
+	} else {
+		run, err = r.coding.ResumeRun(runCtx, runID)
+	}
 	if err != nil {
 		cancel()
 		host.ClearRun(runID)
@@ -155,22 +194,8 @@ func (r *ProviderRuntime) terminalizeRecoveredBudget(host providerHost, sessionI
 	return r.coding.CompleteRun(context.WithoutCancel(host.BaseContext()), run, failure.Error(), failure)
 }
 
-func decodeSingleRunManifest(raw string) (singleRunManifest, error) {
-	var manifest singleRunManifest
-	if err := json.Unmarshal([]byte(raw), &manifest); err != nil {
-		return manifest, err
-	}
-	if manifest.Version != 2 || manifest.Provider == "" || manifest.AccountID == "" || manifest.Model == "" || manifest.Reasoning == "" ||
-		manifest.StaticIdentity == "" || manifest.StartedAt.IsZero() || manifest.MaxTokens < 0 ||
-		manifest.MaxToolCalls < 0 || manifest.MaxWallClockNS < 0 || manifest.ActiveSkills == nil {
-
-		return manifest, fmt.Errorf("invalid single-run manifest")
-	}
-	return manifest, nil
-}
-
 func (r *ProviderRuntime) ResumeRecoveredRun(ctx context.Context, runID string) error {
-	run, err := r.coding.Runner().Run(ctx, runID)
+	run, err := r.coding.LoadRun(ctx, runID)
 	if err != nil {
 		return err
 	}
@@ -180,10 +205,21 @@ func (r *ProviderRuntime) ResumeRecoveredRun(ctx context.Context, runID string) 
 	return r.ResumeRun(ctx, runID)
 }
 
+func (r *ProviderRuntime) ResumeRecoveredRunAtOperation(ctx context.Context, runID, operationID string) error {
+	run, err := r.coding.LoadRun(ctx, runID)
+	if err != nil {
+		return err
+	}
+	if run.Metadata["team"] == "true" {
+		return fmt.Errorf("team run %s cannot resume a single-agent operation %s", runID, operationID)
+	}
+	return r.ResumeRunAtOperation(ctx, runID, operationID)
+}
+
 // ResumeTeam rebuilds provider and tool bindings from durable run metadata,
-// then resumes the TeamRunner checkpoint without blocking startup.
+// then resumes Azem's persisted Team orchestration without blocking startup.
 func (r *ProviderRuntime) ResumeTeam(_ context.Context, runID string) error {
-	run, err := r.coding.Runner().Run(context.Background(), runID)
+	run, err := r.coding.LoadRun(context.Background(), runID)
 	if err != nil {
 		return err
 	}
@@ -239,7 +275,6 @@ func (r *ProviderRuntime) ResumeTeam(_ context.Context, runID string) error {
 		}
 	}
 	runCtx, cancel := context.WithCancel(host.BaseContext())
-	observeProviderRetries(runCtx, host, request.SessionID, runID, request.Provider, resolution.driver)
 	originalPrompt := firstNonempty(run.Metadata["original_prompt"], request.Prompt)
 	request.historicalContext = host.LoadTurnHistoricalContext(host.BaseContext(), request.SessionID, originalPrompt, historicalRetrievalBoundary(request.modelHistory))
 	if err := host.ClaimActiveRun(runID, "", cancel, false); err != nil {

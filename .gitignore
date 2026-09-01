@@ -1,13 +1,9 @@
 # Build outputs
 /azem
-/azem-gui
 /bin/
 /dist/
-/frontend/node_modules/
+/runtime-js/node_modules/
 /node_modules/
-/frontend/dist/*
-!/frontend/dist/.keep
-/frontend/*.tsbuildinfo
 /.playwright-cli/
 
 # Harbor / Terminal-Bench job output

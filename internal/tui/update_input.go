@@ -270,6 +270,12 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nextRunFeedbackFrame(m.reducedMotion)
 	case startTurnResultMsg:
 		if msg.Err != nil {
+			if errors.Is(msg.Err, context.Canceled) && (m.status == "Cancelling" || m.status == "Cancelled") {
+				m.status = "Cancelled"
+				m.runID = ""
+				m.errorBanner = ""
+				return m, nil
+			}
 			m.status = "Ready"
 			m.runID = ""
 			m.errorBanner = msg.Err.Error()

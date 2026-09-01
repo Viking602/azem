@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/venat/message"
 	"github.com/Viking602/venat/provider"
 	"github.com/Viking602/venat/tool"
@@ -40,6 +41,7 @@ type (
 		StatusMessage string
 	}
 )
+
 type Dispatcher struct {
 	Registry     *Registry
 	Runner       Runner
@@ -261,18 +263,24 @@ func WrapDriver(dispatcher Dispatcher, metadata Metadata, inner tool.Driver) too
 
 func (d *hookedDriver) Definition() tool.Definition { return d.inner.Definition() }
 
-func (d *hookedDriver) Execute(ctx context.Context, call tool.Call, sink tool.UpdateSink) (tool.Result, error) {
-	prepared, err := d.Prepare(ctx, call, sink)
-	if err != nil {
-		return prepared.Result, err
+func (d *hookedDriver) PolicyForCall(call tool.Call) agentruntime.ToolPolicy {
+	if resolver, ok := d.inner.(interface {
+		PolicyForCall(tool.Call) agentruntime.ToolPolicy
+	}); ok {
+		return resolver.PolicyForCall(call).Clone()
 	}
-	if prepared.Complete {
-		return prepared.Result, nil
+	if provider, ok := d.inner.(interface {
+		ToolPolicy() agentruntime.ToolPolicy
+	}); ok {
+		return provider.ToolPolicy().Clone()
 	}
-	return prepared.Execute(ctx)
+	return agentruntime.ToolPolicy{
+		Effect: agentruntime.ToolEffectExternalSideEffect, RequiresApproval: true,
+		RequiresActionTask: true, RiskLevel: "high",
+	}
 }
 
-func (d *hookedDriver) Prepare(ctx context.Context, call tool.Call, sink tool.UpdateSink) (tool.PreparedExecution, error) {
+func (d *hookedDriver) Execute(ctx context.Context, call tool.Call, sink tool.UpdateSink) (tool.Result, error) {
 	input := Envelope{
 		SessionID: d.metadata.SessionID, RunID: d.metadata.RunID, AgentID: d.metadata.AgentID,
 		AgentType: d.metadata.AgentType, ParentRunID: d.metadata.ParentRunID,
@@ -281,55 +289,28 @@ func (d *hookedDriver) Prepare(ctx context.Context, call tool.Call, sink tool.Up
 	}
 	decision := d.dispatcher.Dispatch(ctx, input)
 	if decision.PreventContinuation {
-		result := tool.Result{ToolCallID: call.ID, Name: call.Name, IsError: true, Content: decision.StopReason}
-		return tool.PreparedExecution{Call: call, Result: result}, fmt.Errorf("%w: %s", ErrPreventContinuation, decision.StopReason)
+		reason := firstNonempty(strings.TrimSpace(decision.StopReason), "hook prevented continuation")
+		return tool.Result{
+			ToolCallID: call.ID, Name: call.Name, IsError: true, Content: "Blocked by hook: " + reason,
+		}, nil
 	}
 	if decision.Denied {
 		reason := strings.TrimSpace(decision.Reason)
 		if reason == "" {
 			reason = "blocked by hook"
 		}
-		return tool.PreparedExecution{Call: call, Result: tool.Result{
-			ToolCallID: call.ID, Name: call.Name, IsError: true,
-			Content: "Blocked by hook: " + reason,
-		}, Complete: true}, nil
+		return tool.Result{
+			ToolCallID: call.ID, Name: call.Name, IsError: true, Content: "Blocked by hook: " + reason,
+		}, nil
 	}
 	if len(decision.UpdatedInput) > 0 {
-		call.Arguments = decision.UpdatedInput
+		call.Arguments = append(json.RawMessage(nil), decision.UpdatedInput...)
 	}
 	if decision.PermissionDecision != "" {
 		ctx = context.WithValue(ctx, preToolPermissionKey{}, decision.PermissionDecision)
 	}
-	if preparing, ok := d.inner.(tool.PreparingDriver); ok {
-		prepared, err := preparing.Prepare(ctx, call, sink)
-		if prepared.Call.ID == "" {
-			prepared.Call = call
-		}
-		if err != nil {
-			prepared.Result, err = d.finish(ctx, prepared.Call, prepared.Result, err)
-			return prepared, err
-		}
-		if prepared.Complete {
-			prepared.Result, err = d.finish(ctx, prepared.Call, prepared.Result, nil)
-			return prepared, err
-		}
-		if prepared.Execute == nil {
-			return tool.PreparedExecution{Call: prepared.Call}, errors.New("prepared tool execution is empty")
-		}
-		execute := prepared.Execute
-		prepared.Execute = func(runCtx context.Context) (tool.Result, error) {
-			result, executeErr := execute(runCtx)
-			return d.finish(runCtx, prepared.Call, result, executeErr)
-		}
-		return prepared, nil
-	}
-	return tool.PreparedExecution{
-		Call: call,
-		Execute: func(runCtx context.Context) (tool.Result, error) {
-			result, err := d.inner.Execute(runCtx, call, sink)
-			return d.finish(runCtx, call, result, err)
-		},
-	}, nil
+	result, err := d.inner.Execute(ctx, call, sink)
+	return d.finish(ctx, call, result, err)
 }
 
 func (d *hookedDriver) finish(ctx context.Context, call tool.Call, result tool.Result, err error) (tool.Result, error) {
@@ -382,7 +363,13 @@ func (d *hookedDriver) finish(ctx context.Context, call tool.Call, result tool.R
 		}
 	}
 	if post.PreventContinuation {
-		return result, fmt.Errorf("%w: %s", ErrPreventContinuation, post.StopReason)
+		feedback := strings.TrimSpace(post.StopReason)
+		if feedback != "" {
+			if result.Content != "" {
+				result.Content += "\n\n"
+			}
+			result.Content += "Post-tool hook feedback: " + feedback
+		}
 	}
 	return result, err
 }

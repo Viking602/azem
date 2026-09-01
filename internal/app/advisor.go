@@ -86,8 +86,8 @@ func (watchdog *advisorWatchdog) Guardrail() hyagent.OutputGuardrail {
 			return hyagent.AllowOutput(), nil
 		}
 		value := message.NewText(message.RoleSystem, formatAdvisorMessage(note))
-		value.Visibility = message.VisibilityPrivate
-		return hyagent.RetryOutput(value), nil
+		markPrivateMessage(&value)
+		return hyagent.RetryOutputWithPolicy(hyagent.RetryPolicy{IncludeRejectedOutput: true}, value), nil
 	})
 }
 
@@ -202,7 +202,7 @@ func renderAdvisorEvidence(input hyagent.OutputGuardrailInput) string {
 	used := 0
 	start := max(0, len(input.Messages)-24)
 	for _, current := range input.Messages[start:] {
-		if current.Visibility == message.VisibilityPrivate || current.Role != message.RoleUser && current.Role != message.RoleAssistant {
+		if isPrivateMessage(current) || current.Role != message.RoleUser && current.Role != message.RoleAssistant {
 			continue
 		}
 		text := strings.TrimSpace(current.Text)
@@ -308,6 +308,7 @@ func (r *ProviderRuntime) advisorForRun(ctx context.Context, host providerHost, 
 				kind: "advisor", provider: providerID, model: resolvedModel, transport: driver.Metadata().Name,
 			}
 		}
+		driver = retryProviderDriver(ctx, host, sessionID, runID, providerID, r.cfg.Retry, driver)
 		watchdog = newAdvisorWatchdog(driver, resolvedModel, reasoning, sessionID, cfg)
 	}
 	r.mu.Lock()

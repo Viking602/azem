@@ -17,8 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Viking602/venat/api"
-	"github.com/Viking602/venat/coding"
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/venat/tool"
 
 	agentservice "github.com/Viking602/azem/internal/agent"
@@ -48,7 +47,8 @@ func TestDurableToolContinuityVerifiesOnlyObservedFiles(t *testing.T) {
 		}},
 	}
 	messages := manager.toolContinuityMessages(context.Background())
-	if len(messages) != 2 || !strings.Contains(messages[1].Text, `"state":"verified_unchanged"`) {
+	if len(messages) != 2 || !isPrivateMessage(messages[0]) || !isPrivateMessage(messages[1]) ||
+		!strings.Contains(messages[1].Text, `"state":"verified_unchanged"`) {
 		t.Fatalf("unchanged file evidence=%#v", messages)
 	}
 	if err := os.WriteFile(filepath.Join(root, "stable.go"), []byte("package changed\n"), 0o600); err != nil {
@@ -80,10 +80,10 @@ func TestDurableToolTimelineCapturesCompletedReadObservation(t *testing.T) {
 	}
 	arguments := json.RawMessage(`{"path":"note.txt"}`)
 	timeline := newDurableToolTimeline(sessions, root, "session", "run")
-	if err := timeline.start(ctx, tool.Call{ID: "read-1", Name: coding.ToolReadFile, Arguments: arguments}); err != nil {
+	if err := timeline.start(ctx, tool.Call{ID: "read-1", Name: agentservice.ToolReadFile, Arguments: arguments}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := timeline.finish(ctx, tool.Result{ToolCallID: "read-1", Name: coding.ToolReadFile, Content: "durable note"}); err != nil {
+	if _, _, err := timeline.finish(ctx, tool.Result{ToolCallID: "read-1", Name: agentservice.ToolReadFile, Content: "durable note"}); err != nil {
 		t.Fatal(err)
 	}
 	projection, err := sessions.LoadProjection(ctx, "session")
@@ -195,9 +195,12 @@ func TestShellArtifactSinkPersistsAfterExecutionCancellation(t *testing.T) {
 type yoloApprovalDriver struct{}
 
 func (yoloApprovalDriver) Definition() tool.Definition {
-	return tool.Definition{
-		Name: "test.write", Description: "write", EffectType: tool.EffectWrite,
-		RequiresApproval: true, RiskLevel: "high", InputSchema: tool.Schema{Type: "object"},
+	return tool.Definition{Name: "test.write", Description: "write", InputSchema: tool.Schema{Type: "object"}}
+}
+
+func (yoloApprovalDriver) ToolPolicy() agentruntime.ToolPolicy {
+	return agentruntime.ToolPolicy{
+		Effect: agentruntime.ToolEffectWrite, RequiresApproval: true, RiskLevel: "high",
 	}
 }
 
@@ -255,8 +258,9 @@ func TestYoloApprovalModeDrainsPendingAndSkipsFuturePrompts(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	service := NewService(ctx, config.Default())
-	definition := tool.Definition{
-		Name: "coding.write_file", EffectType: tool.EffectWrite, RequiresApproval: true, RiskLevel: "high",
+	definition := tool.Definition{Name: "coding.write_file"}
+	policy := agentruntime.ToolPolicy{
+		Effect: agentruntime.ToolEffectWrite, RequiresApproval: true, RiskLevel: "high",
 	}
 	type approvalResult struct {
 		mode agentservice.ApprovalMode
@@ -265,7 +269,7 @@ func TestYoloApprovalModeDrainsPendingAndSkipsFuturePrompts(t *testing.T) {
 	await := func(call tool.Call) <-chan approvalResult {
 		result := make(chan approvalResult, 1)
 		go func() {
-			resolution, err := service.awaitTeamApproval(ctx, "session", "run", "goal", call, definition)
+			resolution, err := service.awaitTeamApproval(ctx, "session", "run", "goal", call, policy)
 			result <- approvalResult{mode: resolution.Mode, err: err}
 		}()
 		return result
@@ -291,7 +295,7 @@ func TestYoloApprovalModeDrainsPendingAndSkipsFuturePrompts(t *testing.T) {
 		t.Fatalf("YOLO mode event=%+v error=%v", modeEvent, err)
 	}
 
-	resolution, err := service.awaitTeamApproval(ctx, "session", "run", "goal", tool.Call{ID: "write-2", Name: definition.Name}, definition)
+	resolution, err := service.awaitTeamApproval(ctx, "session", "run", "goal", tool.Call{ID: "write-2", Name: definition.Name}, policy)
 	if err != nil || resolution.Mode != agentservice.ApprovalOnce {
 		t.Fatalf("yolo approval = mode:%q err:%v", resolution.Mode, err)
 	}
@@ -324,9 +328,12 @@ type namedApprovalDriver struct {
 }
 
 func (d namedApprovalDriver) Definition() tool.Definition {
-	return tool.Definition{
-		Name: d.name, Description: "write under automatic review", EffectType: tool.EffectWrite,
-		RequiresApproval: true, RiskLevel: "high", InputSchema: tool.Schema{Type: "object"},
+	return tool.Definition{Name: d.name, Description: "write under automatic review", InputSchema: tool.Schema{Type: "object"}}
+}
+
+func (namedApprovalDriver) ToolPolicy() agentruntime.ToolPolicy {
+	return agentruntime.ToolPolicy{
+		Effect: agentruntime.ToolEffectWrite, RequiresApproval: true, RiskLevel: "high",
 	}
 }
 
@@ -340,9 +347,12 @@ type countedApprovalDriver struct {
 }
 
 func (d countedApprovalDriver) Definition() tool.Definition {
-	return tool.Definition{
-		Name: "test.auto_write", Description: "write under automatic review", EffectType: tool.EffectWrite,
-		RequiresApproval: true, RiskLevel: "high", InputSchema: tool.Schema{Type: "object"},
+	return tool.Definition{Name: "test.auto_write", Description: "write under automatic review", InputSchema: tool.Schema{Type: "object"}}
+}
+
+func (countedApprovalDriver) ToolPolicy() agentruntime.ToolPolicy {
+	return agentruntime.ToolPolicy{
+		Effect: agentruntime.ToolEffectWrite, RequiresApproval: true, RiskLevel: "high",
 	}
 }
 
@@ -368,12 +378,12 @@ func TestToolStartStateSkipsQueueWhenNothingIsExecuting(t *testing.T) {
 		want string
 	}{
 		{ApprovalModeYolo, "coding.shell", "running"},
-		{ApprovalModeAutoReview, coding.ToolEditHashline, "reviewing_approval"},
-		{ApprovalModeAutoReview, coding.ToolWriteFile, "reviewing_approval"},
-		{ApprovalModeAutoReview, coding.ToolReadFile, "running"},
+		{ApprovalModeAutoReview, agentservice.ToolEditHashline, "reviewing_approval"},
+		{ApprovalModeAutoReview, agentservice.ToolWriteFile, "reviewing_approval"},
+		{ApprovalModeAutoReview, agentservice.ToolReadFile, "running"},
 		{ApprovalModeAutoReview, "coding.shell", "reviewing_approval"},
-		{ApprovalModePrompt, coding.ToolReadFile, "running"},
-		{ApprovalModePrompt, coding.ToolWriteFile, "queued"},
+		{ApprovalModePrompt, agentservice.ToolReadFile, "running"},
+		{ApprovalModePrompt, agentservice.ToolWriteFile, "queued"},
 		{ApprovalModePrompt, "coding.shell", "queued"},
 	}
 	for _, test := range cases {
@@ -426,8 +436,8 @@ func TestAutoReviewPrefetchesWorkspaceEditsInParallel(t *testing.T) {
 	_ = nextApprovalEvent(t, harness.host, EventApprovalMode)
 	first := json.RawMessage(`{"input":"*** Begin Patch\n[src/a.go#AAAA]\nPUT 1.=1:\n+new\n*** End Patch\n"}`)
 	second := json.RawMessage(`{"input":"*** Begin Patch\n[src/b.go#BBBB]\nPUT 1.=1:\n+new\n*** End Patch\n"}`)
-	harness.host.prefetchAutoReview(context.Background(), "session", harness.run.RunID, "edit-1", coding.ToolEditHashline, first)
-	harness.host.prefetchAutoReview(context.Background(), "session", harness.run.RunID, "edit-2", coding.ToolEditHashline, second)
+	harness.host.prefetchAutoReview(context.Background(), "session", harness.run.RunID, "edit-1", agentservice.ToolEditHashline, first)
+	harness.host.prefetchAutoReview(context.Background(), "session", harness.run.RunID, "edit-2", agentservice.ToolEditHashline, second)
 	deadline := time.After(2 * time.Second)
 	for count := 0; count < 2; count++ {
 		select {
@@ -462,7 +472,7 @@ func TestAutoReviewMarksNonWorkspaceToolsReviewingInsteadOfQueued(t *testing.T) 
 	}
 }
 
-func TestAutoReviewAllowUsesGoalArgumentsAndApprovesOnlyOnce(t *testing.T) {
+func TestAutoReviewAllowUsesGoalArgumentsAndPersistsDecision(t *testing.T) {
 	var requestChecked atomic.Bool
 	harness := newAutoReviewHarness(t, func(writer http.ResponseWriter, request *http.Request) {
 		var body map[string]any
@@ -517,10 +527,6 @@ func TestAutoReviewAllowUsesGoalArgumentsAndApprovesOnlyOnce(t *testing.T) {
 	if err != nil || !executed.Executed || harness.driver.executions.Load() != 1 {
 		t.Fatalf("approved execution=%+v count=%d error=%v", executed, harness.driver.executions.Load(), err)
 	}
-	repeated, err := harness.coding.ExecuteDriver(context.Background(), harness.run, harness.driver, call, nil)
-	if err != nil || repeated.Executed || repeated.Approval == nil || harness.driver.executions.Load() != 1 {
-		t.Fatalf("approval was not once-only: result=%+v count=%d error=%v", repeated, harness.driver.executions.Load(), err)
-	}
 	if decider := durableApprovalDecider(t, harness.coding, harness.run.RunID); decider != codex.ApprovalReviewerModel {
 		t.Fatalf("durable decider=%q", decider)
 	}
@@ -536,7 +542,7 @@ func TestAutoReviewTeamDecisionWritesDurableAudit(t *testing.T) {
 	})
 	call := tool.Call{ID: "team-allow", Name: "test.auto_write", Arguments: json.RawMessage(`{"path":"team.txt"}`)}
 	resolution, err := harness.host.awaitTeamApproval(
-		context.Background(), "session", harness.run.RunID, "team user goal", call, harness.driver.Definition(),
+		context.Background(), "session", harness.run.RunID, "team user goal", call, harness.driver.ToolPolicy(),
 	)
 	if err != nil || resolution.Mode != agentservice.ApprovalOnce {
 		t.Fatalf("team automatic approval=%+v error=%v", resolution, err)
@@ -563,7 +569,7 @@ func TestAutoReviewTeamDenyFallsBackToUserApproval(t *testing.T) {
 	result := make(chan approvalResult, 1)
 	go func() {
 		resolution, err := harness.host.awaitTeamApproval(
-			context.Background(), "session", harness.run.RunID, "team user goal", call, harness.driver.Definition(),
+			context.Background(), "session", harness.run.RunID, "team user goal", call, harness.driver.ToolPolicy(),
 		)
 		result <- approvalResult{resolution: resolution, err: err}
 	}()
@@ -622,7 +628,7 @@ func TestAutoReviewDoesNotInvokeInteractivePermissionHooks(t *testing.T) {
 	}
 
 	teamCall := tool.Call{ID: "team-hook-skip", Name: "test.auto_write", Arguments: json.RawMessage(`{"path":"team-reviewed.txt"}`)}
-	resolution, err = harness.host.awaitTeamApproval(context.Background(), "session", harness.run.RunID, "team goal", teamCall, harness.driver.Definition())
+	resolution, err = harness.host.awaitTeamApproval(context.Background(), "session", harness.run.RunID, "team goal", teamCall, harness.driver.ToolPolicy())
 	if err != nil || resolution.Mode != agentservice.ApprovalOnce {
 		t.Fatalf("team automatic approval was intercepted by interactive hook: resolution=%+v error=%v", resolution, err)
 	}
@@ -926,12 +932,12 @@ func TestAutoReviewCallerDeadlineStopsWithoutRetryOrManualApproval(t *testing.T)
 			t.Fatalf("caller deadline emitted follow-up approval event=%+v", event)
 		}
 	}
-	events, listErr := harness.coding.Runner().ListEvents(context.Background(), harness.run.RunID)
+	events, listErr := harness.coding.ListEvents(context.Background(), harness.run.RunID)
 	if listErr != nil {
 		t.Fatal(listErr)
 	}
 	for _, event := range events {
-		if event.Type == api.EventApprovalDecided {
+		if event.Type == agentruntime.EventApprovalDecided {
 			t.Fatalf("caller deadline recorded approval decision=%+v", event)
 		}
 	}
@@ -955,12 +961,13 @@ func TestAutoReviewModeIsProviderIndependentAndDoesNotTakePendingHumanApproval(t
 		t.Fatal(err)
 	}
 	definition := harness.driver.Definition()
+	policy := harness.driver.ToolPolicy()
 	result := make(chan approvalResolution, 1)
 	errs := make(chan error, 1)
 	go func() {
 		resolution, err := harness.host.awaitTeamApproval(
 			context.Background(), "session", "team-run", "team goal",
-			tool.Call{ID: "human-pending", Name: definition.Name, Arguments: json.RawMessage(`{"path":"manual.txt"}`)}, definition,
+			tool.Call{ID: "human-pending", Name: definition.Name, Arguments: json.RawMessage(`{"path":"manual.txt"}`)}, policy,
 		)
 		if err != nil {
 			errs <- err
@@ -1226,12 +1233,12 @@ func nextApprovalEvent(t *testing.T, service *Service, kind EventKind) Event {
 
 func durableApprovalDecider(t *testing.T, coding *agentservice.Service, runID string) string {
 	t.Helper()
-	events, err := coding.Runner().ListEvents(context.Background(), runID)
+	events, err := coding.ListEvents(context.Background(), runID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for index := len(events) - 1; index >= 0; index-- {
-		if events[index].Type == api.EventApprovalDecided {
+		if events[index].Type == agentruntime.EventApprovalDecided {
 			return fmt.Sprint(events[index].Payload["decidedBy"])
 		}
 	}

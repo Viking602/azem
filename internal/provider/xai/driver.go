@@ -6,7 +6,6 @@ import (
 	"net/url"
 	"strings"
 	"sync"
-	"time"
 
 	"resty.dev/v3"
 
@@ -31,9 +30,6 @@ type Driver struct {
 	transport       Transport
 	models          []string
 	reasoningEffort string
-	retryDelay      func(int) time.Duration
-	maxRetryDelay   time.Duration
-	retryObserver   hyprovider.RetryObserver
 }
 
 func New(transport Transport, models []string, reasoningEffort string) (*Driver, error) {
@@ -47,31 +43,18 @@ func (d *Driver) Metadata() hyprovider.Metadata {
 	return hyprovider.Metadata{Name: d.transport.Name(), Models: append([]string(nil), d.models...), Version: "1"}
 }
 
-func (d *Driver) SetRetryObserver(observer hyprovider.RetryObserver) {
-	d.retryObserver = observer
-}
-
-func (d *Driver) SetMaxRetryDelay(delay time.Duration) {
-	d.maxRetryDelay = delay
-}
-
 func (d *Driver) Stream(ctx context.Context, request hyprovider.Request) (hyprovider.Stream, error) {
-	payload, err := responses.Build(request, responses.BuildOptions{IncludeEncryptedReasoning: true, DefaultParallelTools: true, DefaultReasoningEffort: d.reasoningEffort})
+	payload, err := responses.BuildContext(ctx, request, responses.BuildOptions{IncludeEncryptedReasoning: true, DefaultParallelTools: true, DefaultReasoningEffort: d.reasoningEffort})
 	if err != nil {
 		return nil, err
 	}
-	open := func() (hyprovider.Stream, error) {
-		streamContext, cancel := context.WithCancel(ctx)
-		response, err := d.transport.Post(streamContext, payload)
-		if err != nil {
-			cancel()
-			return nil, err
-		}
-		return responses.Open(response, streamContext, cancel, nil)
+	streamContext, cancel := context.WithCancel(ctx)
+	response, err := d.transport.Post(streamContext, payload)
+	if err != nil {
+		cancel()
+		return nil, err
 	}
-	return hyprovider.OpenRetryingStream(ctx, open, hyprovider.StreamRetryOptions{
-		Delay: d.retryDelay, MaxDelay: d.maxRetryDelay, Observer: d.retryObserver,
-	})
+	return responses.Open(response, streamContext, cancel, nil)
 }
 
 type StandardTransport struct {

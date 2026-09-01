@@ -166,6 +166,12 @@ func importCodexPlugin(homeDir, packageDir string, installed installedPlugin) er
 	}
 	destination := filepath.Join(packageDir, "codex", marketplace, name)
 	metadata := packageMetadata{PluginID: installed.PluginID, Marketplace: installed.Marketplace, Version: installed.Version, Enabled: installed.Enabled, Origin: "codex"}
+	if strings.TrimSpace(installed.Version) == "" {
+		var current manifest
+		if decodeJSONFile(filepath.Join(destination, ".codex-plugin", "plugin.json"), &current) == nil {
+			return nil
+		}
+	}
 	if packageMatchesVersion(destination, installed.Version) {
 		return writePackageMetadata(destination, metadata)
 	}

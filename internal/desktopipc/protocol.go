@@ -68,6 +68,7 @@ const (
 	MethodWorkspaceChanges        Method = "workspace_changes"
 	MethodWorkspaceChange         Method = "workspace_change"
 	MethodWorkspaceEntries        Method = "workspace_entries"
+	MethodSearchWorkspaceFiles    Method = "search_workspace_files"
 	MethodWorkspaceFile           Method = "workspace_file"
 	MethodCreateProject           Method = "create_project"
 	MethodOpenProject             Method = "open_project"
@@ -94,7 +95,7 @@ func AllMethods() []Method {
 		MethodExportSession, MethodShareSession, MethodForkSession, MethodPullRequestDashboard,
 		MethodPullRequestDetail, MethodMutatePullRequest, MethodSetPullRequestMonitor,
 		MethodSkillCatalog, MethodHookCatalog, MethodMarketplaceCatalog, MethodUsageReport,
-		MethodWorkspaceChanges, MethodWorkspaceChange, MethodWorkspaceEntries, MethodWorkspaceFile,
+		MethodWorkspaceChanges, MethodWorkspaceChange, MethodWorkspaceEntries, MethodSearchWorkspaceFiles, MethodWorkspaceFile,
 		MethodCreateProject, MethodOpenProject, MethodOpenProjectSession, MethodSystemFonts,
 		MethodListTerminals, MethodCreateTerminal, MethodWriteTerminal, MethodResizeTerminal,
 		MethodCloseTerminal, MethodOpenTerminal, MethodTerminalReplay, MethodBeginAttachmentTransfer,

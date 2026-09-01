@@ -8,10 +8,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	hyagent "github.com/Viking602/venat/agent"
-	"github.com/Viking602/venat/api"
-	"github.com/Viking602/venat/coding"
-	"github.com/Viking602/venat/multiagent"
 )
 
 const (
@@ -26,12 +24,12 @@ const (
 // otherwise derived from the supplied TeamState snapshot.
 type CodingScheduler struct {
 	Prompt         string
-	Classes        map[string]multiagent.AgentClass
-	RetryPolicy    api.RetryPolicy
-	ResourceClaims []api.ResourceClaimSpec
+	Classes        map[string]agentruntime.TeamAgentClass
+	RetryPolicy    agentruntime.RetryPolicy
+	ResourceClaims []agentruntime.ResourceClaimSpec
 }
 
-func (s CodingScheduler) Next(ctx context.Context, state multiagent.TeamState) ([]multiagent.Dispatch, error) {
+func (s CodingScheduler) Next(ctx context.Context, state agentruntime.TeamState) ([]agentruntime.TeamDispatch, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -85,7 +83,7 @@ func (s CodingScheduler) Next(ctx context.Context, state multiagent.TeamState) (
 	return s.dispatch(state, ReporterClass, &reviewers[len(reviewers)-1], input)
 }
 
-func (s CodingScheduler) dispatch(state multiagent.TeamState, className string, from *multiagent.AgentInstance, input any) ([]multiagent.Dispatch, error) {
+func (s CodingScheduler) dispatch(state agentruntime.TeamState, className string, from *agentruntime.TeamInstance, input any) ([]agentruntime.TeamDispatch, error) {
 	class, ok := s.Classes[className]
 	if !ok {
 		return nil, fmt.Errorf("coding scheduler: class %q is not configured", className)
@@ -99,22 +97,22 @@ func (s CodingScheduler) dispatch(state multiagent.TeamState, className string, 
 	if attempt > 1 {
 		taskID += "-attempt-" + strconv.Itoa(attempt)
 	}
-	instanceID := multiagent.ComputeInstanceID(className, state.RunID, taskID, strconv.Itoa(len(state.Instances)))
-	dispatch := multiagent.Dispatch{
+	instanceID := agentruntime.ComputeTeamInstanceID(className, state.RunID, taskID, strconv.Itoa(len(state.Instances)))
+	dispatch := agentruntime.TeamDispatch{
 		To:             instanceID,
 		ClassName:      className,
 		AgentClassName: className,
-		Task: api.Task{
+		Task: agentruntime.Task{
 			ID:           taskID,
 			RunID:        state.RunID,
-			Type:         api.TaskTypeWorker,
+			Type:         agentruntime.TaskTypeWorker,
 			AllowsAction: className == ImplementerClass || className == ReviewerClass,
 			Goal:         codingTaskGoal(className),
 			Input:        raw,
-			Status:       api.TaskStatusCreated,
+			Status:       agentruntime.TaskStatusCreated,
 			InputSchema:  class.InputSchema,
 			OutputSchema: class.OutputSchema,
-			Budget:       &api.TaskBudget{},
+			Budget:       &agentruntime.TaskBudget{},
 			RetryPolicy:  s.RetryPolicy,
 		},
 		Input: raw,
@@ -127,7 +125,7 @@ func (s CodingScheduler) dispatch(state multiagent.TeamState, className string, 
 		dispatch.Task.ResourceClaims = slices.Clone(s.ResourceClaims)
 	}
 	if from != nil {
-		dispatch.Handoff = &multiagent.Handoff{
+		dispatch.Handoff = &agentruntime.TeamHandoff{
 			RunID:                state.RunID,
 			From:                 from.ID,
 			To:                   instanceID,
@@ -136,13 +134,13 @@ func (s CodingScheduler) dispatch(state multiagent.TeamState, className string, 
 			RequiredOutputSchema: class.OutputSchema,
 		}
 	}
-	return []multiagent.Dispatch{dispatch}, nil
+	return []agentruntime.TeamDispatch{dispatch}, nil
 }
 
-func codingClassMayMutateWorkspace(class multiagent.AgentClass) bool {
+func codingClassMayMutateWorkspace(class agentruntime.TeamAgentClass) bool {
 	for _, name := range class.Tools {
 		switch name {
-		case coding.ToolEditHashline, coding.ToolWriteFile, coding.ToolGofmt, ToolShell:
+		case ToolEditHashline, ToolWriteFile, ToolGofmt, ToolShell:
 			return true
 		}
 	}
@@ -164,27 +162,27 @@ func codingTaskGoal(className string) string {
 	}
 }
 
-func activeOrFailed(state multiagent.TeamState) bool {
+func activeOrFailed(state agentruntime.TeamState) bool {
 	for _, instance := range state.Instances {
 		switch instance.State {
-		case multiagent.InstanceStatePending, multiagent.InstanceStateRunning, multiagent.InstanceStateFailed:
+		case agentruntime.TeamInstancePending, agentruntime.TeamInstanceRunning, agentruntime.TeamInstanceFailed:
 			return true
 		}
 	}
 	return false
 }
 
-func finishedForClass(state multiagent.TeamState, className string) []multiagent.AgentInstance {
-	instances := make([]multiagent.AgentInstance, 0, 2)
+func finishedForClass(state agentruntime.TeamState, className string) []agentruntime.TeamInstance {
+	instances := make([]agentruntime.TeamInstance, 0, 2)
 	for _, instance := range state.Instances {
-		if instance.ClassName == className && instance.State == multiagent.InstanceStateFinished {
+		if instance.ClassName == className && instance.State == agentruntime.TeamInstanceFinished {
 			instances = append(instances, instance)
 		}
 	}
 	return instances
 }
 
-func classAttemptCount(state multiagent.TeamState, className string) int {
+func classAttemptCount(state agentruntime.TeamState, className string) int {
 	count := 0
 	for _, instance := range state.Instances {
 		if instance.ClassName == className {
@@ -194,7 +192,7 @@ func classAttemptCount(state multiagent.TeamState, className string) int {
 	return count
 }
 
-func reportForTask(state multiagent.TeamState, taskID string) *api.TypedReport {
+func reportForTask(state agentruntime.TeamState, taskID string) *agentruntime.TypedReport {
 	for index := len(state.Tasks) - 1; index >= 0; index-- {
 		if state.Tasks[index].ID == taskID {
 			return state.Tasks[index].Result
@@ -203,7 +201,7 @@ func reportForTask(state multiagent.TeamState, taskID string) *api.TypedReport {
 	return nil
 }
 
-func reviewVerdict(report *api.TypedReport) string {
+func reviewVerdict(report *agentruntime.TypedReport) string {
 	if report == nil || report.Structured == nil {
 		return "revise"
 	}

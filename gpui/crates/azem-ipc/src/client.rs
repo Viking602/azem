@@ -148,6 +148,30 @@ impl Client {
         }
     }
 
+    pub async fn stop_daemon(&self, include_active: bool) -> Result<()> {
+        let id = Uuid::new_v4().to_string();
+        let (sender, receiver) = oneshot::channel();
+        self.inner.pending.lock().await.insert(id.clone(), sender);
+        let mut request = envelope("daemon_stop");
+        request.id = id.clone();
+        request.client_id = self.inner.client_id.clone();
+        request.workspace_id = self.inner.workspace_id.clone();
+        request.payload = serde_json::json!({"includeActive": include_active});
+        if let Err(error) = write_envelope(&mut *self.inner.writer.lock().await, &request).await {
+            self.inner.pending.lock().await.remove(&id);
+            return Err(error.into());
+        }
+        match time::timeout(Duration::from_secs(5), receiver).await {
+            Ok(Ok(Ok(_))) => Ok(()),
+            Ok(Ok(Err(error))) => Err(anyhow!(error)),
+            Ok(Err(_)) => Err(anyhow!("IPC daemon stop response channel closed")),
+            Err(_) => {
+                self.inner.pending.lock().await.remove(&id);
+                Err(anyhow!("IPC daemon stop timed out"))
+            }
+        }
+    }
+
     pub async fn upload_attachment(
         &self,
         session_id: &str,
@@ -360,5 +384,46 @@ async fn connect_stream(address: &str) -> io::Result<Stream> {
             io::ErrorKind::Unsupported,
             "Azem IPC is unsupported on this platform",
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn idle_daemon_stop_waits_for_the_server_acknowledgement() {
+        let (client_stream, mut server_stream) = tokio::io::duplex(4096);
+        let (reader, writer) = tokio::io::split(Box::new(client_stream) as Stream);
+        let (events, _) = broadcast::channel(8);
+        let (shutdown, _) = watch::channel(false);
+        let client = Client {
+            inner: Arc::new(ClientInner {
+                client_id: "desktop".into(),
+                workspace_id: "workspace".into(),
+                writer: Mutex::new(writer),
+                pending: Mutex::new(HashMap::new()),
+                events,
+                shutdown,
+                reader_task: Mutex::new(None),
+                keepalive_task: Mutex::new(None),
+            }),
+        };
+        client.start_reader(reader).await;
+        let server = tokio::spawn(async move {
+            let Frame::Control(request) = read_frame(&mut server_stream).await.unwrap() else {
+                panic!("expected daemon stop control frame");
+            };
+            assert_eq!(request.kind, "daemon_stop");
+            assert_eq!(request.payload["includeActive"], false);
+            let mut response = envelope("response");
+            response.id = request.id.clone();
+            response.payload = serde_json::json!({"stopping": true});
+            write_envelope(&mut server_stream, &response).await.unwrap();
+        });
+
+        client.stop_daemon(false).await.unwrap();
+        server.await.unwrap();
+        client.close().await.unwrap();
     }
 }

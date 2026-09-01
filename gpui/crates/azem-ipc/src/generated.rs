@@ -72,6 +72,8 @@ pub enum Method {
     WorkspaceChange,
     #[serde(rename = "workspace_entries")]
     WorkspaceEntries,
+    #[serde(rename = "search_workspace_files")]
+    SearchWorkspaceFiles,
     #[serde(rename = "workspace_file")]
     WorkspaceFile,
     #[serde(rename = "create_project")]
@@ -128,6 +130,8 @@ pub enum ActionKind {
     ArchiveSession,
     #[serde(rename = "archive_inactive_sessions")]
     ArchiveInactiveSessions,
+    #[serde(rename = "remove_project")]
+    RemoveProject,
     #[serde(rename = "mark_session_unread")]
     MarkSessionUnread,
     #[serde(rename = "compact")]

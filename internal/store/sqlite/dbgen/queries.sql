@@ -113,12 +113,6 @@ SELECT data FROM records WHERE kind=? AND key1=? AND status=?;
 -- name: ResolveReconcileAttemptCAS :execresult
 UPDATE records SET status=?,data=? WHERE kind=? AND key1=? AND status=?;
 
--- name: InsertAgentDefinitionSnapshot :execresult
-INSERT OR IGNORE INTO agent_definition_snapshots(definition_id,version,created_at,data) VALUES(?,?,?,?);
--- name: GetAgentDefinitionSnapshotData :one
-SELECT data FROM agent_definition_snapshots WHERE definition_id=? AND version=?;
--- name: ListAgentDefinitionSnapshotData :many
-SELECT data FROM agent_definition_snapshots ORDER BY created_at,definition_id,version;
 
 -- name: InsertAdmissionReservation :execresult
 INSERT OR IGNORE INTO admission_reservations(id,agent_id,run_id,state,version,created_at,updated_at,expires_at,data) VALUES(?,?,?,?,?,?,?,?,?);

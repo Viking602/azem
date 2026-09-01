@@ -12,6 +12,23 @@ import (
 	"time"
 )
 
+func TestUILanguageAcceptsTranslationPackIdentifiers(t *testing.T) {
+	for _, language := range []string{"en", "zh-CN", "ja", "de-DE", "pt-BR", "zh-Hant", "es-419"} {
+		cfg := Default()
+		cfg.Defaults.Language = language
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("valid language %q rejected: %v", language, err)
+		}
+	}
+	for _, language := range []string{"", "a", "../en", "en_US", "en--US", "en/US", "en\n", strings.Repeat("en-", 30) + "US"} {
+		cfg := Default()
+		cfg.Defaults.Language = language
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("invalid language %q accepted", language)
+		}
+	}
+}
+
 func TestWorkspaceShellMaxWallClockDefaultsAndValidation(t *testing.T) {
 	cfg := Default()
 	if cfg.Workspace.Shell.MaxWallClockDuration != DefaultShellMaxWallClock {
@@ -221,9 +238,9 @@ func TestLanguageDefaultAndValidation(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	cfg.Defaults.Language = "zh"
+	cfg.Defaults.Language = "zh/../../en"
 	if err := cfg.Validate(); err == nil {
-		t.Fatal("unsupported language accepted")
+		t.Fatal("invalid language identifier accepted")
 	}
 	cfg = Default()
 	cfg.Defaults.ApprovalMode = "unsafe"

@@ -11,7 +11,6 @@ import (
 
 	"github.com/Viking602/azem/internal/resource"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
-	"github.com/Viking602/venat/coding"
 	"github.com/Viking602/venat/tool"
 )
 
@@ -19,7 +18,7 @@ func TestOMPWriteDriverCreatesOverwritesStripsHashlinesAndMarksScriptsExecutable
 	ctx := context.Background()
 	root := t.TempDir()
 	service := newWriteTestService(t, ctx, root)
-	write := findWorkspaceTool(t, service, root, coding.ToolWriteFile)
+	write := findWorkspaceTool(t, service, root, ToolWriteFile)
 
 	created := executeWrite(t, ctx, write, "script.sh", "#!/bin/sh\necho one\n")
 	if !strings.Contains(created.Content, "Successfully wrote") || !strings.Contains(created.Content, "[script.sh#") {
@@ -62,8 +61,8 @@ func TestOMPWriteDriverUpdatesArchivesAndSQLiteRows(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	service := newWriteTestService(t, ctx, root)
-	write := findWorkspaceTool(t, service, root, coding.ToolWriteFile)
-	read := findWorkspaceTool(t, service, root, coding.ToolReadFile)
+	write := findWorkspaceTool(t, service, root, ToolWriteFile)
+	read := findWorkspaceTool(t, service, root, ToolReadFile)
 
 	writeZipFixture(t, filepath.Join(root, "bundle.zip"), "keep.txt", "keep")
 	executeWrite(t, ctx, write, "bundle.zip:new.txt", "new")
@@ -117,8 +116,8 @@ func TestOMPWriteDriverRoutesWritableInternalResources(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = service.Close(ctx) })
-	write := findWorkspaceTool(t, service, root, coding.ToolWriteFile)
-	callerCtx := tool.WithCaller(ctx, tool.CallerInfo{SessionID: "session-a", TeamRunID: "run-a"})
+	write := findWorkspaceTool(t, service, root, ToolWriteFile)
+	callerCtx := WithInvocation(ctx, Invocation{SessionID: "session-a", TeamRunID: "run-a"})
 	result := executeWrite(t, callerCtx, write, "capture://note", "hello")
 	if result.IsError || string(handler.data) != "hello" || handler.sessionID != "session-a" || handler.runID != "run-a" {
 		t.Fatalf("resource write=%#v capture=%#v", result, handler)
@@ -151,7 +150,7 @@ func executeWrite(t *testing.T, ctx context.Context, driver tool.Driver, path, c
 
 func callWrite(ctx context.Context, driver tool.Driver, path, content string) tool.Result {
 	arguments, _ := json.Marshal(map[string]string{"path": path, "content": content})
-	result, err := driver.Execute(ctx, tool.Call{ID: "write", Name: coding.ToolWriteFile, Arguments: arguments}, nil)
+	result, err := driver.Execute(ctx, tool.Call{ID: "write", Name: ToolWriteFile, Arguments: arguments}, nil)
 	if err != nil {
 		return tool.Result{IsError: true, Content: err.Error()}
 	}

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/venat/tool"
 )
 
@@ -92,13 +93,13 @@ func TestLSPDiagnosticsSymbolsCapabilitiesRequestReloadAndRenameFile(t *testing.
 func TestLSPDefinitionForCallUsesDynamicApprovalTier(t *testing.T) {
 	driver := newLSPDriver(t.TempDir(), newLSPBridgeRuntime(), false).(*lspDriver)
 	readArgs, _ := json.Marshal(map[string]any{"action": "definition", "file": "main.go", "line": 1, "symbol": "main"})
-	read := driver.DefinitionForCall(tool.Call{Name: ToolLSP, Arguments: readArgs})
-	if read.EffectType != tool.EffectReadOnly || read.RequiresActionTask {
+	read := driver.PolicyForCall(tool.Call{Name: ToolLSP, Arguments: readArgs})
+	if read.Effect != agentruntime.ToolEffectReadOnly || read.RequiresActionTask {
 		t.Fatalf("definition governance = %#v", read)
 	}
 	writeArgs, _ := json.Marshal(map[string]any{"action": "rename", "file": "main.go", "line": 1, "symbol": "main", "new_name": "renamed"})
-	write := driver.DefinitionForCall(tool.Call{Name: ToolLSP, Arguments: writeArgs})
-	if write.EffectType != tool.EffectWrite || !write.RequiresActionTask {
+	write := driver.PolicyForCall(tool.Call{Name: ToolLSP, Arguments: writeArgs})
+	if write.Effect != agentruntime.ToolEffectWrite || !write.RequiresActionTask {
 		t.Fatalf("rename governance = %#v", write)
 	}
 	readOnly := ReadOnlyLSPDriver(driver)

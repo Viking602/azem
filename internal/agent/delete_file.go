@@ -32,10 +32,6 @@ func (d deleteFileDriver) Definition() tool.Definition {
 			Required:             []string{"path"},
 			AdditionalProperties: &additional,
 		},
-		EffectType:         tool.EffectWrite,
-		RequiresActionTask: true,
-		RiskLevel:          "medium",
-		PolicyTags:         []string{"coding", "delete", "workspace-write"},
 	}
 }
 

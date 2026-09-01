@@ -20,6 +20,9 @@ var extensionActionHandlers = map[ActionKind]actionHandler{
 		return s.emitSkillCatalog(ctx, "listed")
 	},
 	ActionListPlugins: func(s *Service, ctx context.Context, action Action) error {
+		if s.cfg.Plugins.ImportCodex && (strings.TrimSpace(s.pluginOptions.DataDir) != "" || strings.TrimSpace(s.pluginOptions.HomeDir) != "") {
+			return s.reloadPluginRuntime(ctx)
+		}
 		s.emit(ctx, Event{Kind: EventPluginCatalog, State: "listed", PluginCatalog: s.pluginCatalog, PluginDiagnostics: s.pluginDiagnostics})
 		return nil
 	},

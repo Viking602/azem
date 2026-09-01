@@ -172,6 +172,9 @@ func (h *Host) Create(cols, rows int) (Session, error) {
 		h.mu.Unlock()
 		return Session{}, ErrTooManySessions
 	}
+	if len(h.sessions) == 0 && h.starting == 0 {
+		h.serial.Store(0)
+	}
 	h.starting++
 	h.mu.Unlock()
 

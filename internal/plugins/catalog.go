@@ -11,13 +11,13 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	"github.com/Viking602/azem/internal/config"
 )
 
@@ -94,7 +94,7 @@ type Options struct {
 	TrustHooks   bool
 	WorkspaceDir string
 	ListPlugins  func(context.Context) ([]byte, error)
-	// FallbackCatalog is the last known `codex plugin list --json` payload.
+	// FallbackCatalog is the last known Codex directory-scan payload.
 	// Import uses it when a live Codex listing is unavailable so an already
 	// displayed package can still be copied from the local Codex cache or
 	// marketplace checkout.
@@ -103,6 +103,10 @@ type Options struct {
 
 type installedCatalog struct {
 	Installed []installedPlugin `json:"installed"`
+}
+
+type codexPluginSettings struct {
+	Enabled bool `toml:"enabled"`
 }
 
 type installedPlugin struct {
@@ -285,19 +289,110 @@ func mergeMCPServers(target, source map[string]config.MCPServerConfig) {
 	}
 }
 
-func listWithCodex(parent context.Context) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
-	defer cancel()
-	command := exec.CommandContext(ctx, "codex", "plugin", "list", "--json")
-	command.Env = os.Environ()
-	encoded, err := command.Output()
+func listWithCodex(context.Context) ([]byte, error) {
+	home, err := os.UserHomeDir()
 	if err != nil {
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return nil, fmt.Errorf("timed out after 3s")
-		}
 		return nil, err
 	}
-	return encoded, nil
+	return scanCodexPlugins(home)
+}
+
+func scanCodexPlugins(home string) ([]byte, error) {
+	codexHome := strings.TrimSpace(os.Getenv("CODEX_HOME"))
+	if codexHome == "" {
+		codexHome = filepath.Join(home, ".codex")
+	}
+	configured, err := readCodexPluginSettings(filepath.Join(codexHome, "config.toml"))
+	if err != nil {
+		return nil, err
+	}
+	catalog := installedCatalog{Installed: make([]installedPlugin, 0, len(configured))}
+	for pluginID, settings := range configured {
+		if installed, ok := scanCodexPlugin(codexHome, pluginID, settings.Enabled); ok {
+			catalog.Installed = append(catalog.Installed, installed)
+		}
+	}
+	sort.Slice(catalog.Installed, func(i, j int) bool {
+		return catalog.Installed[i].PluginID < catalog.Installed[j].PluginID
+	})
+	return json.Marshal(catalog)
+}
+
+func readCodexPluginSettings(path string) (map[string]codexPluginSettings, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	payload, err := io.ReadAll(io.LimitReader(file, maxDescriptorBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(payload) > maxDescriptorBytes {
+		return nil, fmt.Errorf("Codex config must be no larger than 1 MiB")
+	}
+	var document struct {
+		Plugins map[string]codexPluginSettings `toml:"plugins"`
+	}
+	if _, err := toml.Decode(string(payload), &document); err != nil {
+		return nil, err
+	}
+	return document.Plugins, nil
+}
+
+func scanCodexPlugin(codexHome, pluginID string, enabled bool) (installedPlugin, bool) {
+	name, marketplace, found := strings.Cut(pluginID, "@")
+	if !found || !safeCodexPathSegment(name) || !safeCodexPathSegment(marketplace) {
+		return installedPlugin{}, false
+	}
+	installed := installedPlugin{
+		PluginID: pluginID, Name: name, Marketplace: marketplace,
+		Installed: true, Enabled: enabled, Origin: "codex", Scope: "user",
+	}
+	root := scanCodexPluginRoot(codexHome, marketplace, name)
+	installed.Source.Path = root
+	if root == "" {
+		return installed, true
+	}
+	var descriptor manifest
+	if decodeJSONFile(filepath.Join(root, ".codex-plugin", "plugin.json"), &descriptor) == nil {
+		installed.Version = descriptor.Version
+	}
+	return installed, true
+}
+
+func scanCodexPluginRoot(codexHome, marketplace, name string) string {
+	cacheRoot := filepath.Join(codexHome, "plugins", "cache", marketplace, name)
+	versions, _ := os.ReadDir(cacheRoot)
+	sort.Slice(versions, func(i, j int) bool { return versions[i].Name() > versions[j].Name() })
+	candidates := make([]string, 0, len(versions)+2)
+	for _, version := range versions {
+		if version.IsDir() && !strings.HasPrefix(version.Name(), ".") {
+			candidates = append(candidates, filepath.Join(cacheRoot, version.Name()))
+		}
+	}
+	candidates = append(candidates,
+		filepath.Join(codexHome, "plugins", name),
+		filepath.Join(codexHome, ".tmp", "marketplaces", marketplace, "plugins", name),
+	)
+	return firstCodexPluginRoot(candidates)
+}
+
+func firstCodexPluginRoot(candidates []string) string {
+	for _, candidate := range candidates {
+		resolved, err := filepath.EvalSymlinks(candidate)
+		if err != nil {
+			continue
+		}
+		if info, err := os.Stat(filepath.Join(resolved, ".codex-plugin", "plugin.json")); err == nil && info.Mode().IsRegular() {
+			return resolved
+		}
+	}
+	return ""
+}
+
+func safeCodexPathSegment(value string) bool {
+	return value != "" && value != "." && value != ".." && filepath.Base(value) == value && !strings.Contains(value, "\\")
 }
 
 func inspectPlugin(options Options, installed installedPlugin) (Entry, string, map[string]config.MCPServerConfig, HookSource, []Diagnostic) {

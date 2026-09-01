@@ -116,7 +116,7 @@ func TestStructuredSubagentRepairsAndReturnsTypedData(t *testing.T) {
 		{{Kind: hyprovider.EventTextDelta, Text: `{"ok":true}`}, {Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete}},
 	}}
 	parent := subagentParentRuntime{
-		SessionID: "session", ParentRunID: "parent", ProviderID: "test", ModelID: "model", Reasoning: "high",
+		SessionID: "session", ParentRunID: "parent", ProviderID: "test", AccountID: "test-account", ModelID: "model", Reasoning: "high",
 		Driver: driver, Coding: coding, WorkspaceRoot: t.TempDir(),
 		ResolveDriver: func(context.Context, string, string, string) (string, int, hyprovider.Driver, error) {
 			return "model", 128_000, driver, nil

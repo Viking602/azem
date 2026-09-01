@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/venat/tool"
 )
 
@@ -25,7 +26,7 @@ var hubReadOnlyOps = map[string]bool{
 
 type HubPeerRequest struct {
 	Operation string
-	Caller    tool.CallerInfo
+	Caller    Invocation
 	Params    map[string]any
 }
 
@@ -105,12 +106,15 @@ func (driver *hubDriver) Definition() tool.Definition {
 				"signal": {Type: "string"}, "timeout": {Type: "integer"},
 			},
 		},
-		EffectType: tool.EffectReadOnly, RiskLevel: "low", PolicyTags: []string{"hub", "process", "coordination"}, Concurrency: tool.ConcurrencyParallel,
+		Concurrency: tool.ConcurrencyParallel,
 	}
 }
 
-func (driver *hubDriver) DefinitionForCall(call tool.Call) tool.Definition {
-	definition := driver.Definition()
+func (driver *hubDriver) PolicyForCall(call tool.Call) agentruntime.ToolPolicy {
+	policy := agentruntime.ToolPolicy{
+		Effect: agentruntime.ToolEffectReadOnly, RiskLevel: "low",
+		PolicyTags: []string{"hub", "process", "coordination"}, Concurrency: tool.ConcurrencyParallel,
+	}
 	var input struct {
 		Operation string `json:"op"`
 		Name      string `json:"name"`
@@ -120,12 +124,12 @@ func (driver *hubDriver) DefinitionForCall(call tool.Call) tool.Definition {
 	op := strings.ToLower(strings.TrimSpace(input.Operation))
 	readOnly := hubReadOnlyOps[op] || op == "send" && strings.TrimSpace(input.Name) == "" && strings.TrimSpace(input.To) != ""
 	if !readOnly {
-		definition.EffectType = tool.EffectExternalSideEffect
-		definition.RequiresApproval = true
-		definition.RequiresActionTask = true
-		definition.RiskLevel = "high"
+		policy.Effect = agentruntime.ToolEffectExternalSideEffect
+		policy.RequiresApproval = true
+		policy.RequiresActionTask = true
+		policy.RiskLevel = "high"
 	}
-	return definition
+	return policy
 }
 
 func (driver *hubDriver) Execute(ctx context.Context, call tool.Call, _ tool.UpdateSink) (tool.Result, error) {
@@ -143,7 +147,7 @@ func (driver *hubDriver) Execute(ctx context.Context, call tool.Call, _ tool.Upd
 	if err := validateHubParams(driver.root, op, params); err != nil {
 		return hubError(call, err), nil
 	}
-	caller, _ := tool.CallerFromContext(ctx)
+	caller, _ := InvocationFromContext(ctx)
 	owner := firstString(caller.AgentID, "Main")
 	if broker := driver.peers.get(); broker != nil && isPeerHubOperation(op, params) {
 		response, err := broker.ExecuteHubPeer(ctx, HubPeerRequest{Operation: op, Caller: caller, Params: params})

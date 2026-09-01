@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 const (
 	recoveryFencePreparing = "recovering\n"
 	recoveryFenceReady     = "ready\n"
+	recoveryFenceClean     = "clean\n"
 )
 
 type fileRecoveryFence struct {
@@ -36,7 +38,23 @@ func acquireRecoveryFence(ctx context.Context, path string) (RecoveryFence, bool
 			return nil, false, err
 		}
 		if owner {
-			return fence, true, nil
+			state, err := fence.readState()
+			if err != nil {
+				_ = fence.Close()
+				return nil, false, err
+			}
+			recover := state != recoveryFenceClean
+			if err := fence.writeState(recoveryFencePreparing); err != nil {
+				_ = fence.Close()
+				return nil, false, err
+			}
+			if !recover {
+				if err := fence.FinishRecovery(); err != nil {
+					_ = fence.Close()
+					return nil, false, err
+				}
+			}
+			return fence, recover, nil
 		}
 		ready, err := fence.waitForCompletedRecovery(ctx)
 		if err != nil {
@@ -53,7 +71,7 @@ func (f *fileRecoveryFence) tryStartRecovery() (bool, error) {
 	err := f.tryLock(true)
 	if err == nil {
 		f.exclusive = true
-		return true, f.writeState(recoveryFencePreparing)
+		return true, nil
 	}
 	if errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
 		return false, nil
@@ -105,6 +123,26 @@ func (f *fileRecoveryFence) Close() error {
 	return errors.Join(unlockErr, file.Close())
 }
 
+func (f *fileRecoveryFence) CloseClean() error {
+	if f == nil || f.file == nil || f.exclusive {
+		return f.Close()
+	}
+	file := f.file
+	if err := f.unlock(); err != nil {
+		f.file = nil
+		return errors.Join(err, file.Close())
+	}
+	if err := f.tryLock(true); err == nil {
+		f.exclusive = true
+		return errors.Join(f.writeState(recoveryFenceClean), f.Close())
+	} else if !errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+		f.file = nil
+		return errors.Join(fmt.Errorf("lock runtime cleanly: %w", err), file.Close())
+	}
+	f.file = nil
+	return file.Close()
+}
+
 func (f *fileRecoveryFence) tryLock(exclusive bool) error {
 	flags := uint32(windows.LOCKFILE_FAIL_IMMEDIATELY)
 	if exclusive {
@@ -154,6 +192,9 @@ func (f *fileRecoveryFence) readState() (string, error) {
 	buffer := make([]byte, len(recoveryFencePreparing))
 	read, err := f.file.ReadAt(buffer, 0)
 	if err != nil && read == 0 {
+		if errors.Is(err, io.EOF) {
+			return "", nil
+		}
 		return "", fmt.Errorf("read runtime recovery state: %w", err)
 	}
 	return string(buffer[:read]), nil

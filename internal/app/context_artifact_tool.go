@@ -46,7 +46,7 @@ func (d *contextArtifactDriver) Definition() tool.Definition {
 			"offset":      {Type: "integer"}, "limit_bytes": {Type: "integer"},
 			"start_line": {Type: "integer"}, "end_line": {Type: "integer"}, "pattern": {Type: "string"},
 		}, Required: []string{"artifact_id"}, AdditionalProperties: &additional,
-	}, EffectType: tool.EffectReadOnly, RequiresApproval: false, RequiresActionTask: false, RiskLevel: "low", Metadata: map[string]string{"approval": "allow"}, PolicyTags: []string{"session", "context", "read-only"}}
+	}}
 }
 
 func (d *contextArtifactDriver) Execute(ctx context.Context, call tool.Call, _ tool.UpdateSink) (tool.Result, error) {

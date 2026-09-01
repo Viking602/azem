@@ -1,4 +1,10 @@
-use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    rc::Rc,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use azem_ipc::{BinaryMetadata, Envelope};
 use serde::{Deserialize, Serialize};
@@ -13,9 +19,7 @@ pub enum Surface {
     Files,
     Changes,
     PullRequests,
-    Work,
     Security,
-    Usage,
     Terminal,
 }
 
@@ -65,6 +69,7 @@ pub struct TranscriptModel {
 pub struct RuntimeModel {
     pub running: bool,
     pub run_id: Arc<str>,
+    pub run_started_at_ms: i64,
     pub active_session_id: Arc<str>,
     pub activity: Arc<str>,
     pub plan_mode: bool,
@@ -73,11 +78,14 @@ pub struct RuntimeModel {
     pub questions: Vec<Value>,
     pub plans: Vec<Value>,
     pub agents: Vec<Value>,
+    pub selected_agent_id: Arc<str>,
     pub agent_blocks: Vec<Value>,
+    pub hooks: Vec<Value>,
     pub memories: Vec<Value>,
     pub background_logs: Value,
     pub background: Vec<Value>,
     pub context_profile: Value,
+    pub context_usage: Value,
     pub recap: Value,
 }
 
@@ -144,13 +152,19 @@ pub struct SettingsModel {
     pub provider: Arc<str>,
     pub model: Arc<str>,
     pub reasoning: Arc<str>,
+    pub chatgpt_fast_mode: bool,
     pub agent_mode: Arc<str>,
     pub approval_mode: Arc<str>,
     pub queue_mode: Arc<str>,
+    pub subagent_concurrency: i64,
+    pub subagent_max_depth: i64,
+    pub shell_concurrency: i64,
+    pub shell_max_wall_clock_seconds: i64,
+    pub subagent_await_seconds: i64,
+    pub subagent_idle_seconds: i64,
     pub appearance: Value,
     pub usage: Value,
     pub recovery: Value,
-    pub archive: Value,
     pub error: Arc<str>,
 }
 
@@ -169,6 +183,10 @@ pub struct SessionSummary {
     pub running: bool,
     #[serde(default)]
     pub unread: bool,
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
+    pub archived: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -235,6 +253,8 @@ struct DesktopEvent {
     #[serde(default)]
     state: String,
     #[serde(default)]
+    at: String,
+    #[serde(default)]
     data: HashMap<String, String>,
     #[serde(default)]
     todo: Value,
@@ -300,6 +320,52 @@ fn decode_desktop_event(mut value: Value) -> serde_json::Result<DesktopEvent> {
 }
 
 impl AppState {
+    pub(crate) fn append_optimistic_user(
+        &mut self,
+        request_id: &str,
+        content: String,
+        attachments: Vec<Value>,
+    ) {
+        let id: Arc<str> = format!("user-{request_id}").into();
+        let mut extra = HashMap::new();
+        if !attachments.is_empty() {
+            extra.insert("attachments".to_string(), Value::Array(attachments));
+        }
+        if let Ok(elapsed) = SystemTime::now().duration_since(UNIX_EPOCH) {
+            extra.insert(
+                "createdAt".to_string(),
+                Value::String(elapsed.as_millis().to_string()),
+            );
+        }
+        let mut blocks = self.transcript.blocks.borrow_mut();
+        blocks.push(Block {
+            id: id.clone(),
+            kind: "user".into(),
+            content,
+            state: "submitted".into(),
+            extra,
+            ..Default::default()
+        });
+        self.transcript.index_by_id.insert(id, blocks.len() - 1);
+        self.runtime.running = true;
+        self.runtime.activity = "waiting_model".into();
+    }
+
+    pub(crate) fn append_request_error(&mut self, request_id: &str, error: String) {
+        self.apply_desktop_event(DesktopEvent {
+            kind: "run_failed".to_string(),
+            session_id: self.navigation.current_session_id.to_string(),
+            run_id: if self.runtime.run_id.is_empty() {
+                request_id.to_string()
+            } else {
+                self.runtime.run_id.to_string()
+            },
+            text: error,
+            state: "failed".to_string(),
+            ..Default::default()
+        });
+    }
+
     pub fn apply_reconnect_snapshot(&mut self, snapshot: Value) {
         if let Some(base) = snapshot.get("base") {
             self.workspace.root = value_str(base, "workspace");
@@ -309,9 +375,17 @@ impl AppState {
             self.settings.provider = value_str(base, "provider");
             self.settings.model = value_str(base, "model");
             self.settings.reasoning = value_str(base, "reasoning");
+            self.settings.chatgpt_fast_mode = base["chatgptFastMode"].as_bool().unwrap_or(false);
             self.settings.agent_mode = value_str(base, "agentMode");
             self.settings.approval_mode = value_str(base, "approvalMode");
             self.settings.queue_mode = value_str(base, "queueMode");
+            self.settings.subagent_concurrency = value_i64(base, "subagentConcurrency");
+            self.settings.subagent_max_depth = value_i64(base, "subagentMaxDepth");
+            self.settings.shell_concurrency = value_i64(base, "shellConcurrency");
+            self.settings.shell_max_wall_clock_seconds =
+                value_i64(base, "shellMaxWallClockSeconds");
+            self.settings.subagent_await_seconds = value_i64(base, "subagentAwaitSeconds");
+            self.settings.subagent_idle_seconds = value_i64(base, "subagentIdleSeconds");
         }
         self.navigation.sessions = snapshot
             .get("sessions")
@@ -381,8 +455,9 @@ impl AppState {
     }
 
     pub fn apply_direct_event(&mut self, value: Value) {
-        if let Ok(event) = decode_desktop_event(value) {
-            self.apply_desktop_event(event);
+        match decode_desktop_event(value) {
+            Ok(event) => self.apply_desktop_event(event),
+            Err(error) => tracing::warn!(%error, "GPUI direct event decode failed"),
         }
     }
     pub fn apply_terminal_binary(&mut self, metadata: BinaryMetadata, _data: &[u8]) {
@@ -403,10 +478,23 @@ impl AppState {
         {
             match event.kind.as_str() {
                 "run_started" => {
-                    set_session_running(&mut self.navigation.sessions, &event.session_id, true)
+                    set_session_running(&mut self.navigation.sessions, &event.session_id, true);
+                    self.runtime.active_session_id = event.session_id.clone().into();
                 }
                 "run_finished" | "run_failed" | "run_cancelled" => {
-                    set_session_running(&mut self.navigation.sessions, &event.session_id, false)
+                    set_session_running(&mut self.navigation.sessions, &event.session_id, false);
+                    if event.kind != "run_cancelled"
+                        && let Some(session) = self
+                            .navigation
+                            .sessions
+                            .iter_mut()
+                            .find(|session| session.id.as_ref() == event.session_id)
+                    {
+                        session.unread = true;
+                    }
+                    if self.runtime.active_session_id.as_ref() == event.session_id {
+                        self.runtime.active_session_id = "".into();
+                    }
                 }
                 _ => {}
             }
@@ -441,10 +529,17 @@ impl AppState {
                 if is_current {
                     self.runtime.running = true;
                     self.runtime.run_id = event.run_id.into();
+                    self.runtime.run_started_at_ms = unix_millis();
                     self.runtime.activity = "running".into();
                 }
             }
             "run_finished" | "run_failed" | "run_cancelled" => {
+                let completed_at_ms = unix_millis();
+                let elapsed_ms = if self.runtime.run_started_at_ms > 0 {
+                    (completed_at_ms - self.runtime.run_started_at_ms).max(0)
+                } else {
+                    0
+                };
                 let is_current = event.session_id == self.navigation.current_session_id.as_ref();
                 for session in &mut self.navigation.sessions {
                     if session.id.as_ref() == event.session_id {
@@ -458,14 +553,92 @@ impl AppState {
                     self.runtime.active_session_id = "".into();
                 }
                 if is_current {
+                    self.remove_context_compaction(&event.run_id);
+                    if event.kind == "run_failed" {
+                        self.append_event_block(event.clone(), "error");
+                    }
                     self.runtime.running = false;
                     self.runtime.run_id = "".into();
                     self.runtime.activity = event.state.into();
-                    for block in self.transcript.blocks.borrow_mut().iter_mut() {
-                        if block.state.as_ref() == "streaming" {
-                            block.state = "complete".into();
+                    let mut inserted_status = false;
+                    {
+                        let mut blocks = self.transcript.blocks.borrow_mut();
+                        for block in blocks.iter_mut() {
+                            if block.run_id.as_ref() != event.run_id {
+                                continue;
+                            }
+                            if matches!(block.kind.as_ref(), "tool" | "diff")
+                                && matches!(
+                                    block.state.as_ref(),
+                                    "running"
+                                        | "queued"
+                                        | "pending"
+                                        | "streaming"
+                                        | "started"
+                                        | "progress"
+                                        | "awaiting_approval"
+                                        | "reviewing_approval"
+                                )
+                            {
+                                block.state = "interrupted".into();
+                            } else if block.state.as_ref() == "streaming" {
+                                block.state = "complete".into();
+                            }
+                            if is_final_output_block(block) {
+                                if self.runtime.run_started_at_ms > 0 {
+                                    block.extra.entry("startedAt".to_string()).or_insert_with(
+                                        || {
+                                            Value::String(
+                                                self.runtime.run_started_at_ms.to_string(),
+                                            )
+                                        },
+                                    );
+                                }
+                                block.extra.insert(
+                                    "completedAt".to_string(),
+                                    Value::String(completed_at_ms.to_string()),
+                                );
+                                block.extra.insert(
+                                    "elapsedMs".to_string(),
+                                    Value::String(elapsed_ms.to_string()),
+                                );
+                            }
+                        }
+                        if event.kind == "run_cancelled"
+                            && !blocks.iter().any(|block| {
+                                block.run_id.as_ref() == event.run_id
+                                    && block.kind.as_ref() == "status"
+                                    && block.title.as_ref() == "run_cancelled"
+                            })
+                        {
+                            let status = Block {
+                                id: format!("status-cancelled:{}:{}", event.run_id, self.sequence)
+                                    .into(),
+                                kind: "status".into(),
+                                run_id: event.run_id.clone().into(),
+                                title: "run_cancelled".into(),
+                                state: "cancelled".into(),
+                                extra: HashMap::from([(
+                                    "runElapsedMs".to_string(),
+                                    Value::String(elapsed_ms.to_string()),
+                                )]),
+                                ..Default::default()
+                            };
+                            let insert_at = blocks
+                                .iter()
+                                .rposition(|block| {
+                                    block.run_id.as_ref() == event.run_id
+                                        && is_final_output_block(block)
+                                })
+                                .unwrap_or(blocks.len());
+                            blocks.insert(insert_at, status);
+                            inserted_status = true;
                         }
                     }
+                    if inserted_status {
+                        self.transcript.rebuild_index();
+                    }
+                    self.runtime.run_started_at_ms = 0;
                 }
             }
             "provider_retry" => self.runtime.activity = event.text.into(),
@@ -513,6 +686,10 @@ impl AppState {
                     if let Some(fields) = agent.as_object_mut() {
                         fields.insert("id".to_string(), Value::String(event.agent_id.clone()));
                         fields.insert("agentId".to_string(), Value::String(event.agent_id.clone()));
+                        fields.insert("state".to_string(), Value::String(event.state.clone()));
+                        if !event.text.is_empty() {
+                            fields.insert("summary".to_string(), Value::String(event.text.clone()));
+                        }
                     }
                     if let Some(existing) = self.runtime.agents.iter_mut().find(|candidate| {
                         candidate.get("id").and_then(Value::as_str) == Some(event.agent_id.as_str())
@@ -529,8 +706,15 @@ impl AppState {
                 }
             }
             "agent_detail" => {
-                self.runtime.agents = event.agent_snapshots;
-                self.runtime.agent_blocks = event.agent_blocks;
+                if !event.agent_snapshots.is_empty() {
+                    self.runtime.agents = normalize_agent_snapshots(event.agent_snapshots);
+                }
+                if event.agent_id.is_empty()
+                    || self.runtime.selected_agent_id.as_ref() == event.agent_id
+                {
+                    self.runtime.agent_blocks =
+                        merge_agent_detail_blocks(&self.runtime.agent_blocks, event.agent_blocks);
+                }
             }
             "agent_catalog" => self.catalogs.agent_types = event.agent_catalog,
             "skill_catalog" => {
@@ -541,13 +725,34 @@ impl AppState {
                 self.catalogs.plugins = event.plugin_catalog;
                 self.catalogs.plugin_diagnostics = event.plugin_diagnostics;
             }
-            "marketplace_catalog" => self.catalogs.marketplace = event.marketplace_catalog,
-            "hook_catalog" => self.catalogs.hooks = event.hook_catalog,
-            "hook_started" | "hook_finished" | "hook_diagnostic" => {
-                self.catalogs.hooks = event_value(&event)
+            "marketplace_catalog" => {
+                if event.marketplace_catalog.is_object() {
+                    self.catalogs.marketplace = event.marketplace_catalog;
+                } else if !event.text.is_empty() {
+                    self.settings.error = event.text.into();
+                }
+            }
+            "hook_catalog" => {
+                if event.hook_catalog.is_object() {
+                    self.catalogs.hooks = event.hook_catalog;
+                }
+            }
+            "hook_finished" | "hook_diagnostic" => {
+                self.runtime.hooks.push(event_value(&event));
+                if self.runtime.hooks.len() > 256 {
+                    let excess = self.runtime.hooks.len() - 256;
+                    self.runtime.hooks.drain(..excess);
+                }
             }
             "context_profile" => self.runtime.context_profile = event.context_profile,
-            "context_usage" => self.settings.usage = event_value(&event),
+            "context_usage" => {
+                if matches!(event.state.as_str(), "compacting" | "compacted" | "failed") {
+                    self.apply_context_compaction_event(&event);
+                }
+                if let Some(usage) = project_context_usage(&self.runtime.context_usage, &event) {
+                    self.runtime.context_usage = usage;
+                }
+            }
             "memory_state" => self.runtime.memories = event.memories,
             "recap_state" => self.runtime.recap = event.recap,
             "model_catalog" => {
@@ -558,13 +763,61 @@ impl AppState {
                         .or_else(|| event.data.get("catalog")),
                 )
             }
-            "model_routes" => self.catalogs.routes = event.model_routes,
+            "model_routes" => {
+                self.catalogs.routes = event.model_routes;
+                if let Some(enabled) = event
+                    .data
+                    .get("chatgpt_fast_mode")
+                    .and_then(|value| value.parse::<bool>().ok())
+                {
+                    self.settings.chatgpt_fast_mode = enabled;
+                }
+                update_i64(
+                    &event.data,
+                    "subagent_max_concurrency",
+                    &mut self.settings.subagent_concurrency,
+                );
+                update_i64(
+                    &event.data,
+                    "subagent_max_depth",
+                    &mut self.settings.subagent_max_depth,
+                );
+                update_i64(
+                    &event.data,
+                    "shell_max_concurrency",
+                    &mut self.settings.shell_concurrency,
+                );
+                update_i64(
+                    &event.data,
+                    "shell_max_wall_clock_seconds",
+                    &mut self.settings.shell_max_wall_clock_seconds,
+                );
+                update_i64(
+                    &event.data,
+                    "subagent_await_seconds",
+                    &mut self.settings.subagent_await_seconds,
+                );
+                update_i64(
+                    &event.data,
+                    "subagent_idle_seconds",
+                    &mut self.settings.subagent_idle_seconds,
+                );
+            }
             "model_providers" => self.catalogs.providers = event.model_providers,
             "command_catalog" => {
                 self.catalogs.commands = parse_string_json(event.data.get("commands"))
             }
             "theme_catalog" => self.catalogs.themes = parse_string_json(event.data.get("themes")),
-            "mcp_state" => self.catalogs.mcp = event_value(&event),
+            "mcp_state" if event.state == "snapshot" => {
+                match event
+                    .data
+                    .get("servers")
+                    .and_then(|raw| serde_json::from_str::<Vec<Value>>(raw).ok())
+                {
+                    Some(servers) => self.catalogs.mcp = Value::Array(servers),
+                    None => self.settings.error = "Invalid MCP server snapshot".into(),
+                }
+            }
             "auth_state" => self.catalogs.auth = event_value(&event),
             "approval_mode" => {
                 self.settings.approval_mode = event
@@ -581,7 +834,15 @@ impl AppState {
             "usage_report" => self.settings.usage = event.usage_report,
             "security_config_state" => self.security.config = event.security_config,
             "security_scan_state" | "security_publication_state" => {
-                self.security.projection = event.security
+                let projection = event.security;
+                if let Some(scan) = projection.get("scan") {
+                    let id = scan.get("id").and_then(Value::as_str).unwrap_or_default();
+                    upsert_pending(&mut self.security.scans, "id", id, scan.clone());
+                }
+                if let Some(findings) = projection.get("findings").and_then(Value::as_array) {
+                    self.security.findings = findings.clone();
+                }
+                self.security.projection = projection;
             }
             "security_scan_list" => self.security.scans = event.security_scans,
             "security_finding_list" => self.security.findings = event.security_findings,
@@ -602,6 +863,20 @@ impl AppState {
             return;
         }
         let loaded_session_id = event.session_id.clone();
+        if !self.navigation.current_session_id.is_empty()
+            && self.navigation.current_session_id.as_ref() != loaded_session_id
+        {
+            self.runtime.hooks.clear();
+        }
+        let keep_agent_detail = event.state == "refreshed"
+            && self.navigation.current_session_id.as_ref() == loaded_session_id;
+        let fallback_title = self
+            .navigation
+            .sessions
+            .iter()
+            .find(|session| session.id.as_ref() == loaded_session_id)
+            .map(|session| session.title.clone())
+            .unwrap_or_default();
         retain_session_values(&mut self.runtime.approvals, &loaded_session_id);
         retain_session_values(&mut self.runtime.questions, &loaded_session_id);
         retain_session_values(&mut self.runtime.plans, &loaded_session_id);
@@ -611,11 +886,23 @@ impl AppState {
                 session.unread = false;
             }
         }
-        self.navigation.current_title = event.data.get("title").cloned().unwrap_or_default().into();
+        self.navigation.current_title = event
+            .data
+            .get("title")
+            .filter(|title| !title.trim().is_empty())
+            .cloned()
+            .map(Arc::<str>::from)
+            .unwrap_or(fallback_title);
         self.settings.provider = value_str_map(&event.data, "provider");
         self.settings.model = value_str_map(&event.data, "model");
         self.settings.reasoning = value_str_map(&event.data, "reasoning");
         self.settings.agent_mode = value_str_map(&event.data, "agentMode");
+        self.runtime.context_profile = Value::Null;
+        self.runtime.context_usage = event
+            .data
+            .get("usage")
+            .and_then(|usage| serde_json::from_str(usage).ok())
+            .unwrap_or(Value::Null);
         let blocks = restored_session_blocks(&event.data);
         restore_durable_controls(
             &blocks,
@@ -631,6 +918,11 @@ impl AppState {
             .data
             .get("active")
             .is_some_and(|value| value == "true");
+        self.runtime.run_started_at_ms = if self.runtime.running {
+            unix_millis()
+        } else {
+            0
+        };
         if self.runtime.running {
             self.runtime.active_session_id = self.navigation.current_session_id.clone();
         }
@@ -640,12 +932,23 @@ impl AppState {
             .cloned()
             .unwrap_or_default()
             .into();
-        self.runtime.agents = event.agent_snapshots;
-        self.runtime.agent_blocks = event.agent_blocks;
+        self.runtime.agents = normalize_agent_snapshots(event.agent_snapshots);
+        if !keep_agent_detail {
+            self.runtime.selected_agent_id = "".into();
+            self.runtime.agent_blocks = event.agent_blocks;
+        }
     }
 
     fn apply_agent_stream_event(&mut self, event: DesktopEvent) {
-        let value = event_value(&event);
+        if !self.runtime.selected_agent_id.is_empty()
+            && self.runtime.selected_agent_id.as_ref() != event.agent_id
+        {
+            return;
+        }
+        let mut value = event_value(&event);
+        if event.kind == "thinking_delta" {
+            value["text"] = Value::String(normalize_thinking_content(&event.text));
+        }
         let replace = match event.kind.as_str() {
             "text_delta" | "thinking_delta" => {
                 self.runtime
@@ -687,14 +990,16 @@ impl AppState {
         };
         if let Some(existing) = replace {
             if matches!(event.kind.as_str(), "text_delta" | "thinking_delta") {
-                let combined = format!(
-                    "{}{}",
-                    existing
-                        .get("text")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default(),
-                    event.text
-                );
+                let mut combined = existing
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                if event.kind == "thinking_delta" {
+                    append_thinking_content(&mut combined, &event.text);
+                } else {
+                    combined.push_str(&event.text);
+                }
                 *existing = value;
                 existing["text"] = Value::String(combined);
             } else {
@@ -711,6 +1016,16 @@ impl AppState {
     }
 
     fn append_event_block(&mut self, event: DesktopEvent, kind: &str) {
+        if kind == "error"
+            && self
+                .transcript
+                .blocks
+                .borrow()
+                .last()
+                .is_some_and(|block| block.kind.as_ref() == "error" && block.content == event.text)
+        {
+            return;
+        }
         let id: Arc<str> = if event.tool_call_id.is_empty() {
             format!("{}:{}:{}", kind, event.run_id, self.sequence).into()
         } else {
@@ -730,6 +1045,40 @@ impl AppState {
         self.transcript.index_by_id.insert(id, blocks.len() - 1);
     }
 
+    fn apply_context_compaction_event(&mut self, event: &DesktopEvent) {
+        if event.state != "compacting" {
+            self.remove_context_compaction(&event.run_id);
+            return;
+        }
+        let id: Arc<str> = format!("context-compaction:{}", event.run_id).into();
+        if self.transcript.index_by_id.contains_key(&id) {
+            return;
+        }
+        let mut blocks = self.transcript.blocks.borrow_mut();
+        blocks.push(Block {
+            id: id.clone(),
+            kind: "context_compaction".into(),
+            run_id: event.run_id.clone().into(),
+            state: "running".into(),
+            ..Default::default()
+        });
+        self.transcript.index_by_id.insert(id, blocks.len() - 1);
+    }
+
+    fn remove_context_compaction(&mut self, run_id: &str) {
+        let removed = {
+            let mut blocks = self.transcript.blocks.borrow_mut();
+            let before = blocks.len();
+            blocks.retain(|block| {
+                block.kind.as_ref() != "context_compaction" || block.run_id.as_ref() != run_id
+            });
+            blocks.len() != before
+        };
+        if removed {
+            self.transcript.rebuild_index();
+        }
+    }
+
     fn append_stream_text(&mut self, event: DesktopEvent, kind: &str) {
         let phase = event.text_phase.clone();
         let mut blocks = self.transcript.blocks.borrow_mut();
@@ -739,7 +1088,11 @@ impl AppState {
             && block.text_phase.as_ref() == phase
             && block.state.as_ref() == "streaming"
         {
-            block.content.push_str(&event.text);
+            if kind == "thinking" {
+                append_thinking_content(&mut block.content, &event.text);
+            } else {
+                block.content.push_str(&event.text);
+            }
             return;
         }
         let id: Arc<str> = format!("{}:{}:{}:{}", kind, event.run_id, phase, self.sequence).into();
@@ -747,7 +1100,11 @@ impl AppState {
             id: id.clone(),
             kind: kind.into(),
             run_id: event.run_id.into(),
-            content: event.text,
+            content: if kind == "thinking" {
+                normalize_thinking_content(&event.text)
+            } else {
+                event.text
+            },
             state: "streaming".into(),
             text_phase: phase.into(),
             ..Default::default()
@@ -757,12 +1114,19 @@ impl AppState {
 
     fn apply_tool_event(&mut self, event: DesktopEvent) {
         let id: Arc<str> = event.tool_call_id.clone().into();
+        let title = event.data.get("name").cloned().unwrap_or_default();
+        let extra = event
+            .data
+            .into_iter()
+            .map(|(key, value)| (key, Value::String(value)))
+            .collect::<HashMap<_, _>>();
         let mut blocks = self.transcript.blocks.borrow_mut();
         if let Some(index) = self.transcript.index_by_id.get(&id).copied()
             && let Some(block) = blocks.get_mut(index)
         {
             block.content = event.text;
             block.state = event.state.into();
+            block.extra.extend(extra);
             return;
         }
         let block = Block {
@@ -770,9 +1134,10 @@ impl AppState {
             kind: "tool".into(),
             run_id: event.run_id.into(),
             tool_call_id: id.clone(),
-            title: event.data.get("name").cloned().unwrap_or_default().into(),
+            title: title.into(),
             content: event.text,
             state: event.state.into(),
+            extra,
             ..Default::default()
         };
         self.transcript.index_by_id.insert(id, blocks.len());
@@ -838,6 +1203,17 @@ impl TranscriptModel {
     }
 }
 
+pub(crate) fn unix_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as i64)
+}
+
+fn is_final_output_block(block: &Block) -> bool {
+    block.kind.as_ref() == "error"
+        || (block.kind.as_ref() == "assistant" && block.text_phase.as_ref() != "commentary")
+}
+
 fn value_str(value: &Value, key: &str) -> Arc<str> {
     value
         .get(key)
@@ -845,6 +1221,23 @@ fn value_str(value: &Value, key: &str) -> Arc<str> {
         .unwrap_or_default()
         .to_string()
         .into()
+}
+
+fn value_i64(value: &Value, key: &str) -> i64 {
+    value
+        .get(key)
+        .and_then(|value| {
+            value
+                .as_i64()
+                .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+        })
+        .unwrap_or_default()
+}
+
+fn update_i64(values: &HashMap<String, String>, key: &str, target: &mut i64) {
+    if let Some(value) = values.get(key).and_then(|value| value.parse().ok()) {
+        *target = value;
+    }
 }
 
 fn parse_string_json<T: for<'de> Deserialize<'de>>(value: Option<&String>) -> Vec<T> {
@@ -858,16 +1251,29 @@ fn value_str_map(values: &HashMap<String, String>, key: &str) -> Arc<str> {
 }
 
 fn restored_session_blocks(data: &HashMap<String, String>) -> Vec<Block> {
-    let blocks: Vec<Block> = parse_string_json(data.get("blocks"));
+    let mut blocks: Vec<Block> = parse_string_json(data.get("blocks"));
+    for block in &mut blocks {
+        if block.kind.as_ref() == "thinking" {
+            block.content = normalize_thinking_content(&block.content);
+        }
+    }
     let sequences: Vec<i64> = parse_string_json(data.get("blockSequences"));
     let tools: Vec<Value> = parse_string_json(data.get("toolRecords"));
     if sequences.len() != blocks.len() {
         return append_restored_tools(blocks, tools);
     }
+    let durable_tool_ids = tools
+        .iter()
+        .filter_map(|tool| tool.get("toolCallId").and_then(Value::as_str))
+        .collect::<Vec<_>>();
     let mut ordered = blocks
         .into_iter()
         .zip(sequences)
         .enumerate()
+        .filter(|(_, (block, _))| {
+            block.tool_call_id.is_empty()
+                || !durable_tool_ids.contains(&block.tool_call_id.as_ref())
+        })
         .map(|(index, (mut block, sequence))| {
             block
                 .extra
@@ -888,14 +1294,37 @@ fn restored_session_blocks(data: &HashMap<String, String>) -> Vec<Block> {
     ordered.into_iter().map(|(_, _, _, block)| block).collect()
 }
 
+fn append_thinking_content(existing: &mut String, next: &str) {
+    let normalized;
+    let next = if next.contains("****") {
+        normalized = normalize_thinking_content(next);
+        normalized.as_str()
+    } else {
+        next
+    };
+    if existing.trim_end_matches([' ', '\t']).ends_with("**")
+        && next.trim_start_matches([' ', '\t']).starts_with("**")
+    {
+        existing.push_str("\n\n");
+    }
+    existing.push_str(next);
+}
+
+pub(super) fn normalize_thinking_content(content: &str) -> String {
+    content.replace("****", "**\n\n**")
+}
+
 fn append_restored_tools(mut blocks: Vec<Block>, tools: Vec<Value>) -> Vec<Block> {
     for tool in tools {
-        if let Some(block) = restored_tool_block(&tool)
-            && !blocks
-                .iter()
-                .any(|existing| existing.tool_call_id == block.tool_call_id)
-        {
-            blocks.push(block);
+        if let Some(block) = restored_tool_block(&tool) {
+            if let Some(existing) = blocks
+                .iter_mut()
+                .find(|existing| existing.tool_call_id == block.tool_call_id)
+            {
+                *existing = block;
+            } else {
+                blocks.push(block);
+            }
         }
     }
     blocks
@@ -1025,6 +1454,7 @@ fn event_value(event: &DesktopEvent) -> Value {
         "agentId": event.agent_id,
         "runId": event.run_id,
         "state": event.state,
+        "at": event.at,
         "approvalId": event.approval_id,
         "userInputId": event.user_input_id,
         "planId": event.plan_id,
@@ -1032,6 +1462,107 @@ fn event_value(event: &DesktopEvent) -> Value {
         "text": event.text,
         "data": event.data,
     })
+}
+
+fn normalize_agent_snapshots(values: Vec<Value>) -> Vec<Value> {
+    values.into_iter().map(normalize_agent_snapshot).collect()
+}
+
+fn normalize_agent_snapshot(value: Value) -> Value {
+    let Some(wrapper) = value.as_object() else {
+        return value;
+    };
+    let mut agent = wrapper
+        .get("agent")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_else(|| wrapper.clone());
+    for key in ["id", "state", "summary", "parentRunId", "parentRunID"] {
+        if let Some(field) = wrapper.get(key).filter(|field| !field.is_null()) {
+            agent.insert(key.to_string(), field.clone());
+        }
+    }
+    if let Some(id) = agent.get("id").cloned() {
+        agent.insert("agentId".to_string(), id);
+    }
+    Value::Object(agent)
+}
+
+fn merge_agent_detail_blocks(current: &[Value], incoming: Vec<Value>) -> Vec<Value> {
+    if incoming.is_empty() {
+        return current.to_vec();
+    }
+    let mut merged = incoming;
+    for live in current {
+        let id = live.get("id").and_then(Value::as_str).unwrap_or_default();
+        if let Some(block) = merged
+            .iter_mut()
+            .find(|block| block.get("id").and_then(Value::as_str) == Some(id))
+        {
+            let live_len = live
+                .get("content")
+                .or_else(|| live.get("text"))
+                .and_then(Value::as_str)
+                .map(str::len)
+                .unwrap_or_default();
+            let incoming_len = block
+                .get("content")
+                .or_else(|| block.get("text"))
+                .and_then(Value::as_str)
+                .map(str::len)
+                .unwrap_or_default();
+            if live_len > incoming_len {
+                *block = live.clone();
+            }
+        } else {
+            merged.push(live.clone());
+        }
+    }
+    merged
+}
+
+fn project_context_usage(current: &Value, event: &DesktopEvent) -> Option<Value> {
+    if !is_main_context_usage(event) {
+        return None;
+    }
+    event
+        .data
+        .get("factSnapshot")
+        .filter(|value| *value == "true")
+        .and_then(|_| event.data.get("usageSnapshot"))
+        .and_then(|usage| serde_json::from_str(usage).ok())
+        .or_else(|| Some(merge_context_usage(current, event)))
+}
+
+fn is_main_context_usage(event: &DesktopEvent) -> bool {
+    event
+        .data
+        .get("requestKind")
+        .is_none_or(|value| value == "main")
+        && !event
+            .data
+            .get("aggregateOnly")
+            .is_some_and(|value| value == "true")
+}
+
+fn merge_context_usage(current: &Value, event: &DesktopEvent) -> Value {
+    let mut usage = current.as_object().cloned().unwrap_or_default();
+    for key in ["inputTokens", "outputTokens", "contextLimit"] {
+        if let Some(value) = event
+            .data
+            .get(key)
+            .and_then(|value| value.parse::<i64>().ok())
+        {
+            usage.insert(key.to_string(), Value::from(value));
+        }
+    }
+    usage.insert(
+        "reported".to_string(),
+        Value::Bool(
+            event.state == "reported" || current.get("reported") == Some(&Value::Bool(true)),
+        ),
+    );
+    Value::Object(usage)
 }
 
 fn retain_unresolved(values: &mut Vec<Value>, key: &str, id: &str) {
@@ -1053,7 +1584,64 @@ mod tests {
     use azem_ipc::{BinaryMetadata, Envelope};
     use serde_json::json;
 
-    use super::AppState;
+    use super::{AppState, SessionSummary, unix_millis};
+
+    #[test]
+    fn extension_snapshots_survive_activity_and_failed_refreshes() {
+        let mut state = AppState::default();
+        let servers = json!([{"name":"local-tools","enabled":true,"toolCount":3}]);
+        state.apply_direct_event(json!({"kind":"mcp_state","state":"snapshot",
+            "data":{"servers":servers.to_string()}}));
+        assert_eq!(state.catalogs.mcp, servers);
+        state.apply_direct_event(json!({"kind":"mcp_state","state":"prompt",
+            "data":{"server":"local-tools","messages":"[]"}}));
+        assert_eq!(state.catalogs.mcp, servers);
+        state.apply_direct_event(json!({"kind":"mcp_state","state":"snapshot",
+            "data":{"servers":"not json"}}));
+        assert_eq!(state.catalogs.mcp, servers);
+        assert!(!state.settings.error.is_empty());
+
+        let hooks = json!({"enabled":true,"trustHooks":false,
+            "sources":[{"name":"project"}],"commands":[{"id":"hook-1","enabled":true}]});
+        state.apply_direct_event(json!({"kind":"hook_catalog","hookCatalog":hooks}));
+        for kind in ["hook_started", "hook_finished", "hook_diagnostic"] {
+            state.apply_direct_event(json!({"kind":kind,"runId":"run-1","text":"hook activity"}));
+            assert_eq!(state.catalogs.hooks, hooks);
+        }
+        assert_eq!(state.runtime.hooks.len(), 2);
+        assert_eq!(state.runtime.hooks[0]["runId"], "run-1");
+
+        let market = json!({"marketplaces":[{"name":"local"}],"available":[],
+            "installed":[{"id":"example@local","scope":"project"}]});
+        state.apply_direct_event(json!({"kind":"marketplace_catalog","marketplaceCatalog":market}));
+        state.apply_direct_event(json!({"kind":"marketplace_catalog","state":"update_error",
+            "text":"marketplace unavailable"}));
+        assert_eq!(state.catalogs.marketplace, market);
+        assert_eq!(state.settings.error.as_ref(), "marketplace unavailable");
+        state.apply_direct_event(json!({"kind":"mcp_state","state":"snapshot",
+            "data":{"servers":"[]"}}));
+        assert_eq!(state.catalogs.mcp, json!([]));
+    }
+
+    #[test]
+    fn optimistic_user_message_precedes_streamed_reply() {
+        let mut state = AppState::default();
+        state.append_optimistic_user(
+            "request-1",
+            "检查当前界面".to_string(),
+            vec![json!({"id": "image-1"})],
+        );
+        let blocks = state.transcript.blocks.borrow();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].id.as_ref(), "user-request-1");
+        assert_eq!(blocks[0].kind.as_ref(), "user");
+        assert_eq!(blocks[0].content, "检查当前界面");
+        assert_eq!(blocks[0].state.as_ref(), "submitted");
+        assert_eq!(blocks[0].extra["attachments"][0]["id"], "image-1");
+        assert!(!blocks[0].extra["createdAt"].as_str().unwrap().is_empty());
+        assert!(state.runtime.running);
+        assert_eq!(state.runtime.activity.as_ref(), "waiting_model");
+    }
 
     #[test]
     fn reconnect_snapshot_restores_active_session_and_catalogs() {
@@ -1069,7 +1657,13 @@ mod tests {
                 "reasoning": "high",
                 "agentMode": "single",
                 "approvalMode": "prompt",
-                "queueMode": "queue"
+                "queueMode": "queue",
+                "subagentConcurrency": 6,
+                "subagentMaxDepth": 2,
+                "shellConcurrency": 4,
+                "shellMaxWallClockSeconds": 600,
+                "subagentAwaitSeconds": 0,
+                "subagentIdleSeconds": 300
             },
             "session": {
                 "kind": "session_loaded",
@@ -1114,6 +1708,10 @@ mod tests {
         assert_eq!(state.navigation.projects.len(), 1);
         assert_eq!(state.navigation.projects[0].path.as_ref(), "/workspace");
         assert_eq!(state.runtime.approvals.len(), 1);
+        assert_eq!(state.settings.subagent_concurrency, 6);
+        assert_eq!(state.settings.subagent_max_depth, 2);
+        assert_eq!(state.settings.shell_concurrency, 4);
+        assert_eq!(state.settings.subagent_idle_seconds, 300);
     }
 
     #[test]
@@ -1161,6 +1759,52 @@ mod tests {
     }
 
     #[test]
+    fn run_failure_is_visible_immediately() {
+        let mut state = AppState::default();
+        state.navigation.current_session_id = "session-1".into();
+        state.runtime.running = true;
+        state.runtime.run_id = "run-1".into();
+        state.apply_direct_event(json!({
+            "sequence": 42,
+            "kind": "run_failed",
+            "sessionId": "session-1",
+            "runId": "run-1",
+            "state": "failed",
+            "text": "provider unavailable"
+        }));
+
+        let blocks = state.transcript.blocks.borrow();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].kind.as_ref(), "error");
+        assert_eq!(blocks[0].run_id.as_ref(), "run-1");
+        assert_eq!(blocks[0].content, "provider unavailable");
+        assert_eq!(blocks[0].state.as_ref(), "failed");
+        assert!(!state.runtime.running);
+    }
+
+    #[test]
+    fn turn_response_failure_is_visible_without_duplicate_terminal_event() {
+        let mut state = AppState::default();
+        state.navigation.current_session_id = "session-1".into();
+        state.runtime.running = true;
+        state.append_request_error("request-1", "provider unavailable".to_string());
+        state.apply_direct_event(json!({
+            "sequence": 43,
+            "kind": "run_failed",
+            "sessionId": "session-1",
+            "runId": "run-1",
+            "state": "failed",
+            "text": "provider unavailable"
+        }));
+
+        let blocks = state.transcript.blocks.borrow();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].kind.as_ref(), "error");
+        assert_eq!(blocks[0].content, "provider unavailable");
+        assert!(!state.runtime.running);
+    }
+
+    #[test]
     fn session_load_restores_preferences_and_durable_tools_in_order() {
         let mut state = AppState::default();
         state.apply_direct_event(json!({
@@ -1193,6 +1837,93 @@ mod tests {
         );
         assert_eq!(blocks[1].tool_call_id.as_ref(), "tool-1");
     }
+
+    #[test]
+    fn session_load_replaces_stale_live_tool_with_durable_terminal_record() {
+        let mut state = AppState::default();
+        state.apply_direct_event(json!({
+            "kind": "session_loaded",
+            "sessionId": "session-1",
+            "state": "loaded",
+            "data": {
+                "blocks": "[{\"id\":\"tool-1\",\"kind\":\"tool\",\"runId\":\"run-1\",\"toolCallId\":\"tool-1\",\"state\":\"running\"}]",
+                "blockSequences": "[2]",
+                "toolRecords": "[{\"runId\":\"run-1\",\"toolCallId\":\"tool-1\",\"anchorSequence\":2,\"name\":\"subagent.spawn\",\"state\":\"completed\"}]"
+            }
+        }));
+        let blocks = state.transcript.blocks.borrow();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].state.as_ref(), "completed");
+        assert!(!state.runtime.running);
+    }
+
+    #[test]
+    fn context_usage_is_session_scoped_and_does_not_replace_usage_history() {
+        let mut state = AppState::default();
+        state.settings.usage = json!({"rows": ["history"]});
+        state.runtime.context_profile = json!({"contributions": [{"tokens": 1}]});
+        state.apply_direct_event(json!({
+            "kind": "session_loaded",
+            "sessionId": "session-1",
+            "data": {
+                "blocks": "[]",
+                "usage": "{\"inputTokens\":8500,\"outputTokens\":1500,\"contextLimit\":20000}"
+            }
+        }));
+        assert_eq!(state.runtime.context_usage["inputTokens"], 8500);
+        assert!(state.runtime.context_profile.is_null());
+        state.apply_direct_event(json!({
+            "kind": "context_usage",
+            "sessionId": "session-1",
+            "state": "reported",
+            "data": {"inputTokens": "9000", "outputTokens": "1600", "contextLimit": "20000"}
+        }));
+        assert_eq!(state.runtime.context_usage["outputTokens"], 1600);
+        assert_eq!(state.settings.usage, json!({"rows": ["history"]}));
+    }
+
+    #[test]
+    fn automatic_compaction_status_exists_only_while_compacting() {
+        let mut state = AppState::default();
+        state.navigation.current_session_id = "session-1".into();
+        state.apply_direct_event(json!({
+            "kind": "context_usage",
+            "sessionId": "session-1",
+            "runId": "run-1",
+            "state": "compacting",
+            "data": {"requestKind": "compaction"}
+        }));
+        assert!(state.transcript.blocks.borrow().iter().any(|block| {
+            block.kind.as_ref() == "context_compaction" && block.run_id.as_ref() == "run-1"
+        }));
+
+        state.apply_direct_event(json!({
+            "kind": "context_usage",
+            "sessionId": "session-1",
+            "runId": "run-1",
+            "state": "compacted",
+            "data": {"requestKind": "compaction"}
+        }));
+        assert!(state.transcript.blocks.borrow().is_empty());
+    }
+
+    #[test]
+    fn session_load_keeps_catalog_title_when_projection_title_is_empty() {
+        let mut state = AppState::default();
+        state.navigation.sessions.push(SessionSummary {
+            id: "session-1".into(),
+            title: "Saved title".into(),
+            ..SessionSummary::default()
+        });
+        state.apply_direct_event(json!({
+            "kind": "session_loaded",
+            "sessionId": "session-1",
+            "state": "loaded",
+            "data": {"title": "", "blocks": "[]"}
+        }));
+        assert_eq!(state.navigation.current_title.as_ref(), "Saved title");
+    }
+
     #[test]
     fn session_load_keeps_only_matching_pending_controls() {
         let mut state = AppState::default();
@@ -1274,6 +2005,59 @@ mod tests {
         }));
         assert!(state.navigation.sessions[1].running);
         assert!(!state.runtime.running);
+        assert_eq!(state.runtime.active_session_id.as_ref(), "background");
+        state.apply_direct_event(json!({
+            "kind": "run_finished",
+            "sessionId": "background",
+            "runId": "run-bg"
+        }));
+        assert!(!state.navigation.sessions[1].running);
+        assert!(state.navigation.sessions[1].unread);
+        assert!(state.runtime.active_session_id.is_empty());
+        state.apply_direct_event(json!({
+            "kind": "session_loaded",
+            "sessionId": "background",
+            "state": "loaded",
+            "data": {"blocks": "[]"}
+        }));
+        assert!(!state.navigation.sessions[1].unread);
+    }
+
+    #[test]
+    fn terminal_run_interrupts_stale_live_tool_blocks() {
+        let mut state = AppState::default();
+        state.navigation.current_session_id = "session".into();
+        state.apply_direct_event(json!({
+            "kind": "run_started",
+            "sessionId": "session",
+            "runId": "run"
+        }));
+        state.runtime.run_started_at_ms = unix_millis() - 65_000;
+        state.apply_direct_event(json!({
+            "kind": "tool_started",
+            "sessionId": "session",
+            "runId": "run",
+            "toolCallId": "call",
+            "state": "running",
+            "data": {"name": "subagent.spawn"}
+        }));
+        state.apply_direct_event(json!({
+            "kind": "run_cancelled",
+            "sessionId": "session",
+            "runId": "run",
+            "state": "cancelled"
+        }));
+
+        let blocks = state.transcript.blocks.borrow();
+        assert_eq!(blocks[0].state.as_ref(), "interrupted");
+        assert_eq!(blocks[1].kind.as_ref(), "status");
+        assert_eq!(blocks[1].title.as_ref(), "run_cancelled");
+        let elapsed = blocks[1].extra["runElapsedMs"]
+            .as_str()
+            .unwrap()
+            .parse::<i64>()
+            .unwrap();
+        assert!((65_000..66_000).contains(&elapsed));
     }
     #[test]
     fn child_activity_coalesces_and_stays_bounded() {
@@ -1322,6 +2106,45 @@ mod tests {
                 .is_some_and(|id| !id.is_empty())
         }));
     }
+
+    #[test]
+    fn child_thinking_titles_keep_a_markdown_block_break() {
+        let mut state = AppState::default();
+        for text in ["**Inspecting workspace**", "**Planning fix**"] {
+            state.apply_direct_event(json!({
+                "kind": "thinking_delta",
+                "runId": "run-child",
+                "agentId": "agent-1",
+                "text": text
+            }));
+        }
+        assert_eq!(
+            state.runtime.agent_blocks[0]["text"],
+            "**Inspecting workspace**\n\n**Planning fix**"
+        );
+    }
+
+    #[test]
+    fn session_agent_snapshots_are_flattened_for_native_cards() {
+        let mut state = AppState::default();
+        state.apply_direct_event(json!({
+            "kind": "session_loaded",
+            "sessionId": "session-1",
+            "state": "loaded",
+            "data": {"blocks": "[]"},
+            "agentSnapshots": [{
+                "id": "agent-1",
+                "state": "completed",
+                "summary": "审查完成",
+                "parentRunId": "run-1",
+                "agent": {"type": "review", "description": "审查界面"}
+            }]
+        }));
+        assert_eq!(state.runtime.agents[0]["id"], "agent-1");
+        assert_eq!(state.runtime.agents[0]["state"], "completed");
+        assert_eq!(state.runtime.agents[0]["description"], "审查界面");
+        assert_eq!(state.runtime.agents[0]["parentRunId"], "run-1");
+    }
     #[test]
     fn incremental_text_keeps_phase_boundaries_and_terminal_identity() {
         let mut state = AppState::default();
@@ -1367,6 +2190,42 @@ mod tests {
     }
 
     #[test]
+    fn discrete_thinking_titles_keep_a_markdown_block_break() {
+        let mut state = AppState::default();
+        for (sequence, text) in [(1, "**Inspecting workspace**"), (2, "**Planning fix**")] {
+            state.apply_direct_event(json!({
+                "sequence": sequence,
+                "kind": "thinking_delta",
+                "runId": "run-1",
+                "text": text
+            }));
+        }
+        let blocks = state.transcript.blocks.borrow();
+        assert_eq!(
+            blocks[0].content,
+            "**Inspecting workspace**\n\n**Planning fix**"
+        );
+        drop(blocks);
+
+        state.apply_direct_event(json!({
+            "kind": "session_loaded",
+            "sessionId": "session-1",
+            "state": "loaded",
+            "data": {
+                "blocks": json!([{
+                    "kind": "thinking",
+                    "content": "**Inspecting workspace****Planning fix**"
+                }]).to_string()
+            }
+        }));
+        let restored = state.transcript.blocks.borrow();
+        assert_eq!(
+            restored[0].content,
+            "**Inspecting workspace**\n\n**Planning fix**"
+        );
+    }
+
+    #[test]
     fn resolved_approval_is_removed_by_durable_identifier() {
         let mut state = AppState::default();
         state.apply_direct_event(json!({
@@ -1384,18 +2243,37 @@ mod tests {
     }
 
     #[test]
+    fn security_projection_updates_live_scan_and_findings() {
+        let mut state = AppState::default();
+        state.security.scans = vec![json!({"id":"scan-1","status":"queued"})];
+        state.apply_direct_event(json!({
+            "kind": "security_scan_state",
+            "security": {
+                "scan": {"id":"scan-1","status":"running"},
+                "findings": [{"occurrenceId":"finding-1"}]
+            }
+        }));
+
+        assert_eq!(state.security.projection["scan"]["status"], "running");
+        assert_eq!(state.security.scans.len(), 1);
+        assert_eq!(state.security.scans[0]["status"], "running");
+        assert_eq!(state.security.findings.len(), 1);
+    }
+
+    #[test]
     fn session_and_project_lists_accept_rfc3339_timestamps() {
         let mut state = AppState::default();
         state.apply_direct_event(json!({
             "kind": "session_loaded",
             "state": "list",
             "data": {
-                "sessions": "[{\"id\":\"session-1\",\"title\":\"One\",\"workspace\":\"/workspace\",\"updatedAt\":\"2026-08-25T00:00:00Z\",\"unread\":true}]",
+                "sessions": "[{\"id\":\"session-1\",\"title\":\"One\",\"workspace\":\"/workspace\",\"updatedAt\":\"2026-08-25T00:00:00Z\",\"unread\":true,\"pinned\":true}]",
                 "projects": "[{\"workspace\":\"/workspace\",\"updatedAt\":\"2026-08-25T00:00:00Z\"}]"
             }
         }));
         assert_eq!(state.navigation.sessions.len(), 1);
         assert!(state.navigation.sessions[0].unread);
+        assert!(state.navigation.sessions[0].pinned);
         assert_eq!(state.navigation.projects.len(), 1);
         assert_eq!(state.navigation.projects[0].path.as_ref(), "/workspace");
     }

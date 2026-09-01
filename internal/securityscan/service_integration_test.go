@@ -39,6 +39,7 @@ type nativeFakeExecutor struct {
 	service              *securityscan.Service
 	runs                 int
 	skipProgress         bool
+	blockAudit           bool
 	fixerExtraFile       bool
 	skipVerifierEvidence bool
 }
@@ -48,6 +49,10 @@ func (e *nativeFakeExecutor) Execute(ctx context.Context, request securityscan.E
 	e.runs++
 	run := e.runs
 	e.mu.Unlock()
+	if e.blockAudit && request.Worker.Kind == securityscan.WorkerAudit {
+		<-ctx.Done()
+		return securityscan.ExecutionResult{RunID: "run_blocked"}, ctx.Err()
+	}
 	if request.Worker.Kind == securityscan.WorkerReducer {
 		inputs, err := e.service.ReducerInputs(request.Scan.ID, request.Worker.ID)
 		if err != nil {
@@ -125,6 +130,42 @@ func (e *nativeFakeExecutor) Execute(ctx context.Context, request securityscan.E
 		return securityscan.ExecutionResult{}, err
 	}
 	return securityscan.ExecutionResult{RunID: "run_audit", InputTokens: int64(run * 100), CachedInputTokens: 20, OutputTokens: 10}, nil
+}
+
+func TestCanceledScanDoesNotProjectRunningWorkers(t *testing.T) {
+	service, executor, cleanup := nativeService(t)
+	defer cleanup()
+	executor.blockAudit = true
+	deep := securityscan.DefaultDeepOptions()
+	deep.Workers, deep.MaxDiscoveryRuns = 1, 1
+	scan, err := service.Start(context.Background(), securityscan.StartRequest{
+		Repository: testScanRepository(t), TargetKind: securityscan.TargetRepository, Mode: securityscan.ModeDeep,
+		Route: securityscan.Route{Provider: "chatgpt", Model: "gpt-test", Reasoning: "high"}, Deep: deep,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		projection, scanErr := service.Scan(context.Background(), scan.ID)
+		if scanErr == nil && projection.Progress.WorkersRunning == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("scan worker did not start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := service.Cancel(context.Background(), scan.ID); err != nil {
+		t.Fatal(err)
+	}
+	projection := waitForTerminalScan(t, service, scan.ID)
+	if projection.Scan.Status != securityscan.StatusCanceled || projection.Progress.WorkersRunning != 0 {
+		t.Fatalf("projection = %+v", projection)
+	}
+	if err := service.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (e *nativeFakeExecutor) Cancel(context.Context, string) error { return nil }

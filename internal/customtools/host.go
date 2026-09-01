@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/venat/message"
 	"github.com/Viking602/venat/tool"
 )
@@ -323,12 +324,12 @@ func (host *Host) Drivers() ([]tool.Driver, error) {
 		if err := json.Unmarshal(definition.Parameters, &schema); err != nil {
 			return nil, fmt.Errorf("custom tool %s schema: %w", definition.Name, err)
 		}
-		effect := tool.EffectExternalSideEffect
+		effect := agentruntime.ToolEffectExternalSideEffect
 		switch definition.Approval {
 		case "read", "read_only":
-			effect = tool.EffectReadOnly
+			effect = agentruntime.ToolEffectReadOnly
 		case "write":
-			effect = tool.EffectWrite
+			effect = agentruntime.ToolEffectWrite
 		}
 		concurrency := tool.ConcurrencyParallel
 		if definition.Concurrency == "sequential" {
@@ -336,11 +337,15 @@ func (host *Host) Drivers() ([]tool.Driver, error) {
 		} else if definition.Concurrency == "exclusive" {
 			concurrency = tool.ConcurrencyExclusive
 		}
+		policy := agentruntime.ToolPolicy{
+			Effect: effect, RiskLevel: "high", Origin: "custom",
+			Metadata:    map[string]string{"module": definition.ModulePath, "strict": fmt.Sprint(definition.Strict)},
+			Concurrency: concurrency,
+		}
 		drivers = append(drivers, &driver{host: host, definition: tool.Definition{
 			Name: definition.Name, Description: definition.Description, InputSchema: schema,
-			EffectType: effect, RiskLevel: "high", Concurrency: concurrency,
-			Origin: "custom", Metadata: map[string]string{"module": definition.ModulePath, "strict": fmt.Sprint(definition.Strict)},
-		}})
+			Concurrency: concurrency,
+		}, policy: policy})
 	}
 	return drivers, nil
 }
@@ -431,7 +436,7 @@ func (host *Host) readLoop(stdout io.Reader) {
 				if len(response.Update.Details) > 0 {
 					data["details"] = string(response.Update.Details)
 				}
-				_ = pending.sink(tool.Update{Kind: "progress", Message: response.Update.Content, Data: data})
+				_ = pending.sink(tool.Update{Kind: tool.UpdateProgress, Message: response.Update.Content, Data: data})
 			}
 			continue
 		}
@@ -499,9 +504,11 @@ func (host *Host) Close(ctx context.Context) error {
 type driver struct {
 	host       *Host
 	definition tool.Definition
+	policy     agentruntime.ToolPolicy
 }
 
-func (current *driver) Definition() tool.Definition { return current.definition }
+func (current *driver) Definition() tool.Definition         { return current.definition }
+func (current *driver) ToolPolicy() agentruntime.ToolPolicy { return current.policy.Clone() }
 func (current *driver) Execute(ctx context.Context, call tool.Call, sink tool.UpdateSink) (tool.Result, error) {
 	var arguments map[string]any
 	if len(call.Arguments) > 0 {

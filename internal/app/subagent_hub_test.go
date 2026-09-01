@@ -9,7 +9,6 @@ import (
 
 	agentservice "github.com/Viking602/azem/internal/agent"
 	"github.com/Viking602/azem/internal/config"
-	hyagent "github.com/Viking602/venat/agent"
 	"github.com/Viking602/venat/tool"
 )
 
@@ -21,7 +20,7 @@ func TestAgentHubSendsListsWaitsAndConsumesPeerMessages(t *testing.T) {
 	host.guidanceOpen = true
 	host.mu.Unlock()
 	mainControl := host.TurnControl("parent")
-	firstControl, secondControl := hyagent.NewControlQueue(), hyagent.NewControlQueue()
+	firstControl, secondControl := newTurnControlQueue(), newTurnControlQueue()
 	runtime := &subagentRuntime{
 		active: map[string]*activeSubagent{
 			"child-a": {
@@ -35,9 +34,9 @@ func TestAgentHubSendsListsWaitsAndConsumesPeerMessages(t *testing.T) {
 		},
 		hosts: map[string]providerHost{"session": host}, peerMailboxes: make(map[string][]hubPeerMessage), peerChanged: make(chan struct{}),
 	}
-	callerA := tool.CallerInfo{AgentID: "subagent-explore", TeamRunID: "run-a"}
-	callerB := tool.CallerInfo{AgentID: "subagent-review", TeamRunID: "run-b"}
-	callerMain := tool.CallerInfo{AgentID: "azem-main", TeamRunID: "parent"}
+	callerA := agentservice.Invocation{AgentID: "subagent-explore", TeamRunID: "run-a"}
+	callerB := agentservice.Invocation{AgentID: "subagent-review", TeamRunID: "run-b"}
+	callerMain := agentservice.Invocation{AgentID: "azem-main", TeamRunID: "parent"}
 
 	listed, err := runtime.ExecuteHubPeer(context.Background(), agentservice.HubPeerRequest{Operation: "list", Caller: callerA, Params: map[string]any{}})
 	if err != nil || !strings.Contains(listed.Content, "Main") || !strings.Contains(listed.Content, "ConfigAudit") || !strings.Contains(listed.Content, "UiAudit") {
@@ -48,8 +47,8 @@ func TestAgentHubSendsListsWaitsAndConsumesPeerMessages(t *testing.T) {
 	if err != nil || sent.IsError || !strings.Contains(sent.Content, "delivered") {
 		t.Fatalf("peer send = %#v, %v", sent, err)
 	}
-	controls, err := secondControl.Drain(context.Background(), hyagent.TurnBoundaryBeforeModel)
-	if err != nil || len(controls) != 1 || controls[0].Message.Visibility != "private" || !strings.Contains(controls[0].Message.Text, "Untrusted peer message from ConfigAudit") {
+	controls, err := secondControl.Drain(context.Background(), turnControlBeforeModel)
+	if err != nil || len(controls) != 1 || !isPrivateMessage(controls[0].Message) || !strings.Contains(controls[0].Message.Text, "Untrusted peer message from ConfigAudit") {
 		t.Fatalf("peer control = %#v, %v", controls, err)
 	}
 	var receipts struct {
@@ -89,7 +88,7 @@ func TestAgentHubSendsListsWaitsAndConsumesPeerMessages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mainMessages, err := mainControl.Drain(context.Background(), hyagent.TurnBoundaryBeforeModel)
+	mainMessages, err := mainControl.Drain(context.Background(), turnControlBeforeModel)
 	if err != nil || len(mainMessages) != 1 || !strings.Contains(mainMessages[0].Message.Text, "Review complete") {
 		t.Fatalf("child to main control = %#v, %v", mainMessages, err)
 	}
@@ -98,7 +97,7 @@ func TestAgentHubSendsListsWaitsAndConsumesPeerMessages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mainToChild, err := secondControl.Drain(context.Background(), hyagent.TurnBoundaryAfterTools)
+	mainToChild, err := secondControl.Drain(context.Background(), turnControlBeforeModel)
 	if err != nil || len(mainToChild) != 1 || !strings.Contains(mainToChild[0].Message.Text, "Check one more state") {
 		t.Fatalf("main to child control = %#v, %v", mainToChild, err)
 	}
@@ -111,7 +110,7 @@ func TestAgentHubSendRevivesParkedAgentWithStableName(t *testing.T) {
 	defer runtime.Shutdown(ctx)
 	defer coding.Close(ctx)
 	firstParent := subagentParentRuntime{
-		SessionID: "session", ParentRunID: "parent-one", ProviderID: "test", ModelID: "model", Reasoning: "high",
+		SessionID: "session", ParentRunID: "parent-one", ProviderID: "test", AccountID: "test-account", ModelID: "model", Reasoning: "high",
 		Driver: provider, Coding: coding, WorkspaceRoot: t.TempDir(),
 	}
 	if _, err := runtime.Drivers(firstParent); err != nil {
@@ -139,7 +138,7 @@ func TestAgentHubSendRevivesParkedAgentWithStableName(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("initial named peer did not park")
 	}
-	roster, err := runtime.ExecuteHubPeer(ctx, agentservice.HubPeerRequest{Operation: "list", Caller: tool.CallerInfo{TeamRunID: "parent-one"}, Params: map[string]any{}})
+	roster, err := runtime.ExecuteHubPeer(ctx, agentservice.HubPeerRequest{Operation: "list", Caller: agentservice.Invocation{TeamRunID: "parent-one"}, Params: map[string]any{}})
 	if err != nil || !strings.Contains(roster.Content, "Researcher [explore] — parked") {
 		t.Fatalf("parked roster = %#v, %v", roster, err)
 	}
@@ -149,7 +148,7 @@ func TestAgentHubSendRevivesParkedAgentWithStableName(t *testing.T) {
 	if _, err := runtime.Drivers(secondParent); err != nil {
 		t.Fatal(err)
 	}
-	sent, err := runtime.ExecuteHubPeer(ctx, agentservice.HubPeerRequest{Operation: "send", Caller: tool.CallerInfo{AgentID: "azem-main", TeamRunID: "parent-two"}, Params: map[string]any{
+	sent, err := runtime.ExecuteHubPeer(ctx, agentservice.HubPeerRequest{Operation: "send", Caller: agentservice.Invocation{AgentID: "azem-main", TeamRunID: "parent-two"}, Params: map[string]any{
 		"to": "Researcher", "message": "Inspect the new evidence",
 	}})
 	if err != nil || sent.IsError {
@@ -183,7 +182,7 @@ func TestAgentHubSendRevivesParkedAgentWithStableName(t *testing.T) {
 	if err != nil || len(runs) != 2 {
 		t.Fatalf("revived durable runs = %#v, %v", runs, err)
 	}
-	roster, err = runtime.ExecuteHubPeer(ctx, agentservice.HubPeerRequest{Operation: "list", Caller: tool.CallerInfo{TeamRunID: "parent-two"}, Params: map[string]any{}})
+	roster, err = runtime.ExecuteHubPeer(ctx, agentservice.HubPeerRequest{Operation: "list", Caller: agentservice.Invocation{TeamRunID: "parent-two"}, Params: map[string]any{}})
 	if err != nil || !strings.Contains(roster.Content, "Researcher [explore] — parked") {
 		t.Fatalf("reparked roster = %#v, %v", roster, err)
 	}
@@ -195,7 +194,7 @@ func TestAgentHubRestoresParkedRosterAfterRuntimeRestart(t *testing.T) {
 	first, provider, coding, store := newGatedForegroundHarness(t, ctx, 0)
 	defer coding.Close(ctx)
 	parent := subagentParentRuntime{
-		SessionID: "session", ParentRunID: "parent-one", ProviderID: "test", ModelID: "model", Reasoning: "high",
+		SessionID: "session", ParentRunID: "parent-one", ProviderID: "test", AccountID: "test-account", ModelID: "model", Reasoning: "high",
 		Driver: provider, Coding: coding, WorkspaceRoot: t.TempDir(),
 	}
 	if _, err := first.Drivers(parent); err != nil {
@@ -232,11 +231,11 @@ func TestAgentHubRestoresParkedRosterAfterRuntimeRestart(t *testing.T) {
 	if _, err := restarted.Drivers(parent); err != nil {
 		t.Fatal(err)
 	}
-	roster, err := restarted.ExecuteHubPeer(ctx, agentservice.HubPeerRequest{Operation: "list", Caller: tool.CallerInfo{TeamRunID: "parent-two"}, Params: map[string]any{}})
+	roster, err := restarted.ExecuteHubPeer(ctx, agentservice.HubPeerRequest{Operation: "list", Caller: agentservice.Invocation{TeamRunID: "parent-two"}, Params: map[string]any{}})
 	if err != nil || !strings.Contains(roster.Content, "DurableResearcher [explore] — parked") {
 		t.Fatalf("restored parked roster = %#v, %v", roster, err)
 	}
-	sent, err := restarted.ExecuteHubPeer(ctx, agentservice.HubPeerRequest{Operation: "send", Caller: tool.CallerInfo{TeamRunID: "parent-two"}, Params: map[string]any{
+	sent, err := restarted.ExecuteHubPeer(ctx, agentservice.HubPeerRequest{Operation: "send", Caller: agentservice.Invocation{TeamRunID: "parent-two"}, Params: map[string]any{
 		"to": "DurableResearcher", "message": "Continue after restart",
 	}})
 	if err != nil || sent.IsError {
@@ -256,12 +255,12 @@ func TestAgentHubRestoresParkedRosterAfterRuntimeRestart(t *testing.T) {
 func TestAgentHubRejectsUnknownSelfAndEmptyBroadcasts(t *testing.T) {
 	runtime := &subagentRuntime{
 		active: map[string]*activeSubagent{"child": {
-			name: "OnlyPeer", control: hyagent.NewControlQueue(),
+			name: "OnlyPeer", control: newTurnControlQueue(),
 			run: agentservice.SubagentRun{ID: "child", ChildRunID: "run-child", SessionID: "session", ParentRunID: "parent", State: agentservice.SubagentRunning},
 		}},
 		peerMailboxes: make(map[string][]hubPeerMessage), peerChanged: make(chan struct{}),
 	}
-	caller := tool.CallerInfo{TeamRunID: "run-child"}
+	caller := agentservice.Invocation{TeamRunID: "run-child"}
 	for name, to := range map[string]string{"self": "OnlyPeer", "unknown": "Missing", "empty broadcast": "all"} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := runtime.ExecuteHubPeer(context.Background(), agentservice.HubPeerRequest{Operation: "send", Caller: caller, Params: map[string]any{"to": to, "message": "hello"}}); err == nil {

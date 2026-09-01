@@ -2,6 +2,7 @@ package responses
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/venat/message"
 	hyprovider "github.com/Viking602/venat/provider"
 )
@@ -57,19 +59,20 @@ type UsageDetails struct {
 	TotalTokens     int
 }
 
-type (
-	UsageReporter          func(UsageDetails)
-	AttachmentRootProvider interface {
-		AttachmentRoot() string
-	}
-)
+type UsageReporter func(UsageDetails)
 
-func RequestAttachmentRoot(request hyprovider.Request) string {
-	host, _ := request.NativeToolHost.(AttachmentRootProvider)
-	if host == nil {
+type attachmentRootContextKey struct{}
+
+func WithAttachmentRoot(ctx context.Context, root string) context.Context {
+	return context.WithValue(ctx, attachmentRootContextKey{}, strings.TrimSpace(root))
+}
+
+func AttachmentRootFromContext(ctx context.Context) string {
+	if ctx == nil {
 		return ""
 	}
-	return strings.TrimSpace(host.AttachmentRoot())
+	root, _ := ctx.Value(attachmentRootContextKey{}).(string)
+	return strings.TrimSpace(root)
 }
 
 // NormalizeUsage applies provider cache semantics to a parsed usage detail.
@@ -102,6 +105,10 @@ type wireRequest struct {
 }
 
 func Build(request hyprovider.Request, options BuildOptions) ([]byte, error) {
+	return BuildContext(context.Background(), request, options)
+}
+
+func BuildContext(ctx context.Context, request hyprovider.Request, options BuildOptions) ([]byte, error) {
 	if strings.TrimSpace(request.Model) == "" {
 		return nil, fmt.Errorf("responses request model is empty")
 	}
@@ -112,7 +119,7 @@ func Build(request hyprovider.Request, options BuildOptions) ([]byte, error) {
 			return nil, fmt.Errorf("model %q does not support explicit prompt cache breakpoints", request.Model)
 		}
 	}
-	instructions, input, err := buildInput(request.Messages, options.ToolCallItemID, RequestAttachmentRoot(request), breakpoint)
+	instructions, input, err := buildInput(request.Messages, options.ToolCallItemID, AttachmentRootFromContext(ctx), breakpoint)
 	if err != nil {
 		return nil, err
 	}
@@ -175,7 +182,7 @@ func buildInput(messages []message.Message, toolCallItemID func(string) string, 
 			if current.Text == "" {
 				continue
 			}
-			if current.Visibility == message.VisibilityPrivate {
+			if agentruntime.MessageVisibilityOf(current) == agentruntime.MessageVisibilityPrivate {
 				input = append(input, wireMessage("developer", "input_text", current.Text, mark))
 				marked = marked || mark
 			} else {
@@ -255,7 +262,7 @@ func promptCacheBreakpointIndex(messages []message.Message, breakpoint string) i
 		}
 	case PromptCacheBreakpointFirstItem:
 		for index, current := range messages {
-			if (current.Role == message.RoleSystem && current.Visibility == message.VisibilityPrivate) || current.Role == message.RoleUser || current.Role == message.RoleCustom {
+			if (current.Role == message.RoleSystem && agentruntime.MessageVisibilityOf(current) == agentruntime.MessageVisibilityPrivate) || current.Role == message.RoleUser || current.Role == message.RoleCustom {
 				return index
 			}
 		}

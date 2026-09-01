@@ -12,7 +12,7 @@ import (
 )
 
 func TestEvalJavaScriptPersistsStateSupportsHelpersAndReset(t *testing.T) {
-	ctx := tool.WithCaller(context.Background(), tool.CallerInfo{SessionID: "eval-js"})
+	ctx := WithInvocation(context.Background(), Invocation{SessionID: "eval-js"})
 	root := t.TempDir()
 	bridge := newLSPBridgeRuntime()
 	t.Cleanup(func() { _ = bridge.Close(context.Background()) })
@@ -34,7 +34,7 @@ func TestEvalJavaScriptPersistsStateSupportsHelpersAndReset(t *testing.T) {
 }
 
 func TestEvalPythonPersistsStateSupportsAwaitAndLanguageIsolation(t *testing.T) {
-	ctx := tool.WithCaller(context.Background(), tool.CallerInfo{SessionID: "eval-py"})
+	ctx := WithInvocation(context.Background(), Invocation{SessionID: "eval-py"})
 	root := t.TempDir()
 	bridge := newLSPBridgeRuntime()
 	t.Cleanup(func() { _ = bridge.Close(context.Background()) })
@@ -68,7 +68,7 @@ func TestEvalRubyPersistsStateWhenRuntimeIsAvailable(t *testing.T) {
 	if _, err := exec.LookPath("ruby"); err != nil {
 		t.Skip("ruby is unavailable")
 	}
-	ctx := tool.WithCaller(context.Background(), tool.CallerInfo{SessionID: "eval-rb"})
+	ctx := WithInvocation(context.Background(), Invocation{SessionID: "eval-rb"})
 	bridge := newLSPBridgeRuntime()
 	t.Cleanup(func() { _ = bridge.Close(context.Background()) })
 	driver := newEvalDriver(t.TempDir(), bridge)
@@ -87,8 +87,8 @@ func TestEvalSessionsAreIsolatedAndErrorsDoNotEraseState(t *testing.T) {
 	bridge := newLSPBridgeRuntime()
 	t.Cleanup(func() { _ = bridge.Close(context.Background()) })
 	driver := newEvalDriver(root, bridge)
-	firstCtx := tool.WithCaller(context.Background(), tool.CallerInfo{SessionID: "eval-a"})
-	secondCtx := tool.WithCaller(context.Background(), tool.CallerInfo{SessionID: "eval-b"})
+	firstCtx := WithInvocation(context.Background(), Invocation{SessionID: "eval-a"})
+	secondCtx := WithInvocation(context.Background(), Invocation{SessionID: "eval-b"})
 	executeEval(t, firstCtx, driver, "js", "var retained = 9; print(retained)", false)
 	failed := executeEvalMaybeUnavailable(t, firstCtx, driver, "js", "throw new Error('expected failure')", false)
 	if !failed.IsError || !strings.Contains(failed.Content, "expected failure") {

@@ -10,17 +10,15 @@ import (
 
 	"github.com/Viking602/azem/internal/resource"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
-	"github.com/Viking602/venat/coding"
-	"github.com/Viking602/venat/tool"
 )
 
 func TestASTEditStagesThenResolvesWithoutEarlyMutation(t *testing.T) {
-	ctx := tool.WithCaller(context.Background(), tool.CallerInfo{SessionID: "ast-session", TeamRunID: "ast-run"})
+	ctx := WithInvocation(context.Background(), Invocation{SessionID: "ast-session", TeamRunID: "ast-run"})
 	root := t.TempDir()
 	writeTestFile(t, filepath.Join(root, "main.ts"), "console.log(one);\nconsole.log(two);\n")
 	router := resource.NewRouter(1 << 20)
 	service := newASTWriteService(t, ctx, root, router)
-	write := findWorkspaceTool(t, service, root, coding.ToolWriteFile)
+	write := findWorkspaceTool(t, service, root, ToolWriteFile)
 	payload := astEditPayload([]astEditOp{{Pattern: "console.log($$$ARGS)", Output: "logger.info($$$ARGS)"}}, []string{"main.ts"})
 	staged := executeWrite(t, ctx, write, "xd://ast_edit", payload)
 	if !strings.Contains(staged.Content, "Staged AST proposal") || !strings.Contains(staged.Content, "2 replacement(s)") {
@@ -35,13 +33,13 @@ func TestASTEditStagesThenResolvesWithoutEarlyMutation(t *testing.T) {
 }
 
 func TestASTEditRejectsStaleProposalAndCanBeDiscarded(t *testing.T) {
-	ctx := tool.WithCaller(context.Background(), tool.CallerInfo{SessionID: "ast-stale"})
+	ctx := WithInvocation(context.Background(), Invocation{SessionID: "ast-stale"})
 	root := t.TempDir()
 	path := filepath.Join(root, "main.ts")
 	writeTestFile(t, path, "console.log(one);\n")
 	router := resource.NewRouter(1 << 20)
 	service := newASTWriteService(t, ctx, root, router)
-	write := findWorkspaceTool(t, service, root, coding.ToolWriteFile)
+	write := findWorkspaceTool(t, service, root, ToolWriteFile)
 	executeWrite(t, ctx, write, "xd://ast_edit", astEditPayload([]astEditOp{{Pattern: "console.log($$$ARGS)", Output: "logger.info($$$ARGS)"}}, []string{"main.ts"}))
 	writeTestFile(t, path, "console.log(changed);\n")
 	stale := callWrite(ctx, write, "xd://resolve", "Apply the staged logger rewrite.")
@@ -56,7 +54,7 @@ func TestASTEditRejectsStaleProposalAndCanBeDiscarded(t *testing.T) {
 }
 
 func TestASTEditRewritesWritableInternalResource(t *testing.T) {
-	ctx := tool.WithCaller(context.Background(), tool.CallerInfo{SessionID: "ast-resource"})
+	ctx := WithInvocation(context.Background(), Invocation{SessionID: "ast-resource"})
 	root := t.TempDir()
 	router := resource.NewRouter(1 << 20)
 	handler := &mutableASTResource{data: []byte("console.log(resource);\n")}
@@ -64,7 +62,7 @@ func TestASTEditRewritesWritableInternalResource(t *testing.T) {
 		t.Fatal(err)
 	}
 	service := newASTWriteService(t, ctx, root, router)
-	write := findWorkspaceTool(t, service, root, coding.ToolWriteFile)
+	write := findWorkspaceTool(t, service, root, ToolWriteFile)
 	executeWrite(t, ctx, write, "xd://ast_edit", astEditPayload([]astEditOp{{Pattern: "console.log($$$ARGS)", Output: "logger.info($$$ARGS)"}}, []string{"mutable://sample.ts"}))
 	if string(handler.data) != "console.log(resource);\n" {
 		t.Fatalf("resource mutated before resolve: %q", handler.data)
@@ -76,7 +74,7 @@ func TestASTEditRewritesWritableInternalResource(t *testing.T) {
 }
 
 func TestASTEditRollsBackEarlierResourcesWhenACommitFails(t *testing.T) {
-	ctx := tool.WithCaller(context.Background(), tool.CallerInfo{SessionID: "ast-rollback"})
+	ctx := WithInvocation(context.Background(), Invocation{SessionID: "ast-rollback"})
 	root := t.TempDir()
 	router := resource.NewRouter(1 << 20)
 	handler := &transactionalASTResource{data: map[string][]byte{
@@ -87,7 +85,7 @@ func TestASTEditRollsBackEarlierResourcesWhenACommitFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	service := newASTWriteService(t, ctx, root, router)
-	write := findWorkspaceTool(t, service, root, coding.ToolWriteFile)
+	write := findWorkspaceTool(t, service, root, ToolWriteFile)
 	executeWrite(t, ctx, write, "xd://ast_edit", astEditPayload(
 		[]astEditOp{{Pattern: "console.log($$$ARGS)", Output: "logger.info($$$ARGS)"}},
 		[]string{"txn://one.ts", "txn://two.ts"},

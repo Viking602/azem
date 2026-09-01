@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -15,7 +16,7 @@ var runtimeActionHandlers = map[ActionKind]actionHandler{
 		return s.setApprovalMode(ctx, ApprovalMode(action.Target))
 	},
 	ActionSetLanguage: func(s *Service, ctx context.Context, action Action) error {
-		if action.Target != "en" && action.Target != "zh-CN" {
+		if !config.ValidUILanguage(action.Target) {
 			return fmt.Errorf("invalid language %q", action.Target)
 		}
 		return s.updateDefaultPreference(ctx, "language", action.Target, func(cfg *config.Config) {
@@ -45,8 +46,12 @@ var runtimeActionHandlers = map[ActionKind]actionHandler{
 				return err
 			}
 			if s.providers != nil {
-				if err := s.providers.ResumeRecoveredRun(ctx, pending.Approval.RunID); err != nil {
-					return fmt.Errorf("resume approved run %s: %w", pending.Approval.RunID, err)
+				operationID := strings.TrimSpace(pending.Approval.ActionID)
+				if operationID == "" {
+					return fmt.Errorf("recovered approval %s has no durable operation identity", pending.Approval.ApprovalID)
+				}
+				if err := s.providers.ResumeRecoveredRunAtOperation(ctx, pending.Approval.RunID, operationID); err != nil {
+					return fmt.Errorf("resume approved run %s at operation %s: %w", pending.Approval.RunID, operationID, err)
 				}
 			}
 			s.recovery.Approvals = slices.Delete(s.recovery.Approvals, index, index+1)
@@ -81,7 +86,7 @@ var runtimeActionHandlers = map[ActionKind]actionHandler{
 		if runID == "" {
 			return fmt.Errorf("reconciliation attempt %q is not pending", action.Target)
 		}
-		if err := s.reconciler.ResolveReconcileAttempt(ctx, action.Target, status, "user-confirmed"); err != nil {
+		if err := s.reconciler.ResolveReconcileAttempt(ctx, action.Target, status, json.RawMessage(action.Payload)); err != nil {
 			return err
 		}
 		if s.providers != nil {

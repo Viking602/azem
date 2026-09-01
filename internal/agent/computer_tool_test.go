@@ -6,11 +6,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/venat/tool"
 )
 
 func TestComputerReadOnlySessionPersistsAcrossCalls(t *testing.T) {
-	ctx := tool.WithCaller(context.Background(), tool.CallerInfo{SessionID: "computer-session"})
+	ctx := WithInvocation(context.Background(), Invocation{SessionID: "computer-session"})
 	bridge := newLSPBridgeRuntime()
 	t.Cleanup(func() { _ = bridge.Close(context.Background()) })
 	driver := newComputerDriver(t.TempDir(), bridge)
@@ -29,7 +30,7 @@ func TestComputerReadOnlySessionPersistsAcrossCalls(t *testing.T) {
 }
 
 func TestComputerReadOnlyBlocksDesktopMutation(t *testing.T) {
-	ctx := tool.WithCaller(context.Background(), tool.CallerInfo{SessionID: "computer-read-only"})
+	ctx := WithInvocation(context.Background(), Invocation{SessionID: "computer-read-only"})
 	bridge := newLSPBridgeRuntime()
 	t.Cleanup(func() { _ = bridge.Close(context.Background()) })
 	driver := newComputerDriver(t.TempDir(), bridge)
@@ -42,13 +43,13 @@ func TestComputerReadOnlyBlocksDesktopMutation(t *testing.T) {
 func TestComputerUsesDynamicApprovalTier(t *testing.T) {
 	driver := newComputerDriver(t.TempDir(), newLSPBridgeRuntime()).(*computerDriver)
 	readArguments, _ := json.Marshal(map[string]any{"read_only": true, "code": "return await desktop.displays()"})
-	read := driver.DefinitionForCall(tool.Call{Name: ToolComputer, Arguments: readArguments})
-	if read.EffectType != tool.EffectReadOnly || read.RequiresApproval || read.RequiresActionTask {
+	read := driver.PolicyForCall(tool.Call{Name: ToolComputer, Arguments: readArguments})
+	if read.Effect != agentruntime.ToolEffectReadOnly || read.RequiresApproval || read.RequiresActionTask {
 		t.Fatalf("read-only governance = %#v", read)
 	}
 	writeArguments, _ := json.Marshal(map[string]any{"code": "await desktop.click(1, 1)"})
-	write := driver.DefinitionForCall(tool.Call{Name: ToolComputer, Arguments: writeArguments})
-	if write.EffectType != tool.EffectExternalSideEffect || !write.RequiresApproval || !write.RequiresActionTask {
+	write := driver.PolicyForCall(tool.Call{Name: ToolComputer, Arguments: writeArguments})
+	if write.Effect != agentruntime.ToolEffectExternalSideEffect || !write.RequiresApproval || !write.RequiresActionTask {
 		t.Fatalf("mutating governance = %#v", write)
 	}
 }

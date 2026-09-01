@@ -29,7 +29,7 @@ func TestContextProfileFromRequestClassifiesEveryWireContribution(t *testing.T) 
 		Messages: []message.Message{core, skillMessage, user},
 		Tools: []message.ToolDefinition{
 			{Name: "read", Description: "Read a file", InputSchema: message.JSONSchema{Type: "object"}},
-			{Name: "mcp__grep__search", Description: "Search", InputSchema: message.JSONSchema{Type: "object"}, Origin: "mcp:grep"},
+			{Name: "mcp__grep__search", Description: "Search", InputSchema: message.JSONSchema{Type: "object"}},
 		},
 	})
 

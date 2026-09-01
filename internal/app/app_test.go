@@ -17,8 +17,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	hyagent "github.com/Viking602/venat/agent"
-	"github.com/Viking602/venat/api"
 	hyprovider "github.com/Viking602/venat/provider"
 
 	agentservice "github.com/Viking602/azem/internal/agent"
@@ -127,6 +127,27 @@ func TestUIPreferencesPersistAndRestore(t *testing.T) {
 	restarted := NewService(context.Background(), persisted)
 	if restarted.approvalMode != ApprovalModeYolo {
 		t.Fatalf("restored approval mode = %q", restarted.approvalMode)
+	}
+}
+
+func TestUILanguageTranslationPacksPersistAndRestore(t *testing.T) {
+	for _, locale := range []string{"ja", "de-DE", "pt-BR", "zh-Hant"} {
+		t.Run(locale, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "config.yaml")
+			service := NewService(context.Background(), config.Default())
+			service.SetConfigPath(path)
+			if err := service.ExecuteAction(context.Background(), Action{Kind: ActionSetLanguage, Target: locale}); err != nil {
+				t.Fatal(err)
+			}
+			persisted, err := config.Load(path, root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if persisted.Defaults.Language != locale {
+				t.Fatalf("language = %q, want %q", persisted.Defaults.Language, locale)
+			}
+		})
 	}
 }
 
@@ -561,13 +582,22 @@ func TestCancelActiveReturnsBeforeUncooperativeExecutionFinishes(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close(context.Background())
-	coding, err := agentservice.NewService(store, t.TempDir())
+	workspace := t.TempDir()
+	coding, err := agentservice.NewService(store, workspace)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer coding.Close(context.Background())
 	run, err := coding.StartRunWithMetadata(ctx, "block until released", nil)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := coding.SealExecutionProfile(ctx, run, agentruntime.ExecutableProfile{
+		Provider: "test", AccountID: "test-account", RawModel: "blocking", Model: "blocking", Reasoning: "none",
+		ActiveSkills: []string{}, ToolSetHash: "no-tools", ToolProfileHash: "no-tools-profile",
+		StaticIdentity: "cancel-test", WorkspaceAnchor: workspace,
+		PromptFingerprint: "cancel-prompt", ToolSchemaFingerprint: "empty-tool-schema",
+	}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -619,7 +649,7 @@ func TestCancelActiveReturnsBeforeUncooperativeExecutionFinishes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if projection.Run.Status != api.RunStatusCancelled {
+	if projection.Run.Status != agentruntime.RunStatusCancelled {
 		t.Fatalf("durable run status = %s, want cancelled", projection.Run.Status)
 	}
 }
@@ -853,6 +883,54 @@ func TestArchiveInactiveSessionsAndRestoreByProject(t *testing.T) {
 		if item.ID == "old-alpha" && item.Archived {
 			t.Fatalf("restored session remained archived: %#v", item)
 		}
+	}
+}
+
+func TestRemoveProjectHidesCatalogWithoutDeletingOwnedSessions(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "remove-project.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	sessions := session.NewService(store.DB(), store.Blobs())
+	projectA, projectB := t.TempDir(), t.TempDir()
+	projectA, _ = filepath.EvalSymlinks(projectA)
+	projectB, _ = filepath.EvalSymlinks(projectB)
+	if _, err := sessions.Ensure(ctx, session.Session{ID: "owned", Title: "Owned"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sessions.AppendBlock(ctx, "owned", session.Block{Kind: "user", Content: "owned"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.SetWorkspaceSession(ctx, projectA, "owned"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.TouchProject(ctx, projectB); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(ctx, config.Default())
+	service.AttachDurable(sessions, nil)
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionRemoveProject, Target: projectA}); err != nil {
+		t.Fatal(err)
+	}
+	event, err := service.NextEvent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var projects []session.Project
+	if err := json.Unmarshal([]byte(event.Data["projects"]), &projects); err != nil {
+		t.Fatal(err)
+	}
+	if len(projects) != 1 || projects[0].Workspace != projectB {
+		t.Fatalf("visible projects = %#v", projects)
+	}
+	var listed []session.Session
+	if err := json.Unmarshal([]byte(event.Data["sessions"]), &listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 || listed[0].ID != "owned" || listed[0].Workspace == "" {
+		t.Fatalf("owned sessions after project removal = %#v", listed)
 	}
 }
 
@@ -2612,12 +2690,13 @@ func TestResetModelRouteUpdatesMemoryAfterPersistence(t *testing.T) {
 	}
 }
 
-func TestReconciledStatusAcceptsTerminalOutcomes(t *testing.T) {
-	tests := map[string]api.ActionAttemptStatus{
-		"succeeded": api.ActionAttemptSucceeded,
-		"failed":    api.ActionAttemptFailed,
-		"timed_out": api.ActionAttemptTimeout,
-		"cancelled": api.ActionAttemptCancelled,
+func TestReconciledStatusAcceptsExplicitResolutions(t *testing.T) {
+	tests := map[string]agentruntime.ActionAttemptStatus{
+		"succeeded": agentruntime.ActionAttemptSucceeded,
+		"failed":    agentruntime.ActionAttemptFailed,
+		"timed_out": agentruntime.ActionAttemptTimeout,
+		"cancelled": agentruntime.ActionAttemptCancelled,
+		"retry":     agentruntime.ActionAttemptRetry,
 	}
 	for input, want := range tests {
 		got, err := reconciledStatus(input)
@@ -2754,5 +2833,22 @@ func TestPendingControlEventsProjectsLiveSessionActions(t *testing.T) {
 	}
 	if !kinds[EventApprovalRequested] || !kinds[EventUserInputRequested] {
 		t.Fatalf("pending kinds = %+v", kinds)
+	}
+}
+
+func TestUserTurnBlockKeepsWakeDataAndRecordsCreationTime(t *testing.T) {
+	before := time.Now().UTC().UnixMilli()
+	block := userTurnBlock("run-1", TurnRequest{
+		Prompt:   "continue",
+		origin:   turnOriginSubagentWake,
+		wakeData: map[string]string{"agentId": "agent-1"},
+	})
+	after := time.Now().UTC().UnixMilli()
+	var createdAt int64
+	if _, err := fmt.Sscan(block.Data["createdAt"], &createdAt); err != nil {
+		t.Fatalf("createdAt = %q: %v", block.Data["createdAt"], err)
+	}
+	if createdAt < before || createdAt > after || block.Data["agentId"] != "agent-1" {
+		t.Fatalf("user turn data = %+v", block.Data)
 	}
 }

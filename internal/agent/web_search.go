@@ -58,7 +58,7 @@ func (driver *webSearchDriver) Definition() tool.Definition {
 				"max_tokens": {Type: "integer"}, "temperature": {Type: "number"}, "num_search_results": {Type: "integer"},
 			},
 		},
-		EffectType: tool.EffectReadOnly, RiskLevel: "low", PolicyTags: []string{"web", "search", "network"}, Concurrency: tool.ConcurrencyParallel,
+		Concurrency: tool.ConcurrencyParallel,
 	}
 }
 
@@ -102,7 +102,7 @@ func (driver *webSearchDriver) Execute(ctx context.Context, call tool.Call, _ to
 	if input.NumSearchResults > 0 {
 		params["num_search_results"] = input.NumSearchResults
 	}
-	caller, _ := tool.CallerFromContext(ctx)
+	caller, _ := InvocationFromContext(ctx)
 	sessionID := caller.SessionID
 	if sessionID == "" {
 		sessionID = caller.TeamRunID

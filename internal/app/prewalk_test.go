@@ -30,7 +30,7 @@ func TestPrewalkSwitchesOnceAfterTodoAndFirstMutation(t *testing.T) {
 	initial := &compactionTestDriver{streams: [][]hyprovider.Event{{{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete}}}}
 	target := &compactionTestDriver{streams: [][]hyprovider.Event{{{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete}}}}
 	switcher := &prewalkSwitchDriver{initial: initial, target: target, targetProvider: "chatgpt", targetModel: "fast-model", targetReasoning: "low"}
-	control := hyagent.NewControlQueue()
+	control := newTurnControlQueue()
 	hook := &prewalkHook{driver: switcher, control: control, store: sessions, sessionID: "prewalk", runID: "run"}
 
 	stream, err := switcher.Stream(ctx, hyprovider.Request{Model: "large-model"})
@@ -45,7 +45,7 @@ func TestPrewalkSwitchesOnceAfterTodoAndFirstMutation(t *testing.T) {
 	if err := hook.AfterToolCall(ctx, &tool.Result{Name: "coding.write_file", Content: "written"}); err != nil || switcher.isSwitched() {
 		t.Fatalf("prewalk switched before todo: switched=%v err=%v", switcher.isSwitched(), err)
 	}
-	planNudge, err := control.Drain(ctx, hyagent.TurnBoundaryBeforeModel)
+	planNudge, err := control.Drain(ctx, turnControlBeforeModel)
 	if err != nil || len(planNudge) != 1 || !strings.Contains(planNudge[0].Message.Text, "durable implementation plan") {
 		t.Fatalf("prewalk plan nudge = %#v, %v", planNudge, err)
 	}
@@ -60,7 +60,7 @@ func TestPrewalkSwitchesOnceAfterTodoAndFirstMutation(t *testing.T) {
 	if err := hook.AfterToolCall(ctx, &tool.Result{Name: "coding.write_file", Content: "written"}); err != nil || !switcher.isSwitched() {
 		t.Fatalf("prewalk did not switch after mutation: switched=%v err=%v", switcher.isSwitched(), err)
 	}
-	checklist, err := control.Drain(ctx, hyagent.TurnBoundaryAfterTools)
+	checklist, err := control.Drain(ctx, turnControlBeforeModel)
 	if err != nil || len(checklist) != 1 || !strings.Contains(checklist[0].Message.Text, "consistency/scope/verification") && !strings.Contains(checklist[0].Message.Text, "every matching callsite") {
 		t.Fatalf("prewalk checklist = %#v, %v", checklist, err)
 	}
@@ -76,6 +76,32 @@ func TestPrewalkSwitchesOnceAfterTodoAndFirstMutation(t *testing.T) {
 	artifact, err := sessions.LoadLatestArtifactByKind(ctx, "prewalk", prewalkArtifactKind)
 	if err != nil || !strings.Contains(string(artifact.Payload), "fast-model") {
 		t.Fatalf("prewalk handoff artifact = %#v, %v", artifact, err)
+	}
+}
+
+func TestPrewalkSwitchInheritsProviderRequestScope(t *testing.T) {
+	host := &cursorExecHost{bus: tool.NewBus()}
+	target := &cursorHostCaptureDriver{}
+	switcher := &prewalkSwitchDriver{
+		initial: target, target: target, targetProvider: "cursor", targetModel: "composer-2.5", targetReasoning: "high",
+	}
+	if !switcher.switchOnce() {
+		t.Fatal("prewalk switch did not activate")
+	}
+	engine := bindProviderRequestScope(hyagent.Engine{}, "/tmp/prewalk-attachments", host)
+	stream, err := engine.ModelInterceptor.Stream(context.Background(), switcher, hyprovider.Request{
+		Model: "prewalk-model", Metadata: map[string]string{"reasoning_effort": "low"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = stream.Close()
+	if target.calls != 1 || target.root != "/tmp/prewalk-attachments" || target.host != host {
+		t.Fatalf("target scope calls=%d root=%q host=%p, want 1, %q, %p", target.calls, target.root, target.host, "/tmp/prewalk-attachments", host)
+	}
+	if target.request.Model != "composer-2.5" || target.request.Metadata["reasoning_effort"] != "high" ||
+		target.request.Metadata["prewalk_target_provider"] != "cursor" {
+		t.Fatalf("target request = %#v", target.request)
 	}
 }
 

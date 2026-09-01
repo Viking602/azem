@@ -72,8 +72,7 @@ func (driver *imageGenDriver) Definition() tool.Definition {
 			"subject": {Type: "string"}, "action": {Type: "string"}, "scene": {Type: "string"}, "composition": {Type: "string"},
 			"lighting": {Type: "string"}, "style": {Type: "string"}, "text": {Type: "string"}, "changes": {Type: "array", Items: &tool.Schema{Type: "string"}},
 			"aspect_ratio": {Type: "string"}, "image_size": {Type: "string"}, "input": {Type: "array", Items: &tool.Schema{Type: "object"}}, "provider": {Type: "string"},
-		}}, EffectType: tool.EffectWrite, RequiresApproval: true, RequiresActionTask: true, RiskLevel: "medium",
-		PolicyTags: []string{"media", "image", "network", "write"}, Concurrency: tool.ConcurrencyParallel,
+		}}, Concurrency: tool.ConcurrencyParallel,
 	}
 }
 
@@ -85,8 +84,7 @@ func (driver *ttsDriver) Definition() tool.Definition {
 		InputSchema: tool.Schema{Type: "object", Required: []string{"text", "output_path"}, AdditionalProperties: &additional, Properties: map[string]tool.Schema{
 			"text": {Type: "string"}, "voice_id": {Type: "string"}, "language": {Type: "string"}, "output_path": {Type: "string"},
 			"sample_rate": {Type: "integer"}, "bit_rate": {Type: "integer"},
-		}}, EffectType: tool.EffectWrite, RequiresApproval: true, RequiresActionTask: true, RiskLevel: "medium",
-		PolicyTags: []string{"media", "speech", "write"}, Concurrency: tool.ConcurrencyExclusive, ConcurrencyGroup: "speech-generation",
+		}}, Concurrency: tool.ConcurrencyExclusive, ConcurrencyGroup: "speech-generation",
 	}
 }
 
@@ -116,7 +114,7 @@ func (driver *ttsDriver) Execute(ctx context.Context, call tool.Call, _ tool.Upd
 }
 
 func executeMedia(ctx context.Context, call tool.Call, root, toolName string, params map[string]any, execute mediaExecutor) (tool.Result, error) {
-	caller, _ := tool.CallerFromContext(ctx)
+	caller, _ := InvocationFromContext(ctx)
 	sessionID := firstString(caller.SessionID, caller.TeamRunID, root)
 	requestCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()

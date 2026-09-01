@@ -203,7 +203,7 @@ func TestRuntimeUsesAndCleansEffectiveIsolatedCWD(t *testing.T) {
 	}
 	defer runtime.Shutdown(ctx)
 	parent := subagentParentRuntime{
-		SessionID: "session", ParentRunID: "parent", ProviderID: "test", ModelID: "model", Reasoning: "high",
+		SessionID: "session", ParentRunID: "parent", ProviderID: "test", AccountID: "test-account", ModelID: "model", Reasoning: "high",
 		Driver: staticSubagentAnswerDriver{}, Coding: coding, WorkspaceRoot: workspace,
 	}
 	run, err := runtime.Spawn(ctx, subagentSpawnInput{Prompt: "inspect", Description: "inspect", SubagentType: "explore"}, parent)

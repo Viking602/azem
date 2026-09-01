@@ -12,6 +12,7 @@ import (
 	"github.com/Viking602/azem/internal/resource"
 	"github.com/Viking602/azem/internal/skills"
 	llmuxcatalog "github.com/Viking602/llmux/provider/catalog"
+	"github.com/Viking602/venat/tool"
 )
 
 func buildCapabilityRegistry(
@@ -38,6 +39,7 @@ func buildCapabilityRegistry(
 			return nil, nil
 		}
 		definitions := coding.ToolDefinitions()
+		policies := coding.ToolPolicySnapshot()
 		result := make([]capability.Descriptor, 0, len(definitions))
 		for _, definition := range definitions {
 			schema, err := json.Marshal(definition.InputSchema)
@@ -48,7 +50,7 @@ func buildCapabilityRegistry(
 				ID: definition.Name, Kind: capability.KindTool, Enabled: true,
 				Description: definition.Description, Operations: []string{"execute"},
 				InputSchema: schema, Metadata: map[string]string{
-					"effect": string(definition.EffectType), "origin": "builtin",
+					"effect": string(policies[definition.Name].Effect), "origin": "builtin",
 				},
 			})
 		}
@@ -64,6 +66,10 @@ func buildCapabilityRegistry(
 		result := make([]capability.Descriptor, 0, len(drivers))
 		for _, driver := range drivers {
 			definition := driver.Definition()
+			descriptor, descriptorErr := agentservice.DescribeTool(driver)
+			if descriptorErr != nil {
+				return nil, descriptorErr
+			}
 			schema, err := json.Marshal(definition.InputSchema)
 			if err != nil {
 				return nil, err
@@ -72,7 +78,7 @@ func buildCapabilityRegistry(
 				ID: definition.Name, Kind: capability.KindTool, Enabled: true,
 				Description: definition.Description, Operations: []string{"execute"},
 				InputSchema: schema, Metadata: map[string]string{
-					"effect": string(definition.EffectType), "origin": "mcp",
+					"effect": string(descriptor.PolicyForCall(tool.Call{Name: definition.Name}).Effect), "origin": "mcp",
 				},
 			})
 		}

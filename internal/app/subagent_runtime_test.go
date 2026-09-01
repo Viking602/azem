@@ -16,10 +16,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Viking602/venat/api"
+	"github.com/Viking602/azem/internal/agentruntime"
+	hyagent "github.com/Viking602/venat/agent"
 	"github.com/Viking602/venat/message"
 	hyprovider "github.com/Viking602/venat/provider"
-	"github.com/Viking602/venat/stream"
 	"github.com/Viking602/venat/tool"
 
 	agentservice "github.com/Viking602/azem/internal/agent"
@@ -400,6 +400,140 @@ func TestConcurrentSubagentCancelIsDurableAndIdempotent(t *testing.T) {
 	}
 }
 
+type blockingRunningSubagentStore struct {
+	agentservice.SubagentRunStore
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *blockingRunningSubagentStore) Save(ctx context.Context, run agentservice.SubagentRun) error {
+	if run.State == agentservice.SubagentRunning && run.Summary == "waiting" {
+		s.once.Do(func() { close(s.started) })
+		select {
+		case <-s.release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return s.SubagentRunStore.Save(ctx, run)
+}
+
+func TestSubagentCancellationWinsOverInFlightRunningPersistence(t *testing.T) {
+	ctx := context.Background()
+	providerStore, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer providerStore.Close(ctx)
+	sqlStore, err := agentservice.NewSQLSubagentRunStore(providerStore.DB(), providerStore.Blobs())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &blockingRunningSubagentStore{
+		SubagentRunStore: sqlStore,
+		started:          make(chan struct{}),
+		release:          make(chan struct{}),
+	}
+	cfg := config.Default()
+	runtime, err := newSubagentRuntime(ctx, cfg.Agents.Subagents, store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.cancel()
+	run := agentservice.SubagentRun{
+		ID: "cancel-race", SessionID: "session", ParentRunID: "parent",
+		State: agentservice.SubagentRunning, Summary: "running", StartedAt: time.Now().UTC(),
+	}
+	if err := store.Create(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	runtime.active[run.ID] = &activeSubagent{
+		run: run, cancel: func() {}, done: make(chan struct{}), slot: true,
+		toolNames: make(map[string]struct{}),
+	}
+	runtime.running = 1
+	persisted := make(chan error, 1)
+	go func() { persisted <- runtime.persistActiveState(run.ID, "waiting") }()
+	select {
+	case <-store.started:
+	case <-time.After(time.Second):
+		t.Fatal("running persistence did not reach the store")
+	}
+	cancelled := make(chan agentservice.SubagentCancelOutcome, 1)
+	go func() { cancelled <- runtime.Cancel(run.SessionID, run.ID) }()
+	deadline := time.Now().Add(time.Second)
+	for {
+		runtime.mu.Lock()
+		state := runtime.active[run.ID].run.State
+		runtime.mu.Unlock()
+		if state == agentservice.SubagentCancelling {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("cancel did not supersede the running state")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(store.release)
+	if outcome := <-cancelled; outcome.Outcome != "cancel_requested" {
+		t.Fatalf("cancel outcome = %#v", outcome)
+	}
+	if err := <-persisted; err != nil {
+		t.Fatalf("running persistence = %v", err)
+	}
+	saved, err := sqlStore.Get(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.State != agentservice.SubagentCancelling {
+		t.Fatalf("stale running state overwrote cancellation: %#v", saved)
+	}
+	if snapshot := runtime.snapshot(run.ID, run.SessionID); !snapshot.Found || snapshot.Run.State != agentservice.SubagentCancelling {
+		t.Fatalf("in-memory cancellation was overwritten: %#v", snapshot)
+	}
+	runtime.terminalize(run.ID, terminalRequest{state: agentservice.SubagentCancelled})
+}
+
+func TestSubagentCancelPersistsAfterRuntimeContextCancellation(t *testing.T) {
+	parent, stop := context.WithCancel(context.Background())
+	providerStore, err := sqlitestore.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer providerStore.Close(context.Background())
+	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB(), providerStore.Blobs())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	runtime, err := newSubagentRuntime(parent, cfg.Agents.Subagents, store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := agentservice.SubagentRun{
+		ID: "cancel-after-context", SessionID: "session", ParentRunID: "parent",
+		State: agentservice.SubagentQueued, Summary: "queued", StartedAt: time.Now().UTC(),
+	}
+	if err := store.Create(context.Background(), run); err != nil {
+		t.Fatal(err)
+	}
+	runtime.active[run.ID] = &activeSubagent{
+		run: run, cancel: func() {}, done: make(chan struct{}), toolNames: make(map[string]struct{}),
+	}
+	stop()
+	if outcome := runtime.Cancel(run.SessionID, run.ID); outcome.Outcome != "cancel_requested" {
+		t.Fatalf("cancel outcome = %#v", outcome)
+	}
+	saved, err := store.Get(context.Background(), run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.State != agentservice.SubagentCancelled {
+		t.Fatalf("cancel after runtime context ended = %#v", saved)
+	}
+}
+
 func TestDecodeSubagentSpawnInputTracksPresenceAndDefaults(t *testing.T) {
 	minimal, err := decodeSubagentSpawnInput(json.RawMessage(`{"prompt":"inspect","description":"short task"}`))
 	if err != nil {
@@ -520,10 +654,12 @@ func TestSubagentSpawnDefinitionExposesEnabledRoleCatalog(t *testing.T) {
 }
 
 func TestSubagentSpawnDefinitionWithoutRuntimeIsSafe(t *testing.T) {
-	definition := (&subagentSpawnDriver{}).Definition()
-	if definition.Name != subagentSpawnTool || definition.EffectType != tool.EffectReadOnly ||
-		!slices.Equal(definition.PolicyTags, []string{"subagent", "spawn"}) {
-		t.Fatalf("nil-runtime definition metadata = %#v", definition)
+	driver := &subagentSpawnDriver{}
+	definition := driver.Definition()
+	policy := driver.ToolPolicy()
+	if definition.Name != subagentSpawnTool || policy.Effect != agentruntime.ToolEffectReadOnly ||
+		!slices.Equal(policy.PolicyTags, []string{"subagent", "spawn"}) {
+		t.Fatalf("nil-runtime descriptor = definition:%#v policy:%#v", definition, policy)
 	}
 	if len(definition.InputSchema.Required) != 0 {
 		t.Fatalf("batch-capable definition required fields = %q", definition.InputSchema.Required)
@@ -730,14 +866,10 @@ func TestRecoveredSubagentExecutesExistingDurableChildToCompletion(t *testing.T)
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = coding.Close(context.Background()) })
-	child, err := coding.StartRun(ctx, "continue durable child")
+	child, err := coding.StartRunWithMetadata(ctx, "continue durable child", nil, agentservice.RunExecutionPolicy{
+		AgentID: durableSubagentAgentID("explore"),
+	})
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := coding.ReleaseRun(ctx, child); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := coding.Runner().Recover(ctx, child.RunID); err != nil {
 		t.Fatal(err)
 	}
 	store, err := agentservice.NewSQLSubagentRunStore(providerStore.DB(), providerStore.Blobs())
@@ -765,7 +897,7 @@ func TestRecoveredSubagentExecutesExistingDurableChildToCompletion(t *testing.T)
 	})
 	if _, err := runtime.Drivers(subagentParentRuntime{
 		SessionID: "session", ParentRunID: "parent", ParentAgentID: "main",
-		ProviderID: "test", ModelID: "model", WorkspaceRoot: workspace,
+		ProviderID: "test", AccountID: "test-account", ModelID: "model", WorkspaceRoot: workspace,
 		Driver: completedSubagentDriver{}, Coding: coding,
 	}); err != nil {
 		t.Fatal(err)
@@ -781,8 +913,8 @@ func TestRecoveredSubagentExecutesExistingDurableChildToCompletion(t *testing.T)
 				persisted.Output != "recovered child" {
 				t.Fatalf("recovered child = %#v", persisted)
 			}
-			durable, runErr := coding.Runner().Run(ctx, child.RunID)
-			if runErr != nil || durable.Status != api.RunStatusCompleted {
+			durable, runErr := coding.LoadRun(ctx, child.RunID)
+			if runErr != nil || durable.Status != agentruntime.RunStatusCompleted {
 				t.Fatalf("durable child status=%v error=%v", durable.Status, runErr)
 			}
 			break
@@ -1093,6 +1225,24 @@ func TestResolveSubagentProfileKeepsRouteLayerAtomic(t *testing.T) {
 	}
 }
 
+func TestResolveSubagentProfileDoesNotCarryParentAccountAcrossProviders(t *testing.T) {
+	cfg := config.Default().Agents.Subagents
+	role := cfg.Roles["review"]
+	role.Provider = "grok"
+	role.Model = "grok-4.6"
+	cfg.Roles["review"] = role
+	runtime := subagentRuntime{cfg: cfg}
+	profile, err := runtime.resolveProfile(subagentSpawnInput{SubagentType: "review"}, subagentParentRuntime{
+		ProviderID: "chatgpt", AccountID: "chatgpt-account", ModelID: "gpt-5.6-sol", WorkspaceRoot: "/workspace",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.Provider != "grok" || profile.AccountID != "" {
+		t.Fatalf("cross-provider profile retained parent account: %#v", profile)
+	}
+}
+
 func TestForegroundWaitStartsAfterQueuedTaskRuns(t *testing.T) {
 	ctx := context.Background()
 	providerStore, err := sqlitestore.Open(ctx, ":memory:")
@@ -1176,7 +1326,7 @@ func TestParentWaitCancellationDetachesReadOnlyChildWithoutCancellingIt(t *testi
 	defer runtime.cancel()
 	runtime.running = cfg.Agents.Subagents.MaxConcurrency
 	parent := subagentParentRuntime{
-		SessionID: "session", ParentRunID: "parent", ProviderID: "test", ModelID: "model",
+		SessionID: "session", ParentRunID: "parent", ProviderID: "test", AccountID: "test-account", ModelID: "model",
 		WorkspaceRoot: t.TempDir(), Driver: metadataOnlyDriver{},
 	}
 	driver := &subagentSpawnDriver{runtime: runtime, parent: parent}
@@ -1267,7 +1417,7 @@ func TestSubagentUIBackpressureDoesNotCancelRun(t *testing.T) {
 		run: run, profile: effectiveSubagentProfile{Provider: "chatgpt", Model: "model"}, parent: subagentParentRuntime{Host: host},
 		ctx: childCtx, cancel: childCancel, done: make(chan struct{}), toolNames: make(map[string]struct{}),
 	}
-	runtime.handleFrame(run.ID, stream.Frame{Kind: stream.FrameThinking, Thinking: "inspect"})
+	runtime.handleFrame(run.ID, hyagent.Frame{Kind: hyagent.FrameThinking, Thinking: "inspect"})
 	select {
 	case <-childCtx.Done():
 		t.Fatal("UI event backpressure cancelled the child")
@@ -1478,7 +1628,7 @@ func TestIdleTimeoutSkipsOpenToolAndResetsOnThinking(t *testing.T) {
 		current.lastVisibleAt = time.Now().Add(-time.Second)
 	}
 	runtime.mu.Unlock()
-	runtime.handleFrame(run.ID, stream.Frame{Kind: stream.FrameThinking, Thinking: "continue"})
+	runtime.handleFrame(run.ID, hyagent.Frame{Kind: hyagent.FrameThinking, Thinking: "continue"})
 	runtime.cancelIdleChildren()
 	if runtime.active[run.ID] == nil || runtime.active[run.ID].run.State != agentservice.SubagentRunning {
 		t.Fatal("recent thinking was treated as idle")
@@ -1536,7 +1686,7 @@ func TestIdleTimeoutResetsOnTextAndToolAndIgnoresEmptyThinking(t *testing.T) {
 	}
 	runtime.mu.Unlock()
 
-	runtime.handleFrame(run.ID, stream.Frame{Kind: stream.FrameThinking, Thinking: "   "})
+	runtime.handleFrame(run.ID, hyagent.Frame{Kind: hyagent.FrameThinking, Thinking: "   "})
 	runtime.cancelIdleChildren()
 	empty := runtime.snapshot(run.ID, "session")
 	if !empty.Found || empty.Run.State != agentservice.SubagentCancelled {
@@ -1557,7 +1707,7 @@ func TestIdleTimeoutResetsOnTextAndToolAndIgnoresEmptyThinking(t *testing.T) {
 		toolNames: make(map[string]struct{}), lastVisibleAt: time.Now().Add(-time.Second),
 	}
 	runtime.mu.Unlock()
-	runtime.handleFrame(run.ID, stream.Frame{Kind: stream.FrameText, Text: "正在核对边界", TextPhase: hyprovider.TextPhaseCommentary})
+	runtime.handleFrame(run.ID, hyagent.Frame{Kind: hyagent.FrameText, Text: "正在核对边界", TextPhase: hyprovider.TextPhaseCommentary})
 	runtime.cancelIdleChildren()
 	if runtime.active[run.ID] == nil || runtime.active[run.ID].run.State != agentservice.SubagentRunning {
 		t.Fatal("recent commentary was treated as idle")
@@ -1568,8 +1718,8 @@ func TestIdleTimeoutResetsOnTextAndToolAndIgnoresEmptyThinking(t *testing.T) {
 		current.lastVisibleAt = time.Now().Add(-time.Second)
 	}
 	runtime.mu.Unlock()
-	runtime.handleFrame(run.ID, stream.Frame{
-		Kind:     stream.FrameToolCall,
+	runtime.handleFrame(run.ID, hyagent.Frame{
+		Kind:     hyagent.FrameToolCall,
 		ToolCall: &message.ToolCall{ID: "search-1", Name: "coding.search", Arguments: []byte(`{"query":"Todo"}`)},
 	})
 	runtime.cancelIdleChildren()
@@ -1577,8 +1727,8 @@ func TestIdleTimeoutResetsOnTextAndToolAndIgnoresEmptyThinking(t *testing.T) {
 		t.Fatal("open tool after a call was idle-cancelled")
 	}
 
-	runtime.handleFrame(run.ID, stream.Frame{
-		Kind:       stream.FrameToolResult,
+	runtime.handleFrame(run.ID, hyagent.Frame{
+		Kind:       hyagent.FrameToolResult,
 		ToolResult: &tool.Result{ToolCallID: "search-1", Name: "coding.search", Content: "ok"},
 	})
 	runtime.mu.Lock()
@@ -1902,6 +2052,13 @@ func TestCancelByParentRunIsSessionScopedAndIncludesBackgroundOnRequest(t *testi
 			t.Fatalf("unrelated child %q = %#v", item.id, snapshot)
 		}
 	}
+	runtime.CancelByParentRunAcrossSessions("parent", true)
+	if snapshot := runtime.snapshot("other-session", "other"); !snapshot.Found || snapshot.Run.State != agentservice.SubagentCancelled {
+		t.Fatalf("cross-session child = %#v", snapshot.Run)
+	}
+	if snapshot := runtime.snapshot("other-parent", "session"); !snapshot.Found || snapshot.Run.State != agentservice.SubagentQueued {
+		t.Fatalf("unrelated parent = %#v", snapshot.Run)
+	}
 }
 
 func TestActiveChildQueryDetectsBackgroundOnly(t *testing.T) {
@@ -1999,14 +2156,22 @@ func TestResumeCreatesNewTaskWithInheritedProfileAndSanitizedTranscript(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	transcript, err := json.Marshal([]message.Message{
+	oldUser := message.Message{ID: "old-user", Role: message.RoleUser, Text: "original request", Metadata: map[string]string{"task_id": "source"}}
+	agentruntime.SetMessageIdentity(&oldUser, "", "", "old-run", "")
+	archiveCarrier := message.Message{Role: message.RoleUser, Text: "archive carrier", Kind: message.KindCompactionSummary}
+	agentruntime.SetMessageVisibility(&archiveCarrier, agentruntime.MessageVisibilityPrivate)
+	privateContext := message.Message{Role: message.RoleAssistant, Text: "private runtime context"}
+	agentruntime.SetMessageVisibility(&privateContext, agentruntime.MessageVisibilityPrivate)
+	oldAnswer := message.Message{ID: "old-answer", Role: message.RoleAssistant, Text: "source answer"}
+	agentruntime.SetMessageIdentity(&oldAnswer, "", "", "old-run", "")
+	transcript, err := agentruntime.MarshalMessages([]message.Message{
 		{Role: message.RoleSystem, Text: "old system", Metadata: map[string]string{"task_id": "source"}},
-		{ID: "old-user", Role: message.RoleUser, Text: "original request", RunID: "old-run", Metadata: map[string]string{"task_id": "source"}},
+		oldUser,
 		{ID: "old-tool-call", Role: message.RoleAssistant, Text: "checking", ToolCalls: []message.ToolCall{{ID: "call", Name: "coding.read_file"}}},
 		message.NewToolResult(message.ToolResult{ToolCallID: "call", Name: "coding.read_file", Content: "secret"}),
-		{Role: message.RoleUser, Text: "archive carrier", Kind: message.KindCompactionSummary, Visibility: message.VisibilityPrivate},
-		{Role: message.RoleAssistant, Text: "private runtime context", Visibility: message.VisibilityPrivate},
-		{ID: "old-answer", Role: message.RoleAssistant, Text: "source answer", RunID: "old-run"},
+		archiveCarrier,
+		privateContext,
+		oldAnswer,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2029,7 +2194,7 @@ func TestResumeCreatesNewTaskWithInheritedProfileAndSanitizedTranscript(t *testi
 	defer runtime.cancel()
 	runtime.running = cfg.Agents.Subagents.MaxConcurrency
 	parent := subagentParentRuntime{
-		SessionID: "session", ParentRunID: "new-parent", ProviderID: "test", ModelID: "other-model",
+		SessionID: "session", ParentRunID: "new-parent", ProviderID: "test", AccountID: "test-account", ModelID: "other-model",
 		WorkspaceRoot: workspace, Driver: metadataOnlyDriver{},
 	}
 	spawned, err := runtime.Spawn(ctx, subagentSpawnInput{
@@ -2054,7 +2219,7 @@ func TestResumeCreatesNewTaskWithInheritedProfileAndSanitizedTranscript(t *testi
 		t.Fatalf("resume seed = %#v", seed)
 	}
 	for _, item := range seed {
-		if item.ID != "" || item.RunID != "" || len(item.Metadata) != 0 || len(item.ToolCalls) != 0 || item.ToolResult != nil {
+		if item.ID != "" || agentruntime.MessageRunID(item) != "" || len(item.Metadata) != 0 || len(item.ToolCalls) != 0 || item.ToolResult != nil {
 			t.Fatalf("unsafe resume metadata survived: %#v", item)
 		}
 	}
@@ -2177,6 +2342,39 @@ func TestBackgroundCompletionAutoWakesIdleSessionOnce(t *testing.T) {
 	}
 	if got := countSubagentWakeBlocks(projection.Blocks, "background-completion"); got != 1 {
 		t.Fatalf("completion was delivered more than once: %#v", projection.Blocks)
+	}
+}
+
+func TestBackgroundCompletionDoesNotWakeArchivedSession(t *testing.T) {
+	ctx := context.Background()
+	providerStore, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer providerStore.Close(ctx)
+	sessions := session.NewService(providerStore.DB(), providerStore.Blobs())
+	if _, err := sessions.Ensure(ctx, session.Session{
+		ID: "archived", Title: "Automation", ProviderID: "chatgpt", ModelID: "model", Reasoning: "high", AgentMode: "single",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.SetArchived(ctx, "archived", true); err != nil {
+		t.Fatal(err)
+	}
+	host := NewService(ctx, config.Default())
+	host.AttachDurable(sessions, nil)
+	defer host.Shutdown(ctx)
+	if err := host.startSubagentAutoWake([]agentservice.SubagentRun{{
+		ID: "child", SessionID: "archived", State: agentservice.SubagentCompleted, Background: true,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	projection, err := sessions.LoadProjection(ctx, "archived")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projection.Blocks) != 0 {
+		t.Fatalf("archived session was auto-woken: %#v", projection.Blocks)
 	}
 }
 
@@ -2340,7 +2538,7 @@ func TestUserTurnBlockMarksSubagentWake(t *testing.T) {
 		t.Fatalf("wake data = %#v", block.Data)
 	}
 	ordinary := userTurnBlock("run-user", TurnRequest{Prompt: "hello"})
-	if ordinary.Title != "You" || ordinary.State != "" || ordinary.Data != nil {
+	if ordinary.Title != "You" || ordinary.State != "" || len(ordinary.Data) != 1 || ordinary.Data["createdAt"] == "" {
 		t.Fatalf("ordinary user block = %#v", ordinary)
 	}
 }
@@ -2368,19 +2566,23 @@ func wakeBlockHasState(blocks []session.Block, taskID string) bool {
 }
 
 func TestTranscriptToAgentBlocksUsesStableOrderingAndFailureStates(t *testing.T) {
-	encoded, err := json.Marshal([]message.Message{
+	withRun := func(value message.Message, runID string) message.Message {
+		agentruntime.SetMessageIdentity(&value, "", "", runID, "")
+		return value
+	}
+	encoded, err := agentruntime.MarshalMessages([]message.Message{
 		{ID: "system", Role: message.RoleSystem, Text: "hidden"},
-		{ID: "user", Role: message.RoleUser, RunID: "run-user", Text: "inspect"},
-		{
-			ID: "assistant", Role: message.RoleAssistant, RunID: "run-child", Thinking: "reasoning", Text: "working",
+		withRun(message.Message{ID: "user", Role: message.RoleUser, Text: "inspect"}, "run-user"),
+		withRun(message.Message{
+			ID: "assistant", Role: message.RoleAssistant, Thinking: "reasoning", Text: "working",
 			ToolCalls: []message.ToolCall{
 				{ID: "matched", Name: "coding.read_file", Arguments: json.RawMessage(`{"path":"a"}`)},
 				{ID: "missing", Name: "coding.search", Arguments: json.RawMessage(`{"query":"b"}`)},
 			},
-		},
-		{ID: "result", Role: message.RoleTool, RunID: "run-tool", ToolResult: &message.ToolResult{ToolCallID: "matched", Name: "coding.read_file", Content: "result"}},
-		{ID: "orphan", Role: message.RoleTool, RunID: "run-orphan", ToolResult: &message.ToolResult{ToolCallID: "unknown", Name: "coding.read_file", Content: "orphan"}},
-		{ID: "final", Role: message.RoleAssistant, RunID: "run-child", Text: "done"},
+		}, "run-child"),
+		withRun(message.Message{ID: "result", Role: message.RoleTool, ToolResult: &message.ToolResult{ToolCallID: "matched", Name: "coding.read_file", Content: "result"}}, "run-tool"),
+		withRun(message.Message{ID: "orphan", Role: message.RoleTool, ToolResult: &message.ToolResult{ToolCallID: "unknown", Name: "coding.read_file", Content: "orphan"}}, "run-orphan"),
+		withRun(message.Message{ID: "final", Role: message.RoleAssistant, Text: "done"}, "run-child"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2448,9 +2650,12 @@ func TestEventCloneDeepCopiesTypedAgentContracts(t *testing.T) {
 type concurrentApprovalDriver struct{}
 
 func (concurrentApprovalDriver) Definition() tool.Definition {
-	return tool.Definition{
-		Name: "test.write", Description: "write", EffectType: tool.EffectWrite,
-		RequiresApproval: true, RiskLevel: "high", InputSchema: tool.Schema{Type: "object"},
+	return tool.Definition{Name: "test.write", Description: "write", InputSchema: tool.Schema{Type: "object"}}
+}
+
+func (concurrentApprovalDriver) ToolPolicy() agentruntime.ToolPolicy {
+	return agentruntime.ToolPolicy{
+		Effect: agentruntime.ToolEffectWrite, RequiresApproval: true, RiskLevel: "high",
 	}
 }
 
@@ -2685,7 +2890,7 @@ func TestForegroundWaitWindowDetachesLongReadOnlyTaskWithoutCancellingIt(t *test
 	defer runtime.Shutdown(ctx)
 	provider := newGatedSubagentDriver()
 	parent := subagentParentRuntime{
-		SessionID: "session", ParentRunID: "parent", ProviderID: "test", ModelID: "model", Reasoning: "high",
+		SessionID: "session", ParentRunID: "parent", ProviderID: "test", AccountID: "test-account", ModelID: "model", Reasoning: "high",
 		Driver: provider, Coding: coding, WorkspaceRoot: t.TempDir(),
 	}
 	driver := &subagentSpawnDriver{runtime: runtime, parent: parent}
@@ -2826,7 +3031,7 @@ func TestBatchSubagentSpawnEnqueuesEveryItemBeforeWaiting(t *testing.T) {
 	defer runtime.Shutdown(ctx)
 	defer coding.Close(ctx)
 	parent := subagentParentRuntime{
-		SessionID: "session", ParentRunID: "parent", ProviderID: "test", ModelID: "model", Reasoning: "high",
+		SessionID: "session", ParentRunID: "parent", ProviderID: "test", AccountID: "test-account", ModelID: "model", Reasoning: "high",
 		Driver: provider, Coding: coding, WorkspaceRoot: t.TempDir(),
 	}
 	driver := &subagentSpawnDriver{runtime: runtime, parent: parent}
@@ -2916,7 +3121,7 @@ func newGatedForegroundHarness(t *testing.T, ctx context.Context, await time.Dur
 func startGatedForegroundSpawn(t *testing.T, ctx context.Context, runtime *subagentRuntime, provider *gatedSubagentDriver, coding *agentservice.Service, arguments string) <-chan tool.Result {
 	t.Helper()
 	parent := subagentParentRuntime{
-		SessionID: "session", ParentRunID: "parent", ProviderID: "test", ModelID: "model", Reasoning: "high",
+		SessionID: "session", ParentRunID: "parent", ProviderID: "test", AccountID: "test-account", ModelID: "model", Reasoning: "high",
 		Driver: provider, Coding: coding, WorkspaceRoot: t.TempDir(),
 	}
 	driver := &subagentSpawnDriver{runtime: runtime, parent: parent}
@@ -2953,13 +3158,13 @@ func assertCompletedForegroundResult(t *testing.T, result tool.Result) {
 
 func assertUnboundedSubagentTasks(t *testing.T, ctx context.Context, coding *agentservice.Service, runID string) {
 	t.Helper()
-	tasks, err := coding.Runner().ListTasks(ctx, runID)
-	if err != nil || len(tasks) != 2 {
+	tasks, err := coding.ListTasks(ctx, runID)
+	if err != nil || len(tasks) != 1 {
 		t.Fatalf("durable subagent task budget = %#v, err=%v", tasks, err)
 	}
 	for _, task := range tasks {
 		if task.Budget == nil {
-			continue // Venat normalizes an all-zero budget to nil: unbounded.
+			continue // Azem normalizes an all-zero request budget to nil: unbounded.
 		}
 		if task.Budget.MaxTokens != 0 || task.Budget.MaxToolCalls != 0 || task.Budget.MaxSteps != 0 || task.Budget.MaxWallClock != 0 {
 			t.Fatalf("long subagent received a hidden runtime budget = %#v", task.Budget)
@@ -2993,7 +3198,7 @@ func TestSubagentCoordinatorEnforcesConcurrencyAndFIFOQueue(t *testing.T) {
 	defer runtime.Shutdown(ctx)
 	driver := newGatedSubagentDriver()
 	parent := subagentParentRuntime{
-		SessionID: "session", ParentRunID: "parent", ProviderID: "test", ModelID: "model", Reasoning: "high",
+		SessionID: "session", ParentRunID: "parent", ProviderID: "test", AccountID: "test-account", ModelID: "model", Reasoning: "high",
 		Driver: driver, Coding: coding, WorkspaceRoot: t.TempDir(),
 	}
 	var runs []agentservice.SubagentRun
@@ -3072,7 +3277,7 @@ func TestSubagentCoordinatorAppliesConcurrencyUpdate(t *testing.T) {
 	}
 	defer runtime.Shutdown(ctx)
 	driver := newGatedSubagentDriver()
-	parent := subagentParentRuntime{SessionID: "session", ParentRunID: "parent", ProviderID: "test", ModelID: "model", Driver: driver, Coding: coding, WorkspaceRoot: t.TempDir()}
+	parent := subagentParentRuntime{SessionID: "session", ParentRunID: "parent", ProviderID: "test", AccountID: "test-account", ModelID: "model", Driver: driver, Coding: coding, WorkspaceRoot: t.TempDir()}
 	for _, goal := range []string{"one", "two"} {
 		if _, err := runtime.Spawn(ctx, subagentSpawnInput{Prompt: goal, Description: goal, SubagentType: "explore"}, parent); err != nil {
 			t.Fatal(err)
@@ -3170,7 +3375,7 @@ func TestRecursiveSubagentMakesProgressWhenConcurrencyIsOne(t *testing.T) {
 	driver := &recursiveSubagentDriver{}
 	parent := subagentParentRuntime{
 		SessionID: "recursive-session", ParentRunID: "main-run", ParentAgentID: "azem-main",
-		ProviderID: "test", ModelID: "model", Driver: driver, Coding: coding, WorkspaceRoot: t.TempDir(),
+		ProviderID: "test", AccountID: "test-account", ModelID: "model", Driver: driver, Coding: coding, WorkspaceRoot: t.TempDir(),
 	}
 	root, err := runtime.Spawn(ctx, subagentSpawnInput{
 		Prompt: "root delegation", Description: "root delegation", SubagentType: "explore",
@@ -3226,7 +3431,7 @@ func TestSubagentDriversHonorRecursionDepth(t *testing.T) {
 	defer runtime.Shutdown(ctx)
 	parent := subagentParentRuntime{
 		SessionID: "depth-session", ParentRunID: "run", ParentAgentID: "agent",
-		ProviderID: "test", ModelID: "model", Driver: metadataOnlyDriver{}, Coding: coding, WorkspaceRoot: t.TempDir(),
+		ProviderID: "test", AccountID: "test-account", ModelID: "model", Driver: metadataOnlyDriver{}, Coding: coding, WorkspaceRoot: t.TempDir(),
 	}
 	for _, test := range []struct {
 		depth int
@@ -3278,8 +3483,23 @@ func TestAdvisoryRequestBudgetWarnsOnceWithoutStopping(t *testing.T) {
 		t.Fatalf("advisory request shapes = %#v", inner.requests)
 	}
 	notice := inner.requests[1].Messages[1]
-	if notice.Role != message.RoleSystem || notice.Visibility != message.VisibilityPrivate || !strings.Contains(notice.Text, "not a cancellation or hard limit") {
+	if notice.Role != message.RoleSystem || !isPrivateMessage(notice) || !strings.Contains(notice.Text, "not a cancellation or hard limit") {
 		t.Fatalf("advisory notice = %#v", notice)
+	}
+}
+
+func waitForSubagentSummary(t *testing.T, runtime *subagentRuntime, sessionID, runID, summary string) agentservice.SubagentSnapshot {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		snapshot := runtime.snapshot(runID, sessionID)
+		if snapshot.Found && snapshot.Run.Summary == summary {
+			return snapshot
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("subagent %s did not reach summary %q: %#v", runID, summary, snapshot)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -3309,7 +3529,7 @@ func (d *recoveringSubagentDriver) Stream(_ context.Context, request hyprovider.
 	}), nil
 }
 
-func TestSubagentSessionRetryRecoversWithoutPartialReplay(t *testing.T) {
+func TestSubagentPartialProviderFailureRequiresReconciliationWithoutReplay(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	providerStore, err := sqlitestore.Open(ctx, ":memory:")
@@ -3337,7 +3557,7 @@ func TestSubagentSessionRetryRecoversWithoutPartialReplay(t *testing.T) {
 	defer runtime.Shutdown(ctx)
 	driver := &recoveringSubagentDriver{}
 	parent := subagentParentRuntime{
-		SessionID: "session", ParentRunID: "parent", ProviderID: "test", ModelID: "model", Reasoning: "high",
+		SessionID: "session", ParentRunID: "parent", ProviderID: "test", AccountID: "test-account", ModelID: "model", Reasoning: "high",
 		Driver: driver, Coding: coding, WorkspaceRoot: t.TempDir(), Host: host,
 	}
 	run, err := runtime.Spawn(ctx, subagentSpawnInput{
@@ -3346,25 +3566,38 @@ func TestSubagentSessionRetryRecoversWithoutPartialReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshots := runtime.Query(ctx, "session", []string{run.ID}, 3*time.Second)
-	if len(snapshots) != 1 || !snapshots[0].Found || snapshots[0].Run.State != agentservice.SubagentCompleted {
-		t.Fatalf("recovered subagent snapshot=%#v", snapshots)
+	snapshot := waitForSubagentSummary(t, runtime, "session", run.ID, "waiting for reconciliation")
+	if snapshot.Run.State != agentservice.SubagentRunning {
+		t.Fatalf("partial failure state=%q, want running reconciliation hold: %#v", snapshot.Run.State, snapshot)
+	}
+	binding, err := providerStore.LoadLatestExecutionBinding(ctx, snapshot.Run.ChildRunID, durableSubagentAgentID("explore"), "subagent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if binding.State != agentruntime.ExecutionBindingReconcileRequired {
+		t.Fatalf("partial failure binding state=%q, want reconcile_required", binding.State)
+	}
+	attempts, err := providerStore.ListDurableReconcileAttempts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 1 || attempts[0].RunID != snapshot.Run.ChildRunID || attempts[0].AttemptKind != "model" {
+		t.Fatalf("partial failure reconciliation attempts=%#v", attempts)
 	}
 	driver.mu.Lock()
 	defer driver.mu.Unlock()
-	if len(driver.requests) != 2 {
-		t.Fatalf("subagent provider requests=%d, want one retry", len(driver.requests))
+	if len(driver.requests) != 1 {
+		t.Fatalf("subagent provider requests=%d, want no replay after partial output", len(driver.requests))
 	}
-	for _, current := range driver.requests[1].Messages {
-		if strings.Contains(current.Text, "uncommitted child partial") {
-			t.Fatalf("failed child partial leaked into retry context: %#v", driver.requests[1].Messages)
-		}
+	if strings.Contains(string(snapshot.Run.Transcript), "uncommitted child partial") {
+		t.Fatalf("uncertain partial leaked into child transcript: %s", snapshot.Run.Transcript)
 	}
 }
 
 type failingSubagentDriver struct {
 	panicValue string
 	err        error
+	notStarted bool
 }
 
 func (failingSubagentDriver) Metadata() hyprovider.Metadata {
@@ -3375,17 +3608,29 @@ func (d failingSubagentDriver) Stream(context.Context, hyprovider.Request) (hypr
 	if d.panicValue != "" {
 		panic(d.panicValue)
 	}
+	if d.notStarted {
+		return nil, fmt.Errorf("%w: %v", hyprovider.ErrNotStarted, d.err)
+	}
 	return nil, d.err
 }
 
-func TestSubagentCoordinatorTerminalizesProviderFailureAndPanic(t *testing.T) {
+func TestSubagentCoordinatorTerminalizesKnownFailureAndHoldsUnknownPanic(t *testing.T) {
 	for _, test := range []struct {
-		name   string
-		driver failingSubagentDriver
-		wanted string
+		name      string
+		driver    failingSubagentDriver
+		wanted    string
+		reconcile bool
 	}{
-		{name: "error", driver: failingSubagentDriver{err: fmt.Errorf("provider unavailable")}, wanted: "provider unavailable"},
-		{name: "panic", driver: failingSubagentDriver{panicValue: "provider exploded"}, wanted: "provider exploded"},
+		{
+			name:   "known not-started error",
+			driver: failingSubagentDriver{err: fmt.Errorf("provider unavailable"), notStarted: true},
+			wanted: "provider unavailable",
+		},
+		{
+			name:      "panic with uncertain start",
+			driver:    failingSubagentDriver{panicValue: "provider exploded"},
+			reconcile: true,
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -3410,7 +3655,7 @@ func TestSubagentCoordinatorTerminalizesProviderFailureAndPanic(t *testing.T) {
 			}
 			defer runtime.Shutdown(ctx)
 			parent := subagentParentRuntime{
-				SessionID: "session", ParentRunID: "parent", ProviderID: "test", ModelID: "model", Reasoning: "high",
+				SessionID: "session", ParentRunID: "parent", ProviderID: "test", AccountID: "test-account", ModelID: "model", Reasoning: "high",
 				Driver: test.driver, Coding: coding, WorkspaceRoot: t.TempDir(),
 			}
 			run, err := runtime.Spawn(ctx, subagentSpawnInput{
@@ -3418,6 +3663,27 @@ func TestSubagentCoordinatorTerminalizesProviderFailureAndPanic(t *testing.T) {
 			}, parent)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if test.reconcile {
+				snapshot := waitForSubagentSummary(t, runtime, "session", run.ID, "waiting for reconciliation")
+				if snapshot.Run.State != agentservice.SubagentRunning {
+					t.Fatalf("unknown panic state=%q, want running reconciliation hold", snapshot.Run.State)
+				}
+				binding, err := providerStore.LoadLatestExecutionBinding(ctx, snapshot.Run.ChildRunID, durableSubagentAgentID("explore"), "subagent")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if binding.State != agentruntime.ExecutionBindingReconcileRequired {
+					t.Fatalf("unknown panic binding state=%q, want reconcile_required", binding.State)
+				}
+				attempts, err := providerStore.ListDurableReconcileAttempts(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(attempts) != 1 || attempts[0].RunID != snapshot.Run.ChildRunID || attempts[0].AttemptKind != "model" {
+					t.Fatalf("unknown panic reconciliation attempts=%#v", attempts)
+				}
+				return
 			}
 			snapshots := runtime.Query(ctx, "session", []string{run.ID}, 3*time.Second)
 			if len(snapshots) != 1 || !snapshots[0].Found || snapshots[0].Run.State != agentservice.SubagentFailed ||

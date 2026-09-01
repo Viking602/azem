@@ -161,7 +161,7 @@ func run(args []string) error {
 			Workspace: workspace, AzemVersion: version, AzemCommit: gitCommit, BuildTime: buildTime,
 			Provider: provider, Model: model, Reasoning: reasoning,
 			InstructionFingerprint: app.InstructionFingerprint(false), TaskPrompt: text,
-			Tools: boot.Service.ToolDefinitionsSnapshot(),
+			Tools: boot.Service.ToolDefinitionsSnapshot(), ToolOrigins: boot.Service.ToolOriginsSnapshot(),
 		})
 		if captureErr != nil {
 			return captureErr

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/venat/tool"
 )
 
@@ -57,8 +58,12 @@ export default (pi) => ({
 		t.Fatalf("drivers = %#v, %v", drivers, err)
 	}
 	definition := drivers[0].Definition()
-	if definition.Name != "repo_stats" || definition.EffectType != tool.EffectReadOnly || definition.InputSchema.Type != "object" || len(definition.InputSchema.Required) != 1 {
-		t.Fatalf("definition = %#v", definition)
+	policy, ok := drivers[0].(interface {
+		ToolPolicy() agentruntime.ToolPolicy
+	})
+	if !ok || definition.Name != "repo_stats" || policy.ToolPolicy().Effect != agentruntime.ToolEffectReadOnly ||
+		definition.InputSchema.Type != "object" || len(definition.InputSchema.Required) != 1 {
+		t.Fatalf("definition = %#v policy=%#v", definition, policy)
 	}
 	var updates []tool.Update
 	result, err := drivers[0].Execute(context.Background(), tool.Call{ID: "call-1", Name: "repo_stats", Arguments: json.RawMessage(`{"value":"hello"}`)}, func(update tool.Update) error {

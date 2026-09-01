@@ -186,6 +186,12 @@ func (dispatcher *Dispatcher) Dispatch(method Method, payload json.RawMessage) (
 			return nil, err
 		}
 		return dispatcher.bridge.WorkspaceEntries(params.Path)
+	case MethodSearchWorkspaceFiles:
+		params, err := decodeParams[searchParams](payload)
+		if err != nil {
+			return nil, err
+		}
+		return dispatcher.bridge.SearchWorkspaceFiles(params.Query, params.Limit)
 	case MethodWorkspaceFile:
 		params, err := decodeParams[pathParams](payload)
 		if err != nil {

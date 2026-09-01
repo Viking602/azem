@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,10 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Viking602/venat"
-	"github.com/Viking602/venat/api"
 	"github.com/Viking602/venat/tool"
-	"github.com/Viking602/venat/worker"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	agentservice "github.com/Viking602/azem/internal/agent"
@@ -147,7 +143,7 @@ func TestManagerDoesNotDeleteStatelessHTTPSessionOnClose(t *testing.T) {
 	}
 }
 
-func TestMCPDefaultDriverRequiresRunnerApprovalBeforeRemoteCall(t *testing.T) {
+func TestMCPDefaultDriverRequiresHostApprovalBeforeRemoteCall(t *testing.T) {
 	ctx := context.Background()
 	client := &fakeClient{tools: []tool.Definition{{Name: "deploy", InputSchema: tool.Schema{Type: "object"}}}}
 	manager := managerWithClient(client)
@@ -169,26 +165,16 @@ func TestMCPDefaultDriverRequiresRunnerApprovalBeforeRemoteCall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lease, acquired, err := service.Runner().AcquireTaskExecution(ctx, api.AcquireTaskExecutionCommand{
-		RunID: run.RunID, TaskID: run.TaskID, EnvelopeID: run.EnvelopeID,
-		HolderType: api.HolderAgent, HolderID: run.HolderID, TTL: time.Minute,
-	})
-	if err != nil || !acquired {
-		t.Fatalf("acquire governed MCP lease: acquired=%t error=%v", acquired, err)
-	}
-	defer func() {
-		_ = service.Runner().ReleaseTaskExecution(context.Background(), api.ReleaseTaskExecutionCommand{
-			LeaseID: lease.ID, HolderID: run.HolderID,
-		})
-	}()
 	driver := manager.Snapshot()[0]
-	governed := worker.GovernedToolBus{
-		Runner: service.Runner(), Bus: tool.NewBus(driver), RunID: run.RunID, TaskID: run.TaskID,
-		LeaseID: lease.ID, HolderType: api.HolderAgent, HolderID: run.HolderID, TaskVersion: lease.TaskVersion,
+	if err := service.AttachExternalTools([]tool.Driver{driver}, nil); err != nil {
+		t.Fatal(err)
 	}
-	_, err = governed.Execute(ctx, tool.Call{ID: "deploy-call", Name: driver.Definition().Name}, nil)
-	if !errors.Is(err, venat.ErrPolicyDenied) {
+	execution, err := service.ExecuteTool(ctx, run, tool.Call{ID: "deploy-call", Name: driver.Definition().Name}, nil)
+	if err != nil {
 		t.Fatalf("governed MCP error=%v", err)
+	}
+	if execution.Executed || execution.Approval == nil {
+		t.Fatalf("governed MCP execution=%+v, want pending approval", execution)
 	}
 	if client.callCount != 0 {
 		t.Fatalf("remote call bypassed approval: calls=%d", client.callCount)

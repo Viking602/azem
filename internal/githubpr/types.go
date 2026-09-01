@@ -155,7 +155,7 @@ type Dashboard struct {
 	RefreshedAt     time.Time            `json:"refreshedAt"`
 }
 
-// MutationRequest is the closed set of GitHub mutations exposed to the WebView.
+// MutationRequest is the closed set of GitHub mutations exposed to the desktop renderer.
 type MutationRequest struct {
 	Number             int    `json:"number"`
 	Kind               string `json:"kind"`

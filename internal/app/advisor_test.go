@@ -29,14 +29,14 @@ func TestAdvisorWatchdogInjectsDedupedEscalatingAdvice(t *testing.T) {
 			message.NewText(message.RoleUser, "Ship the feature"),
 			func() message.Message {
 				value := message.NewText(message.RoleSystem, "PRIVATE_SECRET")
-				value.Visibility = message.VisibilityPrivate
+				markPrivateMessage(&value)
 				return value
 			}(),
 		},
 		Output: message.NewText(message.RoleAssistant, "Candidate answer"),
 	}
 	first, err := guard.Check(context.Background(), input)
-	if err != nil || first.Action != hyagent.OutputGuardrailActionRetry || len(first.RetryMessages) != 1 || first.RetryMessages[0].Visibility != message.VisibilityPrivate ||
+	if err != nil || first.Action != hyagent.OutputGuardrailActionRetry || len(first.RetryMessages) != 1 || !isPrivateMessage(first.RetryMessages[0]) ||
 		!strings.Contains(first.RetryMessages[0].Text, `severity="concern"`) || !strings.Contains(first.RetryMessages[0].Text, "weigh, don't blindly obey") {
 		t.Fatalf("first advisor result = %#v, %v", first, err)
 	}

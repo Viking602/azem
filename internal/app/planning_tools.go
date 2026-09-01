@@ -74,9 +74,6 @@ func (d *askDriver) Definition() tool.Definition {
 		InputSchema: tool.Schema{Type: "object", Properties: map[string]tool.Schema{
 			"questions": {Type: "array", Items: &question},
 		}, Required: []string{"questions"}, AdditionalProperties: &additional},
-		EffectType: tool.EffectReadOnly, RequiresApproval: false, RequiresActionTask: false,
-		RiskLevel: "low", Metadata: map[string]string{"approval": "allow", "interactive": "true", "exclusive": "true"},
-		PolicyTags: []string{"session", "planning", "interactive"},
 	}
 }
 
@@ -359,9 +356,6 @@ func (d *submitPlanDriver) Definition() tool.Definition {
 		InputSchema: tool.Schema{Type: "object", Properties: map[string]tool.Schema{
 			"title": {Type: "string"}, "plan": {Type: "string"},
 		}, Required: []string{"title", "plan"}, AdditionalProperties: &additional},
-		EffectType: tool.EffectWrite, RequiresApproval: false, RequiresActionTask: false,
-		RiskLevel: "low", Metadata: map[string]string{"approval": "allow", "terminal": "true"},
-		PolicyTags: []string{"session", "planning"},
 	}
 }
 

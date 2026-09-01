@@ -18,7 +18,6 @@ import (
 	"sync/atomic"
 
 	"github.com/Viking602/azem/internal/resource"
-	"github.com/Viking602/venat/coding"
 	"github.com/Viking602/venat/tool"
 	"github.com/klauspost/compress/zstd"
 )
@@ -65,7 +64,7 @@ func newOMPWriteDriver(root string, snapshotRead tool.Driver, resources *resourc
 func (driver *ompWriteDriver) Definition() tool.Definition {
 	additional := false
 	return tool.Definition{
-		Name:        coding.ToolWriteFile,
+		Name:        ToolWriteFile,
 		Description: "Create or replace a file, registered internal resource, archive member, or SQLite row. Stage structural rewrites by writing JSON to xd://ast_edit, then finalize with one reason sentence to xd://resolve or xd://reject. Hashline display prefixes copied from read output are removed safely.",
 		InputSchema: tool.Schema{
 			Type: "object", Required: []string{"path", "content"}, AdditionalProperties: &additional,
@@ -74,7 +73,7 @@ func (driver *ompWriteDriver) Definition() tool.Definition {
 				"content": {Type: "string", Description: "Complete file content or resource payload."},
 			},
 		},
-		EffectType: tool.EffectWrite, RequiresActionTask: true, RiskLevel: "medium", PolicyTags: []string{"coding", "write", "workspace"}, Concurrency: tool.ConcurrencyExclusive, ConcurrencyGroup: "workspace-files",
+		Concurrency: tool.ConcurrencyExclusive, ConcurrencyGroup: "workspace-files",
 	}
 }
 
@@ -113,7 +112,7 @@ func (driver *ompWriteDriver) writeURI(ctx context.Context, call tool.Call, path
 		return tool.Result{}, errors.New("internal resources are unavailable")
 	}
 	base, selector := splitReadSelector(path, "")
-	caller, _ := tool.CallerFromContext(ctx)
+	caller, _ := InvocationFromContext(ctx)
 	written, err := driver.resources.Write(ctx, base, selector, resource.Scope{
 		SessionID: caller.SessionID, RunID: caller.TeamRunID, Workspace: driver.root,
 	}, resource.Result{URI: base, MediaType: "text/plain; charset=utf-8", Data: []byte(content)})
@@ -188,11 +187,11 @@ func (driver *ompWriteDriver) recordWriteSnapshot(ctx context.Context, relative 
 		return ""
 	}
 	arguments, _ := json.Marshal(map[string]any{"path": relative, "startLine": 1, "endLine": 1})
-	result, err := driver.snapshotRead.Execute(ctx, tool.Call{ID: "write-snapshot", Name: coding.ToolReadFile, Arguments: arguments}, nil)
+	result, err := driver.snapshotRead.Execute(ctx, tool.Call{ID: "write-snapshot", Name: ToolReadFile, Arguments: arguments}, nil)
 	if err != nil || result.IsError {
 		return ""
 	}
-	var observed coding.ReadFileToolResult
+	var observed ReadFileToolResult
 	if json.Unmarshal(result.Structured, &observed) == nil && observed.Tag != "" {
 		return "[" + observed.Path + "#" + observed.Tag + "]"
 	}
@@ -324,7 +323,7 @@ func writeSuccess(call tool.Call, path, kind string, bytes int, created, overwri
 }
 
 func writeError(call tool.Call, err error) tool.Result {
-	return tool.Result{ToolCallID: call.ID, Name: call.Name, Content: "coding.write_file failed: " + err.Error(), IsError: true}
+	return tool.Result{ToolCallID: call.ID, Name: call.Name, Content: "write_file failed: " + err.Error(), IsError: true}
 }
 
 func unwrapWritePath(path string) string {
@@ -395,7 +394,7 @@ func rejectWriteSelectorMisfire(root, path, content string) error {
 		return nil
 	}
 	if _, err := os.Lstat(filepath.Join(root, filepath.FromSlash(path))); os.IsNotExist(err) {
-		return fmt.Errorf("write target %q ends with read selector :%s; use coding.read_file", path, selector)
+		return fmt.Errorf("write target %q ends with read selector :%s; use read_file", path, selector)
 	}
 	return nil
 }

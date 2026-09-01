@@ -141,7 +141,6 @@ func (d *subagentSpawnDriver) Definition() tool.Definition {
 				"schemaMode":   {Type: "string", Description: "Validation enforcement after retry exhaustion.", Enum: []string{"permissive", "strict"}},
 			},
 		},
-		EffectType: tool.EffectReadOnly, PolicyTags: []string{"subagent", "spawn"},
 	}
 }
 
@@ -341,7 +340,7 @@ func (d *subagentGetOutputDriver) Definition() tool.Definition {
 		Name: subagentGetOutputTool, Description: "Get ordered snapshots for one or more supervised subagent task IDs, optionally waiting for terminal states.",
 		InputSchema: tool.Schema{Type: "object", Required: []string{"task_ids"}, AdditionalProperties: &additional, Properties: map[string]tool.Schema{
 			"task_ids": {Type: "array", Items: &tool.Schema{Type: "string"}}, "timeout_ms": {Type: "integer"},
-		}}, EffectType: tool.EffectReadOnly, PolicyTags: []string{"subagent", "query"},
+		}},
 	}
 }
 
@@ -499,7 +498,6 @@ func (d *subagentKillDriver) Definition() tool.Definition {
 	return tool.Definition{
 		Name: subagentKillTool, Description: "Request cancellation of one supervised subagent task without cancelling the parent run.",
 		InputSchema: tool.Schema{Type: "object", Required: []string{"task_id"}, AdditionalProperties: &additional, Properties: map[string]tool.Schema{"task_id": {Type: "string"}}},
-		EffectType:  tool.EffectReadOnly, PolicyTags: []string{"subagent", "cancel"},
 	}
 }
 

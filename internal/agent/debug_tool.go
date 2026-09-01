@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/venat/tool"
 )
 
@@ -77,22 +78,25 @@ func (driver *debugDriver) Definition() tool.Definition {
 				"module_count": {Type: "integer"}, "timeout": {Type: "integer", Description: "Seconds, default 20, range 5-300."},
 			},
 		},
-		EffectType: tool.EffectReadOnly, RiskLevel: "low", PolicyTags: []string{"coding", "debug", "dap"}, Concurrency: tool.ConcurrencyExclusive, ConcurrencyGroup: "debug-session",
+		Concurrency: tool.ConcurrencyExclusive, ConcurrencyGroup: "debug-session",
 	}
 }
 
-func (driver *debugDriver) DefinitionForCall(call tool.Call) tool.Definition {
-	definition := driver.Definition()
+func (driver *debugDriver) PolicyForCall(call tool.Call) agentruntime.ToolPolicy {
+	policy := agentruntime.ToolPolicy{
+		Effect: agentruntime.ToolEffectReadOnly, RiskLevel: "low", PolicyTags: []string{"coding", "debug", "dap"},
+		Concurrency: tool.ConcurrencyExclusive, ConcurrencyGroup: "debug-session",
+	}
 	var input struct {
 		Action string `json:"action"`
 	}
 	if json.Unmarshal(call.Arguments, &input) != nil || !debugReadOnlyActions[strings.ToLower(strings.TrimSpace(input.Action))] {
-		definition.EffectType = tool.EffectExternalSideEffect
-		definition.RequiresActionTask = true
-		definition.RequiresApproval = true
-		definition.RiskLevel = "high"
+		policy.Effect = agentruntime.ToolEffectExternalSideEffect
+		policy.RequiresActionTask = true
+		policy.RequiresApproval = true
+		policy.RiskLevel = "high"
 	}
-	return definition
+	return policy
 }
 
 func (driver *debugDriver) Execute(ctx context.Context, call tool.Call, _ tool.UpdateSink) (tool.Result, error) {

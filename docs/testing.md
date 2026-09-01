@@ -1,8 +1,8 @@
 # Testing
 
-Last verified: 2026-08-25
+Last verified: 2026-08-30
 
-Azem spans a Go runtime, SQLite, Bubble Tea, Wails/React, native GPUI, and a
+Azem spans a Go runtime, SQLite, Bubble Tea, native GPUI, and a
 versioned local IPC boundary. Passing one package is not enough when a change
 crosses those boundaries. Start with the narrowest relevant check, then run the
 complete check for the affected surface.
@@ -10,10 +10,9 @@ complete check for the affected surface.
 ## Required tools
 
 - Go 1.25.8 or later; `go.mod` selects toolchain 1.25.12.
-- Bun 1.3.14 for the frontend lockfile and scripts.
+- Bun 1.3.14 or later for the AST/LSP runtime packages in `runtime-js/`.
 - Rust 1.97.1 for GPUI; `gpui/rust-toolchain.toml` selects the pinned toolchain.
-- macOS or Windows for the Wails desktop entry point; the current packaged
-  smoke procedure is documented for macOS.
+- macOS for the current packaged GPUI smoke procedure.
 - Sentrux 0.5.7 for repository architecture rules.
 - Authenticated provider and GitHub CLI accounts only for explicit live tests.
 
@@ -25,14 +24,8 @@ Complete Go suite using declared modules rather than a local workspace:
 GOWORK=off go test ./...
 ```
 
-Frontend typecheck, unit tests, production build, and desktop Go tests:
-
-```bash
-make test-gui
-```
-
 Native IPC, daemon, Rust formatting, strict Clippy, protocol tests, and GPUI
-state/UI-model tests:
+state/UI-model tests (`make test-gui` is an alias):
 
 ```bash
 make test-gpui
@@ -69,18 +62,31 @@ GOWORK=off go test ./internal/parity
 GOWORK=off go test ./internal/provider/... ./internal/auth/...
 ```
 
-Packaged desktop applications:
+Pinned Venat v0.16.1 contract surface:
+
+```bash
+GOWORK=off go test \
+  github.com/Viking602/venat/agent \
+  github.com/Viking602/venat/message \
+  github.com/Viking602/venat/provider/... \
+  github.com/Viking602/venat/tool/... \
+  github.com/Viking602/venat/skill/... \
+  github.com/Viking602/venat/orchestration \
+  github.com/Viking602/venat/durable/...
+```
+
+Azem runtime integration and race boundary:
+
+```bash
+GOWORK=off go test ./internal/agent ./internal/app ./internal/recovery ./internal/mcp ./internal/hooks ./internal/provider/cursor
+GOWORK=off go test -race ./internal/agent ./internal/app ./internal/recovery ./internal/mcp ./internal/hooks ./internal/provider/cursor
+```
+
+
+Packaged native desktop:
 
 ```bash
 make gui
-make gpui
-```
-
-Windows desktop cross-build (amd64 by default; set `WINDOWS_ARCH=arm64` for
-Windows on Arm):
-
-```bash
-make gui-windows
 ```
 
 ## Verification by change type
@@ -89,22 +95,20 @@ make gui-windows
 |---|---|---|
 | Go package | `go test ./internal/<package>` | `GOWORK=off go test ./...` when runtime or shared behavior changes |
 | Go formatting | `gofmt -w <changed.go>` | `git diff --check` |
-| React component/store/style | Run the matching Vitest file during iteration | `make test-gui` |
-| Desktop Bridge or Wails lifecycle | `go test ./internal/desktop ./internal/desktop/termhost ./cmd/azem-gui` | `make test-gui`, `make gui`, real app launch |
 | GPUI IPC or daemon lifecycle | `GOWORK=off go test ./internal/desktopipc ./internal/daemon` | `make test-gpui`, `make gpui`, renderer detach/reconnect smoke |
 | GPUI renderer/state | Matching `cargo test -p azem-gpui <test>` from `gpui/` | `make test-gpui`, `make gpui`, real native window launch |
-| Workspace file browser | `go test ./internal/desktop -run Workspace` and `cd frontend && bun run test -- WorkspaceFilesPage.test.tsx` | `make test-gui`, `make gui`, real tree/text/image/binary smoke |
-| SQLite migration/adapter | `go test ./internal/store/sqlite` | `GOWORK=off go test ./...` plus real upgrade/reopen evidence |
-| Venat version/contract | Affected agent and adapter packages | `GOWORK=off go mod tidy`, `GOWORK=off go test ./...`, `GOWORK=off make gui` |
-| Provider streaming | Provider parser and driver tests | App runtime, session persistence, frontend reducer/timeline tests |
-| GitHub PR backend | `go test ./internal/githubpr ./internal/desktop ./cmd/azem-gui` | Success and failure paths with authenticated `gh` when mutations change |
+| Workspace file browser | `go test ./internal/desktop -run Workspace` and matching GPUI state tests | `make test-gpui`, `make gpui`, real tree/text/image/binary smoke |
+| SQLite migration/adapter | `GOWORK=off go test ./internal/store/sqlite` | `GOWORK=off go test ./...` plus a real schema-26 copy upgraded/reopened with retained rows and v1 blob verification |
+| Venat version/contract | Pinned upstream command above, then affected Azem packages | `GOWORK=off go mod tidy`, full Go suite, race boundary, contracts/architecture checks, both desktop builds and smoke |
+| Provider streaming | Provider parser/driver plus durable model/tool-attempt tests | App runtime, recovery, session persistence, and GPUI state tests |
+| GitHub PR backend | `go test ./internal/githubpr ./internal/desktop` | Success and failure paths with authenticated `gh` when mutations change |
 | Prompt or bundled Skill | Matching app/agent/config/Skills tests | Real conversation path |
-| Native security scan | `go test ./internal/securityscan ./internal/app ./internal/store/sqlite` and the matching SecurityPage Vitest | `GOWORK=off go test ./...`, `make test-gui`, `make gui`, real Standard scan/start/cancel/finding/export keyboard smoke |
+| Native security scan | `go test ./internal/securityscan ./internal/app ./internal/store/sqlite` and matching GPUI state tests | `GOWORK=off go test ./...`, `make test-gpui`, `make gpui`, real Standard/Deep start-cancel and export smoke |
 | OMP parity manifest | `GOWORK=off go test ./internal/parity` | Every frozen v18.0.3 capability is `complete` or `stronger`; then run all relevant surface checks |
 | Coding tools / extension broker | Matching `internal/agent` and `internal/customtools` cases | Real read/write/Hashline/AST/shell fixtures plus browser/DAP/LSP smoke |
 | Session tree/import/export/share | `go test ./internal/session ./internal/sessionimport ./internal/sessionexport ./internal/sessionshare` | SQLite migration/reopen and collaboration/protocol suites |
 | JSON-RPC / ACP / headless / Go API | `go test . ./internal/rpc ./internal/acp ./internal/headless` | Actual CLI startup or client fixture for the changed transport |
-| Marketplace | `go test ./internal/plugins ./internal/app` plus `ExtensionsSettings.test.tsx` | Desktop/TUI source, discover, scoped install, update, upgrade, disable, and uninstall paths |
+| Marketplace | `go test ./internal/plugins ./internal/app` plus matching GPUI settings tests | Desktop/TUI source, discover, scoped install, update, upgrade, disable, and uninstall paths |
 | Auth broker/gateway/webhook | Matching `internal/authbroker`, `authgateway`, or `githubwebhook` package | Bearer/HMAC failure, redelivery/cache, refresh/block, and successful forwarding/trigger paths |
 | Harbor eval adapter | `PYTHONPATH="$PWD" python3 -m unittest eval.harbor.timeout_test` | `make azem-eval-linux` and a real `harbor run` when the adapter command or timeout wiring changes |
 | Adaptive eval / learning | `GOWORK=off go test ./internal/eval ./internal/workrevision ./internal/evidence ./internal/codingmemory ./internal/assets ./internal/routeeval ./internal/training ./internal/toollab ./internal/adapterdeployment` | Add `./internal/app ./internal/tui` when adapter routing or evidence-status projection changes; production routing must remain unchanged unless a validated registry is explicitly attached |
@@ -122,28 +126,23 @@ Migration work must prove all four compatibility directions:
 Keep `schemaVersion == len(migrations)` and synchronize
 `migrations.go` with `dbgen/schema.sql`. See [Persistence](persistence.md).
 
+For schema 27, also copy a real schema-26 database to an isolated temporary
+Azem home, upgrade it, reopen it, and prove legacy run/tool/approval rows remain
+readable. Exercise a v1 execution whose continuation or manifest spills to
+BlobStore, then verify digest-checked restart hydration, response-loss
+reconciliation, and unknown-attempt non-replay. Never run upgrade experiments
+against the user's live database.
+
+For schema 28, upgrade a schema-27 fixture with visible project rows and a
+stranded running subagent, then reopen it. Verify visibility defaults to 1,
+the stale child becomes interrupted, and hiding/reopening a project leaves its
+files and `session_workspaces` ownership unchanged.
+
+
 ## Desktop smoke test
 
-A desktop behavior or build change is complete only after the packaged binary
-starts. On macOS:
-
-1. Run `make gui`.
-2. Confirm `codesign --verify --deep --strict dist/Azem.app` passes (the build
-   performs this check automatically).
-3. Launch `open dist/Azem.app` or `dist/Azem.app/Contents/MacOS/Azem`.
-4. Confirm the main window renders and the current workspace appears.
-5. Open an existing session or create a new one.
-6. Confirm the composer, model controls, timeline, project navigation, and
-   Workspace file tree/viewer are interactive.
-7. Exercise the changed path and one failure path.
-8. Quit the application and confirm shutdown does not leave the database
-   locked or the process running.
-
-For visual-only changes, also check light/dark appearance, narrow layout,
-keyboard focus, reduced motion where relevant, and readable approval/error
-states.
-
-For the native GPUI client:
+A desktop behavior or build change is complete only after the packaged GPUI
+binary starts. On macOS:
 
 1. Run `make gpui`; the target signs and verifies
    `dist/Azem-GPUI.app`, including its bundled `azem-daemon`.
@@ -160,20 +159,9 @@ For the native GPUI client:
    terminal. `azem daemon stop` must refuse an active run without
    `--include-active`.
 
-On Windows, launch `dist\windows-amd64\Azem.exe` and repeat steps 4–8. Also
-verify one foreground PowerShell command, cancellation of a command that has a
-child process, a background command stop, system-font enumeration, clipboard
-image paste, browser login, and Credential Manager storage. The WebView2
-Runtime is required; Bash hooks require Git Bash, while PowerShell hooks work
-with either PowerShell 7 or the built-in Windows PowerShell.
-
-Compilation-only checks for both supported Windows architectures can run on a
-non-Windows host without executing the generated test binaries:
-
-```bash
-GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go test -exec=/usr/bin/true ./...
-GOOS=windows GOARCH=arm64 CGO_ENABLED=0 go test -exec=/usr/bin/true ./...
-```
+For visual-only changes, also check light/dark appearance, narrow layout,
+keyboard focus, reduced motion where relevant, and readable approval/error
+states.
 
 ## Live provider tests
 

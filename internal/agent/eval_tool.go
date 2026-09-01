@@ -68,8 +68,7 @@ func (driver *evalDriver) Definition() tool.Definition {
 				"reset":    {Type: "boolean", Description: "Reset this language kernel before execution."},
 			},
 		},
-		EffectType: tool.EffectExternalSideEffect, RequiresApproval: true, RequiresActionTask: true, RiskLevel: "high",
-		PolicyTags: []string{"coding", "eval", "execute"}, Concurrency: tool.ConcurrencyExclusive, ConcurrencyGroup: "eval-session",
+		Concurrency: tool.ConcurrencyExclusive, ConcurrencyGroup: "eval-session",
 	}
 }
 
@@ -98,7 +97,7 @@ func (driver *evalDriver) Execute(ctx context.Context, call tool.Call, _ tool.Up
 	if timeout < 0 || timeout > 3600 {
 		return evalError(call, errors.New("timeout must be between 0 and 3600 seconds")), nil
 	}
-	caller, _ := tool.CallerFromContext(ctx)
+	caller, _ := InvocationFromContext(ctx)
 	sessionID := caller.SessionID
 	if sessionID == "" {
 		sessionID = caller.TeamRunID

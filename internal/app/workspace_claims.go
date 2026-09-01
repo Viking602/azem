@@ -6,7 +6,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/Viking602/venat/api"
+	"github.com/Viking602/azem/internal/agentruntime"
 )
 
 const workspaceWriteClaimPrefix = "azem:workspace-write:"
@@ -34,18 +34,18 @@ func canonicalWorkspaceIdentity(root string) (string, error) {
 	return resolved, nil
 }
 
-func workspaceWriteClaim(root string) (api.ResourceClaimSpec, error) {
+func workspaceWriteClaim(root string) (agentruntime.ResourceClaimSpec, error) {
 	identity, err := canonicalWorkspaceIdentity(root)
 	if err != nil {
-		return api.ResourceClaimSpec{}, err
+		return agentruntime.ResourceClaimSpec{}, err
 	}
-	return api.ResourceClaimSpec{
+	return agentruntime.ResourceClaimSpec{
 		Key:  workspaceWriteClaimPrefix + identity,
-		Mode: api.ResourceClaimExclusive,
+		Mode: agentruntime.ResourceClaimExclusive,
 	}, nil
 }
 
-func topLevelWorkspaceWriteClaims(allowWrite bool, shellPolicy, root string) ([]api.ResourceClaimSpec, error) {
+func topLevelWorkspaceWriteClaims(allowWrite bool, shellPolicy, root string) ([]agentruntime.ResourceClaimSpec, error) {
 	// Sessions in the same project run in parallel. An exclusive workspace
 	// claim serialized every main run onto one lock, so a stuck or
 	// reconcile_required session made later conversations appear offline.

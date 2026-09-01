@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/Viking602/venat/api"
+	hyagent "github.com/Viking602/venat/agent"
 	"github.com/Viking602/venat/message"
 
 	"github.com/Viking602/azem/internal/session"
@@ -38,7 +38,7 @@ func TestPersistedTurnControlSurvivesCanonicalHistoryBuild(t *testing.T) {
 	if len(projection.Blocks) != 3 || projection.Blocks[2].State != "follow_up" {
 		t.Fatalf("turn control projection = %#v", projection.Blocks)
 	}
-	messages, err := (turnContext{history: projection.Blocks}).Build(ctx, api.Task{Goal: "resumed request"})
+	messages, err := (turnContext{history: projection.Blocks}).Build(ctx, hyagent.Request{Prompt: "resumed request"})
 	if err != nil {
 		t.Fatal(err)
 	}

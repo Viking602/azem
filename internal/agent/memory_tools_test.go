@@ -9,7 +9,6 @@ import (
 	"github.com/Viking602/azem/internal/memory"
 	"github.com/Viking602/azem/internal/resource"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
-	"github.com/Viking602/venat/coding"
 	"github.com/Viking602/venat/tool"
 )
 
@@ -30,7 +29,7 @@ func TestModelMemoryToolsRetainRecallReadEditAndInvalidate(t *testing.T) {
 	defer service.Close(ctx)
 
 	retain := findWorkspaceTool(t, service, root, ToolRetain)
-	callerCtx := tool.WithCaller(ctx, tool.CallerInfo{SessionID: "session-memory"})
+	callerCtx := WithInvocation(ctx, Invocation{SessionID: "session-memory"})
 	retained, err := retain.Execute(callerCtx, tool.Call{ID: "retain-1", Name: ToolRetain, Arguments: json.RawMessage(`{"items":[{"content":"Prefer narrow behavioral checks","context":"user testing preference"}]}`)}, nil)
 	if err != nil || retained.IsError || retained.Content != "1 memory stored." {
 		t.Fatalf("retain = %#v, %v", retained, err)
@@ -50,9 +49,9 @@ func TestModelMemoryToolsRetainRecallReadEditAndInvalidate(t *testing.T) {
 		t.Fatalf("recall = %#v, %v", recalled, err)
 	}
 
-	read := findWorkspaceTool(t, service, root, coding.ToolReadFile)
+	read := findWorkspaceTool(t, service, root, ToolReadFile)
 	readArgs, _ := json.Marshal(map[string]any{"path": "memory://" + id})
-	full, err := read.Execute(ctx, tool.Call{ID: "read-memory", Name: coding.ToolReadFile, Arguments: readArgs}, nil)
+	full, err := read.Execute(ctx, tool.Call{ID: "read-memory", Name: ToolReadFile, Arguments: readArgs}, nil)
 	if err != nil || full.IsError || !strings.Contains(full.Content, "Prefer narrow behavioral checks") || !strings.Contains(full.Content, "Memory: "+id) {
 		t.Fatalf("memory resource read = %#v, %v", full, err)
 	}

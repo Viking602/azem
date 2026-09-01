@@ -7,6 +7,10 @@ pub struct Assets {
 }
 
 impl Assets {
+    pub fn locale_directory(&self) -> PathBuf {
+        self.base.join("locales")
+    }
+
     pub fn discover() -> Self {
         let executable_dir = std::env::current_exe()
             .ok()

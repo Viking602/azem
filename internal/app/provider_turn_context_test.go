@@ -12,7 +12,6 @@ import (
 	"time"
 
 	hyagent "github.com/Viking602/venat/agent"
-	"github.com/Viking602/venat/api"
 	"github.com/Viking602/venat/message"
 	hyprovider "github.com/Viking602/venat/provider"
 
@@ -51,7 +50,7 @@ func TestTurnContextBuildFallsBackWhenInstructionFingerprintDiffers(t *testing.T
 		checkpointBoundary:        &boundary,
 		reportCachePrefixDegraded: func(reason string) { degradedReason = reason },
 	}
-	messages, err := manager.Build(context.Background(), api.Task{Goal: "current goal"})
+	messages, err := manager.Build(context.Background(), hyagent.Request{Prompt: "current goal"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +80,7 @@ func TestTurnContextBuildsPriorConversationBeforeCurrentRequest(t *testing.T) {
 			{Kind: "assistant", Content: "first answer"},
 		},
 	}
-	messages, err := contextManager.Build(context.Background(), api.Task{Goal: "follow-up request"})
+	messages, err := contextManager.Build(context.Background(), hyagent.Request{Prompt: "follow-up request"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,25 +124,25 @@ func TestLiveTurnControlDistinguishesSteerAndFollowUpFIFO(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	steers, err := control.Drain(context.Background(), hyagent.TurnBoundaryBeforeModel)
+	steers, err := control.Drain(context.Background(), turnControlBeforeModel)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(steers) != 2 || steers[0].Kind != hyagent.ControlSteer || steers[0].Message.Text != "first correction" || steers[1].Message.Text != "second correction" {
+	if len(steers) != 2 || steers[0].Kind != turnControlSteer || steers[0].Message.Text != "first correction" || steers[1].Message.Text != "second correction" {
 		t.Fatalf("steer controls = %#v", steers)
 	}
 	if err := control.Acknowledge(context.Background(), []string{steers[0].ID, steers[1].ID}); err != nil {
 		t.Fatal(err)
 	}
-	beforeAnswer, err := control.Drain(context.Background(), hyagent.TurnBoundaryAfterTools)
+	beforeAnswer, err := control.Drain(context.Background(), turnControlBeforeModel)
 	if err != nil || len(beforeAnswer) != 0 {
 		t.Fatalf("follow-up drained before answer = %#v, %v", beforeAnswer, err)
 	}
-	followUps, err := control.Drain(context.Background(), hyagent.TurnBoundaryAfterAnswer)
+	followUps, err := control.Drain(context.Background(), turnControlAfterAnswer)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(followUps) != 2 || followUps[0].Kind != hyagent.ControlFollowUp || followUps[0].Message.Text != "first follow-up" || followUps[1].Message.Text != "second follow-up" {
+	if len(followUps) != 2 || followUps[0].Kind != turnControlFollowUp || followUps[0].Message.Text != "first follow-up" || followUps[1].Message.Text != "second follow-up" {
 		t.Fatalf("follow-up controls = %#v", followUps)
 	}
 	projection, err := sessions.LoadProjection(context.Background(), "session-guided")
@@ -182,7 +181,7 @@ func TestLiveTurnControlKeepsImageAttachments(t *testing.T) {
 	if err := service.FollowUpActiveTurnWithAttachments("session-guided", "run-guided", "inspect this update", []session.Attachment{image}); err != nil {
 		t.Fatal(err)
 	}
-	pending, err := control.Drain(context.Background(), hyagent.TurnBoundaryAfterAnswer)
+	pending, err := control.Drain(context.Background(), turnControlAfterAnswer)
 	if err != nil || len(pending) != 1 || pending[0].Message.Text != "inspect this update" {
 		t.Fatalf("follow-up controls = %#v, %v", pending, err)
 	}
@@ -197,18 +196,18 @@ func TestTurnContextInjectsRuntimeDeadlineAsPrivateContext(t *testing.T) {
 	ctx, cancel := context.WithDeadline(context.Background(), deadline)
 	defer cancel()
 	contextManager := turnContext{instructions: "system rules"}
-	messages, err := contextManager.Build(ctx, api.Task{Goal: "current request"})
+	messages, err := contextManager.Build(ctx, hyagent.Request{Prompt: "current request"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(messages) != 3 || messages[1].Role != message.RoleSystem || messages[1].Visibility != message.VisibilityPrivate ||
+	if len(messages) != 3 || messages[1].Role != message.RoleSystem || !isPrivateMessage(messages[1]) ||
 		!strings.Contains(messages[1].Text, "[Trusted runtime deadline]") ||
 		!strings.Contains(messages[1].Text, "Hard stop in") ||
 		!strings.Contains(messages[1].Text, "verifiable subset") ||
 		messages[2].Text != "current request" {
 		t.Fatalf("deadline context = %+v", messages)
 	}
-	unbounded, err := (turnContext{instructions: "system rules"}).Build(context.Background(), api.Task{Goal: "current request"})
+	unbounded, err := (turnContext{instructions: "system rules"}).Build(context.Background(), hyagent.Request{Prompt: "current request"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,13 +225,13 @@ func TestTurnContextInjectsHistoricalEvidenceAsPrivateSystemContext(t *testing.T
 		historicalContext: `{"memories":[{"Content":"use sqlite"}]}`,
 		history:           []session.Block{{Kind: "assistant", Content: "prior answer"}},
 	}
-	messages, err := contextManager.Build(context.Background(), api.Task{Goal: "current request"})
+	messages, err := contextManager.Build(context.Background(), hyagent.Request{Prompt: "current request"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(messages) != 6 || messages[3].Role != message.RoleSystem || messages[3].Visibility != message.VisibilityPrivate ||
+	if len(messages) != 6 || messages[3].Role != message.RoleSystem || !isPrivateMessage(messages[3]) ||
 		!strings.Contains(messages[3].Text, "untrusted JSON data") || messages[4].Role != message.RoleUser ||
-		messages[4].Visibility != message.VisibilityPrivate || !strings.Contains(messages[4].Text, `"Content":"use sqlite"`) ||
+		!isPrivateMessage(messages[4]) || !strings.Contains(messages[4].Text, `"Content":"use sqlite"`) ||
 		messages[5].Text != "current request" {
 		t.Fatalf("historical context ordering/visibility = %+v", messages)
 	}
@@ -244,7 +243,7 @@ func TestTeamHistoricalEvidenceIsPlannerOnlyAndNotSystemData(t *testing.T) {
 		if className == agentservice.PlannerClass {
 			contextManager.historical = `{"memories":[{"Content":"planner evidence"}]}`
 		}
-		messages, err := contextManager.Build(context.Background(), api.Task{Goal: "current task"})
+		messages, err := contextManager.Build(context.Background(), hyagent.Request{Prompt: "current task"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -252,7 +251,7 @@ func TestTeamHistoricalEvidenceIsPlannerOnlyAndNotSystemData(t *testing.T) {
 		for _, current := range messages {
 			if strings.Contains(current.Text, "planner evidence") {
 				found = true
-				if current.Role == message.RoleSystem || current.Visibility != message.VisibilityPrivate {
+				if current.Role == message.RoleSystem || !isPrivateMessage(current) {
 					t.Fatalf("%s historical data authority/visibility = %+v", className, current)
 				}
 			}
@@ -361,6 +360,7 @@ func TestTurnContextRefreshesTodoReminderAfterMutation(t *testing.T) {
 		}}},
 	}
 	manager := turnContext{
+		runID:    "run-todo-refresh",
 		loadTodo: func(context.Context) (session.TodoList, error) { return latest, nil },
 	}
 	history := []message.Message{
@@ -379,8 +379,11 @@ func TestTurnContextRefreshesTodoReminderAfterMutation(t *testing.T) {
 	if !strings.Contains(latestReminder, "revision=2") || !strings.Contains(latestReminder, "item-2:in_progress:verify") {
 		t.Fatalf("latest todo reminder: %q", latestReminder)
 	}
-	if refreshed[len(refreshed)-1].Role != message.RoleSystem || refreshed[len(refreshed)-1].Visibility != message.VisibilityPrivate {
+	if refreshed[len(refreshed)-1].Role != message.RoleSystem || !isPrivateMessage(refreshed[len(refreshed)-1]) {
 		t.Fatalf("todo update must remain in the private input tail: %+v", refreshed[len(refreshed)-1])
+	}
+	if got := refreshed[len(refreshed)-1].Metadata[todoReminderRunMetadataKey]; got != manager.runID {
+		t.Fatalf("todo update run identity = %q, want %q", got, manager.runID)
 	}
 	repeated, err := manager.CompactTo(context.Background(), refreshed, 0)
 	if err != nil || !reflect.DeepEqual(repeated, refreshed) {
@@ -429,7 +432,7 @@ func TestRecentUserSelectionIgnoresAgentBlocks(t *testing.T) {
 		}
 	}
 	privateEvidence := message.NewText(message.RoleUser, "<historical-evidence-json>")
-	privateEvidence.Visibility = message.VisibilityPrivate
+	markPrivateMessage(&privateEvidence)
 	messages = append(messages, privateEvidence)
 	if indexes := recentUserIndexes(messages, 0, 3); !reflect.DeepEqual(indexes, []int{0, 2}) {
 		t.Fatalf("recent user indexes = %v", indexes)
@@ -467,7 +470,7 @@ func TestTurnContextBuildReplaysCompatibleHistoryAndAppendsDynamicTail(t *testin
 		historicalContext:  `{"memories":["current evidence"]}`,
 		todo:               session.TodoList{Goal: "current todo", Revision: 3},
 	}
-	got, err := manager.Build(context.Background(), api.Task{Goal: "new request"})
+	got, err := manager.Build(context.Background(), hyagent.Request{Prompt: "new request"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -475,21 +478,21 @@ func TestTurnContextBuildReplaysCompatibleHistoryAndAppendsDynamicTail(t *testin
 		t.Fatalf("saved prefix changed:\n got=%#v\nwant=%#v", got, saved)
 	}
 	tail := got[len(saved):]
-	if tail[0].Role != message.RoleSystem || tail[0].Visibility != message.VisibilityPrivate ||
+	if tail[0].Role != message.RoleSystem || !isPrivateMessage(tail[0]) ||
 		!strings.Contains(tail[0].Text, "current trusted hook") {
 		t.Fatalf("private hook tail = %#v", tail[0])
 	}
-	if tail[1].Role != message.RoleSystem || tail[1].Visibility != message.VisibilityPrivate ||
+	if tail[1].Role != message.RoleSystem || !isPrivateMessage(tail[1]) ||
 		!strings.HasPrefix(tail[1].Text, todoReminderPrefix) {
 		t.Fatalf("todo tail = %#v", tail[1])
 	}
-	if tail[2].Text != historicalEvidencePolicy || tail[2].Visibility != message.VisibilityPrivate {
+	if tail[2].Text != historicalEvidencePolicy || !isPrivateMessage(tail[2]) {
 		t.Fatalf("historical policy tail = %#v", tail[2])
 	}
 	if tail[3].Role != message.RoleUser || tail[3].Text != "current hook user" {
 		t.Fatalf("hook user tail = %#v", tail[3])
 	}
-	if tail[4].Role != message.RoleUser || tail[4].Visibility != message.VisibilityPrivate ||
+	if tail[4].Role != message.RoleUser || !isPrivateMessage(tail[4]) ||
 		!strings.Contains(tail[4].Text, "current evidence") {
 		t.Fatalf("historical data tail = %#v", tail[4])
 	}
@@ -520,7 +523,7 @@ func TestTurnContextResumeDoesNotDuplicateCheckpointedUser(t *testing.T) {
 			{Sequence: 2, Kind: "user", RunID: "run-resume", Content: "late guidance", State: "guidance"},
 		},
 	}
-	got, err := manager.Build(context.Background(), api.Task{Goal: "original request"})
+	got, err := manager.Build(context.Background(), hyagent.Request{Prompt: "original request"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -551,7 +554,7 @@ func TestTurnContextBuildFallsBackWhenModelHistoryScopeDiffers(t *testing.T) {
 			{Kind: "assistant", Content: "visible answer"},
 		},
 	}
-	got, err := manager.Build(context.Background(), api.Task{Goal: "switched request"})
+	got, err := manager.Build(context.Background(), hyagent.Request{Prompt: "switched request"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -611,6 +614,7 @@ func TestMainTurnsKeepSerializedPrefixStableAndAppendRawOutputAndNewTail(t *test
 		PromptCacheKey string            `json:"prompt_cache_key"`
 		Instructions   string            `json:"instructions"`
 		Input          []json.RawMessage `json:"input"`
+		Tools          []json.RawMessage `json:"tools"`
 	}
 	var captured []capturedRequest
 	harness := newSkillRuntimeHarness(t, "---\nname: demo\ndescription: stable catalog\n---\nstable body\n", nil, func(call int, body string, writer http.ResponseWriter) {
@@ -667,7 +671,8 @@ func TestMainTurnsKeepSerializedPrefixStableAndAppendRawOutputAndNewTail(t *test
 	waitForProviderRun(t, harness.service, secondRun)
 
 	if len(captured) != 2 || captured[0].PromptCacheKey != "cache-session" ||
-		captured[1].PromptCacheKey != "cache-session" || captured[0].Instructions != captured[1].Instructions {
+		captured[1].PromptCacheKey != "cache-session" || captured[0].Instructions != captured[1].Instructions ||
+		!reflect.DeepEqual(captured[0].Tools, captured[1].Tools) {
 		t.Fatalf("captured cache requests = %#v", captured)
 	}
 	if !strings.HasPrefix(captured[0].Instructions, mainInstructions) {

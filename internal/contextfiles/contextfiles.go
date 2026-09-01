@@ -129,7 +129,7 @@ func Discover(ctx context.Context, options Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	pointers := discoverNestedPointers(workspace, selected)
+	pointers := discoverNestedPointers(ctx, workspace, selected)
 	return Result{Files: selected, DirPointers: pointers, Warnings: warnings}, nil
 }
 
@@ -348,35 +348,25 @@ func samePath(left, right string) bool {
 	return filepath.Clean(left) == filepath.Clean(right)
 }
 
-func discoverNestedPointers(workspace string, selected []File) []string {
+func discoverNestedPointers(ctx context.Context, workspace string, selected []File) []string {
 	selectedPaths := make(map[string]bool, len(selected))
 	for _, file := range selected {
 		selectedPaths[file.Path] = true
 	}
-	var paths []string
-	visited := 0
-	_ = filepath.WalkDir(workspace, func(path string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return nil
+	output, err := exec.CommandContext(ctx, "git", "-C", workspace, "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ":(glob)**/AGENTS.md").Output()
+	if err != nil {
+		return nil
+	}
+	paths := make([]string, 0, bytes.Count(output, []byte{0}))
+	for _, relative := range bytes.Split(output, []byte{0}) {
+		if len(relative) == 0 {
+			continue
 		}
-		if entry.IsDir() {
-			visited++
-			if visited > 10_000 {
-				return filepath.SkipAll
-			}
-			if path != workspace {
-				switch entry.Name() {
-				case ".git", "node_modules", "vendor", "dist", "build", ".next":
-					return filepath.SkipDir
-				}
-			}
-			return nil
-		}
-		if entry.Name() == "AGENTS.md" && filepath.Dir(path) != workspace && !selectedPaths[path] && len(paths) < 256 {
+		path := filepath.Clean(filepath.Join(workspace, string(relative)))
+		if filepath.Dir(path) != workspace && within(path, workspace) && !selectedPaths[path] {
 			paths = append(paths, path)
 		}
-		return nil
-	})
+	}
 	sort.Strings(paths)
 	return paths
 }

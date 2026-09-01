@@ -2,16 +2,17 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
 	"time"
 
 	agentservice "github.com/Viking602/azem/internal/agent"
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/azem/internal/session"
 	"github.com/Viking602/azem/internal/toolview"
-	"github.com/Viking602/venat/api"
-	"github.com/Viking602/venat/stream"
+	hyagent "github.com/Viking602/venat/agent"
 	"github.com/Viking602/venat/tool"
 )
 
@@ -218,7 +219,7 @@ func (r *subagentRuntime) Detail(ctx context.Context, sessionID, id string) ([]A
 	r.mu.Unlock()
 	snapshot := r.snapshot(id, sessionID)
 	if !snapshot.Found {
-		return nil, api.ErrNotFound
+		return nil, agentruntime.ErrNotFound
 	}
 	return transcriptToAgentBlocks(snapshot.Run.Transcript)
 }
@@ -251,10 +252,24 @@ func (r *subagentRuntime) Cancel(sessionID, id string) agentservice.SubagentCanc
 	cancel := active.cancel
 	queued := !active.slot
 	r.mu.Unlock()
-	// Persist outside the runtime lock: r.mu serializes frame handling and
-	// scheduling for every subagent, so a slow store write here would stall
-	// the whole roster, and the idle watchdog can trigger many cancels.
-	if err := r.store.Save(r.ctx, cancelling); err != nil {
+	// Serialize only this child's durable state. A startup/heartbeat save that
+	// began before cancellation may finish first, but cancellation must be the
+	// last non-terminal write. Never use r.ctx here: shutdown may already have
+	// cancelled the runtime while durable cancellation still has to converge.
+	active.persistMu.Lock()
+	r.mu.Lock()
+	current := r.active[id]
+	superseded := current != active || current.terminalizing || current.terminalized
+	r.mu.Unlock()
+	if superseded {
+		active.persistMu.Unlock()
+		return agentservice.SubagentCancelOutcome{Outcome: "cancel_requested", Snapshot: r.snapshot(id, sessionID)}
+	}
+	saveCtx, saveCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	err := r.store.Save(saveCtx, cancelling)
+	saveCancel()
+	active.persistMu.Unlock()
+	if err != nil {
 		r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: fmt.Errorf("persist cancelling subagent: %w", err)})
 		return agentservice.SubagentCancelOutcome{Outcome: "cancel_requested", Snapshot: r.snapshot(id, sessionID)}
 	}
@@ -498,6 +513,20 @@ func (r *subagentRuntime) CancelByParentRun(sessionID, parentRunID string, cance
 	}
 }
 
+func (r *subagentRuntime) CancelByParentRunAcrossSessions(parentRunID string, cancelBackground bool) {
+	r.mu.Lock()
+	sessions := make(map[string]struct{})
+	for _, active := range r.active {
+		if active.run.ParentRunID == parentRunID {
+			sessions[active.run.SessionID] = struct{}{}
+		}
+	}
+	r.mu.Unlock()
+	for sessionID := range sessions {
+		r.CancelByParentRun(sessionID, parentRunID, cancelBackground)
+	}
+}
+
 func (r *subagentRuntime) Shutdown(ctx context.Context) error {
 	r.mu.Lock()
 	ids := make([]struct{ sessionID, id string }, 0, len(r.active))
@@ -522,7 +551,7 @@ func (r *subagentRuntime) Shutdown(ctx context.Context) error {
 	}
 }
 
-func (r *subagentRuntime) handleFrame(id string, frame stream.Frame) {
+func (r *subagentRuntime) handleFrame(id string, frame hyagent.Frame) {
 	r.mu.Lock()
 	active := r.active[id]
 	if active == nil || active.terminalizing {
@@ -535,21 +564,21 @@ func (r *subagentRuntime) handleFrame(id string, frame stream.Frame) {
 	parentToolCallID := active.run.ParentToolCallID
 	providerID, modelID, reasoning := active.profile.Provider, active.profile.Model, active.profile.Reasoning
 	switch frame.Kind {
-	case stream.FrameThinking:
+	case hyagent.FrameThinking:
 		if !noteVisibleContentLocked(active, frame.Thinking) {
 			r.mu.Unlock()
 			return
 		}
 		// Title is a stable kind key; the GUI localizes "thinking" → 思考 / Thinking.
 		appendAgentDelta(&active.blocks, "thinking", childRunID, "thinking", frame.Thinking)
-	case stream.FrameText:
+	case hyagent.FrameText:
 		if !noteVisibleContentLocked(active, frame.Text) {
 			r.mu.Unlock()
 			return
 		}
 		kind := subagentTextKind(frame.TextPhase, false)
 		appendAgentDelta(&active.blocks, kind, childRunID, kind, frame.Text)
-	case stream.FrameToolCall:
+	case hyagent.FrameToolCall:
 		if frame.ToolCall != nil {
 			settleSubagentProcessText(active.blocks, childRunID)
 			active.ToolStarted = true
@@ -561,12 +590,27 @@ func (r *subagentRuntime) handleFrame(id string, frame stream.Frame) {
 				Title: frame.ToolCall.Name, Content: string(frame.ToolCall.Arguments), State: "running",
 			})
 		}
-	case stream.FrameToolResult:
+	case hyagent.FrameToolCallDelta:
+		if frame.ToolCallDelta != nil {
+			noteVisibleActivityLocked(active, firstNonempty(frame.ToolCallDelta.Name, "tool arguments"))
+		}
+	case hyagent.FrameToolUpdate:
+		if frame.ToolUpdate != nil {
+			update := frame.ToolUpdate
+			noteVisibleActivityLocked(active, firstNonempty(update.Message, string(update.Kind)))
+			for index := len(active.blocks) - 1; index >= 0; index-- {
+				if active.blocks[index].Kind == "tool" && active.blocks[index].State == "running" {
+					appendAgentBlockContent(&active.blocks[index], update.Message)
+					break
+				}
+			}
+		}
+	case hyagent.FrameToolResult:
 		if frame.ToolResult != nil {
 			noteVisibleActivityLocked(active, firstNonempty(frame.ToolResult.Name, "tool"))
 			finishAgentToolBlock(active.blocks, frame.ToolResult.ToolCallID, frame.ToolResult.Content, frame.ToolResult.IsError)
 		}
-	case stream.FrameDone:
+	case hyagent.FrameDone:
 		noteVisibleActivityLocked(active, active.activity)
 		active.run.Turns++
 		active.usage.InputTokens += frame.Usage.InputTokens
@@ -580,9 +624,9 @@ func (r *subagentRuntime) handleFrame(id string, frame stream.Frame) {
 	// commentary also emit a throttled agent_state so the card preview survives
 	// coalesced or dropped child deltas (UI-002). Elapsed ticks must not reset
 	// the idle clock (SUBAGENT-005).
-	if frame.Kind == stream.FrameToolCall || frame.Kind == stream.FrameToolResult || frame.Kind == stream.FrameDone ||
-		frame.Kind == stream.FrameThinking || frame.Kind == stream.FrameText {
-		r.emitLiveState(id, frame.Kind == stream.FrameToolCall || frame.Kind == stream.FrameDone)
+	if frame.Kind == hyagent.FrameToolCall || frame.Kind == hyagent.FrameToolResult || frame.Kind == hyagent.FrameToolUpdate || frame.Kind == hyagent.FrameDone ||
+		frame.Kind == hyagent.FrameThinking || frame.Kind == hyagent.FrameText {
+		r.emitLiveState(id, frame.Kind == hyagent.FrameToolCall || frame.Kind == hyagent.FrameDone)
 	}
 
 	event := Event{
@@ -590,14 +634,14 @@ func (r *subagentRuntime) handleFrame(id string, frame stream.Frame) {
 		Data: childFrameData(frame.Source, parentToolCallID, nil),
 	}
 	switch frame.Kind {
-	case stream.FrameThinking:
+	case hyagent.FrameThinking:
 		event.Kind = EventThinkingDelta
 		event.Text = frame.Thinking
-	case stream.FrameText:
+	case hyagent.FrameText:
 		event.Kind = EventTextDelta
 		event.Text = frame.Text
 		event.TextPhase = string(frame.TextPhase)
-	case stream.FrameToolCall:
+	case hyagent.FrameToolCall:
 		if frame.ToolCall == nil {
 			return
 		}
@@ -606,7 +650,55 @@ func (r *subagentRuntime) handleFrame(id string, frame stream.Frame) {
 		event.Data = childFrameData(frame.Source, parentToolCallID, map[string]string{
 			"name": frame.ToolCall.Name, "arguments": string(frame.ToolCall.Arguments),
 		})
-	case stream.FrameToolResult:
+	case hyagent.FrameToolCallDelta:
+		if frame.ToolCallDelta == nil {
+			return
+		}
+		event.Kind = EventToolUpdate
+		event.ToolCallID = frame.ToolCallDelta.ID
+		event.State = "arguments"
+		event.Text = frame.ToolCallDelta.ArgumentsDelta
+		values := map[string]string{
+			"name": frame.ToolCallDelta.Name, "argumentsDelta": frame.ToolCallDelta.ArgumentsDelta,
+		}
+		if frame.ToolCallDelta.Index != nil {
+			values["index"] = fmt.Sprint(*frame.ToolCallDelta.Index)
+		}
+		event.Data = childFrameData(frame.Source, parentToolCallID, values)
+	case hyagent.FrameToolUpdate:
+		if frame.ToolUpdate == nil {
+			return
+		}
+		update := frame.ToolUpdate
+		event.Kind = EventToolUpdate
+		event.ToolCallID = update.ToolCallID
+		event.State = string(update.Kind)
+		if update.Kind == tool.UpdateProgress && update.Message == "running" {
+			event.State = "running"
+		}
+		event.Text = update.Message
+		values := make(map[string]string, len(update.Data)+3)
+		for key, value := range update.Data {
+			values[key] = value
+		}
+		if update.OperationID != "" {
+			values["operationId"] = update.OperationID
+		}
+		if update.Sequence != 0 {
+			values["sequence"] = fmt.Sprint(update.Sequence)
+		}
+		if len(update.Parts) > 0 {
+			parts, err := json.Marshal(update.Parts)
+			if err != nil {
+				return
+			}
+			values["parts"] = boundedUTF8(string(parts), maxToolRecordPreviewBytes)
+			if len(values["parts"]) != len(parts) {
+				values["projection_truncated"] = "true"
+			}
+		}
+		event.Data = childFrameData(frame.Source, parentToolCallID, values)
+	case hyagent.FrameToolResult:
 		if frame.ToolResult == nil {
 			return
 		}
@@ -625,7 +717,7 @@ func (r *subagentRuntime) handleFrame(id string, frame stream.Frame) {
 				event.Data["fileChange"] = toolview.EncodeSummary(summary)
 			}
 		}
-	case stream.FrameDone:
+	case hyagent.FrameDone:
 		event.Kind = EventContextUsage
 		event.RunID = parentRunID
 		event.AgentID = ""
@@ -683,7 +775,7 @@ func (r *subagentRuntime) handleToolUpdate(id string, update tool.Update) {
 	r.mu.Lock()
 	active := r.active[id]
 	if active != nil && !active.terminalizing {
-		noteVisibleActivityLocked(active, firstNonempty(update.Message, update.Kind))
+		noteVisibleActivityLocked(active, firstNonempty(update.Message, string(update.Kind)))
 		for index := len(active.blocks) - 1; index >= 0; index-- {
 			if active.blocks[index].Kind == "tool" && active.blocks[index].State == "running" {
 				appendAgentBlockContent(&active.blocks[index], update.Message)

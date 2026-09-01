@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/venat/message"
 	"github.com/Viking602/venat/tool"
 )
@@ -81,24 +82,27 @@ func (driver *githubDriver) Definition() tool.Definition {
 				"limit": {Type: "integer"}, "run": {Type: "string"}, "tail": {Type: "integer"},
 			},
 		},
-		EffectType: tool.EffectReadOnly, RiskLevel: "low", PolicyTags: []string{"github", "network"}, Concurrency: tool.ConcurrencyParallel,
+		Concurrency: tool.ConcurrencyParallel,
 	}
 }
 
-func (driver *githubDriver) DefinitionForCall(call tool.Call) tool.Definition {
-	definition := driver.Definition()
+func (driver *githubDriver) PolicyForCall(call tool.Call) agentruntime.ToolPolicy {
+	policy := agentruntime.ToolPolicy{
+		Effect: agentruntime.ToolEffectReadOnly, RiskLevel: "low", PolicyTags: []string{"github", "network"},
+		Concurrency: tool.ConcurrencyParallel,
+	}
 	var input struct {
 		Operation string `json:"op"`
 	}
 	if json.Unmarshal(call.Arguments, &input) != nil || !githubReadOnlyOps[strings.ToLower(strings.TrimSpace(input.Operation))] {
-		definition.EffectType = tool.EffectExternalSideEffect
-		definition.RequiresApproval = true
-		definition.RequiresActionTask = true
-		definition.RiskLevel = "high"
-		definition.Concurrency = tool.ConcurrencyExclusive
-		definition.ConcurrencyGroup = "github-mutation"
+		policy.Effect = agentruntime.ToolEffectExternalSideEffect
+		policy.RequiresApproval = true
+		policy.RequiresActionTask = true
+		policy.RiskLevel = "high"
+		policy.Concurrency = tool.ConcurrencyExclusive
+		policy.ConcurrencyGroup = "github-mutation"
 	}
-	return definition
+	return policy
 }
 
 func (driver *githubDriver) Execute(ctx context.Context, call tool.Call, _ tool.UpdateSink) (tool.Result, error) {
@@ -124,7 +128,7 @@ func (driver *githubDriver) Execute(ctx context.Context, call tool.Call, _ tool.
 	if err := validateGitHubParams(op, params); err != nil {
 		return githubError(call, err), nil
 	}
-	caller, _ := tool.CallerFromContext(ctx)
+	caller, _ := InvocationFromContext(ctx)
 	sessionID := caller.SessionID
 	if sessionID == "" {
 		sessionID = caller.TeamRunID

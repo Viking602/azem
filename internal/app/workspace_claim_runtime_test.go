@@ -6,8 +6,8 @@ import (
 	"time"
 
 	agentservice "github.com/Viking602/azem/internal/agent"
+	"github.com/Viking602/azem/internal/agentruntime"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
-	"github.com/Viking602/venat/api"
 )
 
 func TestSharedChildDoesNotWaitForParentWorkspaceClaim(t *testing.T) {
@@ -28,15 +28,15 @@ func TestSharedChildDoesNotWaitForParentWorkspaceClaim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	parentRun, err := coding.StartRunWithMetadata(ctx, "parent", nil, agentservice.RunExecutionPolicy{ResourceClaims: []api.ResourceClaimSpec{claim}})
+	parentRun, err := coding.StartRunWithMetadata(ctx, "parent", nil, agentservice.RunExecutionPolicy{ResourceClaims: []agentruntime.ResourceClaimSpec{claim}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	durableParent, err := coding.Runner().Run(ctx, parentRun.RunID)
+	durableParent, err := coding.LoadRun(ctx, parentRun.RunID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	parentTasks, err := coding.Runner().ListTasks(ctx, parentRun.RunID)
+	parentTasks, err := coding.ListTasks(ctx, parentRun.RunID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,18 +69,18 @@ func TestSharedChildDoesNotWaitForParentWorkspaceClaim(t *testing.T) {
 	if len(childClaims) != 0 {
 		t.Fatalf("child claims=%#v, want none so sessions can run in parallel", childClaims)
 	}
-	childRun, err := coding.StartRunWithMetadata(ctx, "recovered child", nil, agentservice.RunExecutionPolicy{ResourceClaims: []api.ResourceClaimSpec{claim}})
+	childRun, err := coding.StartRunWithMetadata(ctx, "recovered child", nil, agentservice.RunExecutionPolicy{ResourceClaims: []agentruntime.ResourceClaimSpec{claim}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := clearRecoveredSharedWorkspaceClaim(ctx, parent, childRun.RunID, claim.Key); err != nil {
 		t.Fatal(err)
 	}
-	childDurable, err := coding.Runner().Run(ctx, childRun.RunID)
+	childDurable, err := coding.LoadRun(ctx, childRun.RunID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	childTasks, err := coding.Runner().ListTasks(ctx, childRun.RunID)
+	childTasks, err := coding.ListTasks(ctx, childRun.RunID)
 	if err != nil {
 		t.Fatal(err)
 	}

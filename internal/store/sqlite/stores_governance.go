@@ -6,25 +6,23 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/azem/internal/store/sqlite/dbgen"
-	"github.com/Viking602/venat/api"
-	"github.com/google/uuid"
 )
 
-func (u *unitOfWork) LoadTraceSpan(ctx context.Context, id string) (api.TraceSpan, error) {
-	return loadRecord[api.TraceSpan](ctx, u, kindTrace, id, "")
+func (u *unitOfWork) LoadTraceSpan(ctx context.Context, id string) (agentruntime.TraceSpan, error) {
+	return loadRecord[agentruntime.TraceSpan](ctx, u, kindTrace, id, "")
 }
 
-func (u *unitOfWork) UpdateTraceSpan(ctx context.Context, value api.TraceSpan) error {
+func (u *unitOfWork) UpdateTraceSpan(ctx context.Context, value agentruntime.TraceSpan) error {
 	return u.SaveTraceSpan(ctx, value)
 }
 
-func (u *unitOfWork) SaveLease(ctx context.Context, value api.TaskExecutionLease) error {
+func (u *unitOfWork) SaveLease(ctx context.Context, value agentruntime.TaskExecutionLease) error {
 	syncLeaseExpiry(&value)
 	queries := dbgen.New(u.tx)
 	current, err := queries.MaxLeaseVersion(ctx, dbgen.MaxLeaseVersionParams{RunID: value.RunID, TaskID: value.TaskID})
@@ -53,12 +51,12 @@ func (u *unitOfWork) SaveLease(ctx context.Context, value api.TaskExecutionLease
 	return nil
 }
 
-func (u *unitOfWork) LoadLease(ctx context.Context, id string) (api.TaskExecutionLease, error) {
-	var value api.TaskExecutionLease
+func (u *unitOfWork) LoadLease(ctx context.Context, id string) (agentruntime.TaskExecutionLease, error) {
+	var value agentruntime.TaskExecutionLease
 	data, err := dbgen.New(u.tx).GetLeaseData(ctx, id)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return value, api.ErrNotFound
+			return value, agentruntime.ErrNotFound
 		}
 		return value, fmt.Errorf("load lease: %w", err)
 	}
@@ -68,8 +66,8 @@ func (u *unitOfWork) LoadLease(ctx context.Context, id string) (api.TaskExecutio
 	return value, nil
 }
 
-func (u *unitOfWork) ActiveLeaseForTask(ctx context.Context, runID string, taskID string) (api.TaskExecutionLease, bool, error) {
-	var value api.TaskExecutionLease
+func (u *unitOfWork) ActiveLeaseForTask(ctx context.Context, runID string, taskID string) (agentruntime.TaskExecutionLease, bool, error) {
+	var value agentruntime.TaskExecutionLease
 	data, err := dbgen.New(u.tx).GetLatestLeaseData(ctx, dbgen.GetLatestLeaseDataParams{RunID: runID, TaskID: taskID})
 	if errors.Is(err, sql.ErrNoRows) {
 		return value, false, nil
@@ -83,7 +81,7 @@ func (u *unitOfWork) ActiveLeaseForTask(ctx context.Context, runID string, taskI
 	return value, true, nil
 }
 
-func (u *unitOfWork) AcquireWithExpectedVersion(ctx context.Context, value api.TaskExecutionLease, expected uint64) (bool, error) {
+func (u *unitOfWork) AcquireWithExpectedVersion(ctx context.Context, value agentruntime.TaskExecutionLease, expected uint64) (bool, error) {
 	queries := dbgen.New(u.tx)
 	row, err := queries.GetLatestLease(ctx, dbgen.GetLatestLeaseParams{RunID: value.RunID, TaskID: value.TaskID})
 	var currentVersion uint64
@@ -103,15 +101,15 @@ func (u *unitOfWork) AcquireWithExpectedVersion(ctx context.Context, value api.T
 		return false, nil
 	}
 	if len(data) > 0 {
-		var previous api.TaskExecutionLease
+		var previous agentruntime.TaskExecutionLease
 		if err := json.Unmarshal(data, &previous); err != nil {
 			return false, fmt.Errorf("decode previous lease: %w", err)
 		}
-		if previous.Status == api.LeaseStatusActive && previous.ExpiresAt.After(time.Now()) {
+		if previous.Status == agentruntime.LeaseStatusActive && previous.ExpiresAt.After(time.Now()) {
 			return false, nil
 		}
-		if previous.Status == api.LeaseStatusActive {
-			previous.Status = api.LeaseStatusExpired
+		if previous.Status == agentruntime.LeaseStatusActive {
+			previous.Status = agentruntime.LeaseStatusExpired
 			previousVersion, err := int64FromUint64(previous.Version)
 			if err != nil {
 				return false, fmt.Errorf("expire previous lease: %w", err)
@@ -129,7 +127,7 @@ func (u *unitOfWork) AcquireWithExpectedVersion(ctx context.Context, value api.T
 		}
 	}
 	value.Version = expected + 1
-	value.Status = api.LeaseStatusActive
+	value.Status = agentruntime.LeaseStatusActive
 	syncLeaseExpiry(&value)
 	version, err := int64FromUint64(value.Version)
 	if err != nil {
@@ -151,7 +149,7 @@ func (u *unitOfWork) AcquireWithExpectedVersion(ctx context.Context, value api.T
 
 func (u *unitOfWork) ExtendLease(ctx context.Context, leaseID string, workerID string, newExpiry time.Time) (bool, error) {
 	value, err := u.LoadLease(ctx, leaseID)
-	if errors.Is(err, api.ErrNotFound) {
+	if errors.Is(err, agentruntime.ErrNotFound) {
 		return false, nil
 	}
 	if err != nil {
@@ -161,7 +159,7 @@ func (u *unitOfWork) ExtendLease(ctx context.Context, leaseID string, workerID s
 	if err != nil || !exists {
 		return false, err
 	}
-	if latest.ID != leaseID || value.HolderID != workerID || value.Status != api.LeaseStatusActive || !value.ExpiresAt.After(time.Now()) {
+	if latest.ID != leaseID || value.HolderID != workerID || value.Status != agentruntime.LeaseStatusActive || !value.ExpiresAt.After(time.Now()) {
 		return false, nil
 	}
 	oldVersion := value.Version
@@ -181,7 +179,7 @@ func (u *unitOfWork) ExtendLease(ctx context.Context, leaseID string, workerID s
 	if err != nil {
 		return false, err
 	}
-	result, err := dbgen.New(u.tx).ExtendLeaseCAS(ctx, dbgen.ExtendLeaseCASParams{ExpiresAt: nanos(value.ExpiresAt), Version: nextVersionSQL, Data: data, ID: leaseID, HolderID: workerID, Status: string(api.LeaseStatusActive), Version_2: oldVersionSQL})
+	result, err := dbgen.New(u.tx).ExtendLeaseCAS(ctx, dbgen.ExtendLeaseCASParams{ExpiresAt: nanos(value.ExpiresAt), Version: nextVersionSQL, Data: data, ID: leaseID, HolderID: workerID, Status: string(agentruntime.LeaseStatusActive), Version_2: oldVersionSQL})
 	if err != nil {
 		if isBusy(err) {
 			return false, nil
@@ -194,14 +192,14 @@ func (u *unitOfWork) ExtendLease(ctx context.Context, leaseID string, workerID s
 
 func (u *unitOfWork) ReleaseExpiredLease(ctx context.Context, leaseID string, expectedVersion uint64, releasedAt time.Time) (bool, error) {
 	value, err := u.LoadLease(ctx, leaseID)
-	if errors.Is(err, api.ErrNotFound) {
+	if errors.Is(err, agentruntime.ErrNotFound) {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
 	syncLeaseExpiry(&value)
-	if value.Status != api.LeaseStatusActive ||
+	if value.Status != agentruntime.LeaseStatusActive ||
 		value.Version != expectedVersion ||
 		value.ExpiresAt.IsZero() ||
 		value.ExpiresAt.After(releasedAt) {
@@ -211,7 +209,7 @@ func (u *unitOfWork) ReleaseExpiredLease(ctx context.Context, leaseID string, ex
 	if err != nil {
 		return false, fmt.Errorf("release expired lease: %w", err)
 	}
-	value.Status = api.LeaseStatusReleased
+	value.Status = agentruntime.LeaseStatusReleased
 	value.Version++
 	nextVersion, err := int64FromUint64(value.Version)
 	if err != nil {
@@ -222,11 +220,11 @@ func (u *unitOfWork) ReleaseExpiredLease(ctx context.Context, leaseID string, ex
 		return false, fmt.Errorf("release expired lease: %w", err)
 	}
 	result, err := dbgen.New(u.tx).ReleaseExpiredLeaseCAS(ctx, dbgen.ReleaseExpiredLeaseCASParams{
-		Status:    string(api.LeaseStatusReleased),
+		Status:    string(agentruntime.LeaseStatusReleased),
 		Version:   nextVersion,
 		Data:      data,
 		ID:        leaseID,
-		Status_2:  string(api.LeaseStatusActive),
+		Status_2:  string(agentruntime.LeaseStatusActive),
 		Version_2: oldVersion,
 		ExpiresAt: nanos(releasedAt),
 	})
@@ -240,19 +238,19 @@ func (u *unitOfWork) ReleaseExpiredLease(ctx context.Context, leaseID string, ex
 	return count == 1, err
 }
 
-func (u *unitOfWork) SaveActionAttempt(ctx context.Context, value api.ActionAttempt) error {
+func (u *unitOfWork) SaveActionAttempt(ctx context.Context, value agentruntime.ActionAttempt) error {
 	return u.save(ctx, kindAction, value.AttemptID, "", value.RunID, value.TaskID, string(value.Status), time.Time{}, value.ToolName, value.IdempotencyKey, value, true)
 }
 
-func (u *unitOfWork) LoadActionAttempt(ctx context.Context, id string) (api.ActionAttempt, error) {
-	return loadRecord[api.ActionAttempt](ctx, u, kindAction, id, "")
+func (u *unitOfWork) LoadActionAttempt(ctx context.Context, id string) (agentruntime.ActionAttempt, error) {
+	return loadRecord[agentruntime.ActionAttempt](ctx, u, kindAction, id, "")
 }
 
-func (u *unitOfWork) LoadActionAttemptByIdempotencyKey(ctx context.Context, runID string, taskID string, toolName string, key string) (api.ActionAttempt, error) {
-	var value api.ActionAttempt
+func (u *unitOfWork) LoadActionAttemptByIdempotencyKey(ctx context.Context, runID string, taskID string, toolName string, key string) (agentruntime.ActionAttempt, error) {
+	var value agentruntime.ActionAttempt
 	row, err := dbgen.New(u.tx).GetActionAttemptByIdempotency(ctx, dbgen.GetActionAttemptByIdempotencyParams{Kind: kindAction, RunID: runID, TaskID: taskID, ToolName: toolName, IdempotencyKey: key})
 	if errors.Is(err, sql.ErrNoRows) {
-		return value, api.ErrNotFound
+		return value, agentruntime.ErrNotFound
 	}
 	if err != nil {
 		return value, err
@@ -267,8 +265,8 @@ func (u *unitOfWork) LoadActionAttemptByIdempotencyKey(ctx context.Context, runI
 	return value, nil
 }
 
-func (u *unitOfWork) ListActionAttempts(ctx context.Context, selector api.ActionAttemptSelector) ([]api.ActionAttempt, error) {
-	values, err := listRecords[api.ActionAttempt](ctx, u, kindAction, selector.RunID)
+func (u *unitOfWork) ListActionAttempts(ctx context.Context, selector agentruntime.ActionAttemptSelector) ([]agentruntime.ActionAttempt, error) {
+	values, err := listRecords[agentruntime.ActionAttempt](ctx, u, kindAction, selector.RunID)
 	if err != nil {
 		return nil, err
 	}
@@ -288,19 +286,19 @@ func (u *unitOfWork) ListActionAttempts(ctx context.Context, selector api.Action
 	return limit(filtered, selector.Limit), nil
 }
 
-func (u *unitOfWork) ResolveActionAttempt(ctx context.Context, value api.ActionAttempt) (bool, error) {
+func (u *unitOfWork) ResolveActionAttempt(ctx context.Context, value agentruntime.ActionAttempt) (bool, error) {
 	current, err := u.LoadActionAttempt(ctx, value.AttemptID)
-	if errors.Is(err, api.ErrNotFound) {
-		return false, api.ErrNotFound
+	if errors.Is(err, agentruntime.ErrNotFound) {
+		return false, agentruntime.ErrNotFound
 	}
 	if err != nil {
 		return false, err
 	}
-	if current.Status != api.ActionAttemptUnknown || !current.RequiresReconcile {
+	if current.Status != agentruntime.ActionAttemptUnknown || !current.RequiresReconcile {
 		return false, nil
 	}
 	switch value.Status {
-	case api.ActionAttemptSucceeded, api.ActionAttemptFailed, api.ActionAttemptTimeout, api.ActionAttemptCancelled:
+	case agentruntime.ActionAttemptSucceeded, agentruntime.ActionAttemptFailed, agentruntime.ActionAttemptTimeout, agentruntime.ActionAttemptCancelled:
 	default:
 		return false, nil
 	}
@@ -324,7 +322,7 @@ func (u *unitOfWork) ResolveActionAttempt(ctx context.Context, value api.ActionA
 		Data:     data,
 		Kind:     kindAction,
 		Key1:     value.AttemptID,
-		Status_2: string(api.ActionAttemptUnknown),
+		Status_2: string(agentruntime.ActionAttemptUnknown),
 	})
 	if err != nil {
 		if isBusy(err) {
@@ -336,16 +334,16 @@ func (u *unitOfWork) ResolveActionAttempt(ctx context.Context, value api.ActionA
 	return count == 1, err
 }
 
-func (u *unitOfWork) SaveAgentProfile(ctx context.Context, value api.AgentProfile) error {
+func (u *unitOfWork) SaveAgentProfile(ctx context.Context, value agentruntime.AgentProfile) error {
 	return u.save(ctx, kindAgentProfile, value.ID, "", "", "", "", time.Time{}, "", "", value, true)
 }
 
-func (u *unitOfWork) LoadAgentProfile(ctx context.Context, id string) (api.AgentProfile, error) {
-	return loadRecord[api.AgentProfile](ctx, u, kindAgentProfile, id, "")
+func (u *unitOfWork) LoadAgentProfile(ctx context.Context, id string) (agentruntime.AgentProfile, error) {
+	return loadRecord[agentruntime.AgentProfile](ctx, u, kindAgentProfile, id, "")
 }
 
-func (u *unitOfWork) ListAgentProfiles(ctx context.Context, selector api.AgentSelector) ([]api.AgentProfile, error) {
-	values, err := listRecords[api.AgentProfile](ctx, u, kindAgentProfile, "")
+func (u *unitOfWork) ListAgentProfiles(ctx context.Context, selector agentruntime.AgentSelector) ([]agentruntime.AgentProfile, error) {
+	values, err := listRecords[agentruntime.AgentProfile](ctx, u, kindAgentProfile, "")
 	if err != nil {
 		return nil, err
 	}
@@ -359,19 +357,19 @@ func (u *unitOfWork) ListAgentProfiles(ctx context.Context, selector api.AgentSe
 	return limit(filtered, selector.Limit), nil
 }
 
-func (u *unitOfWork) SaveCapability(ctx context.Context, value api.Capability) error {
-	if err := api.ValidateCapabilityName(value.Name); err != nil {
+func (u *unitOfWork) SaveCapability(ctx context.Context, value agentruntime.Capability) error {
+	if err := agentruntime.ValidateCapabilityName(value.Name); err != nil {
 		return err
 	}
 	return u.save(ctx, kindCapability, value.Name, value.AgentID, "", "", "", time.Time{}, "", "", value, true)
 }
 
-func (u *unitOfWork) LoadCapability(ctx context.Context, name string, agentID string) (api.Capability, error) {
-	return loadRecord[api.Capability](ctx, u, kindCapability, name, agentID)
+func (u *unitOfWork) LoadCapability(ctx context.Context, name string, agentID string) (agentruntime.Capability, error) {
+	return loadRecord[agentruntime.Capability](ctx, u, kindCapability, name, agentID)
 }
 
-func (u *unitOfWork) ListCapabilities(ctx context.Context, selector api.CapabilitySelector) ([]api.Capability, error) {
-	values, err := listRecords[api.Capability](ctx, u, kindCapability, "")
+func (u *unitOfWork) ListCapabilities(ctx context.Context, selector agentruntime.CapabilitySelector) ([]agentruntime.Capability, error) {
+	values, err := listRecords[agentruntime.Capability](ctx, u, kindCapability, "")
 	if err != nil {
 		return nil, err
 	}
@@ -385,78 +383,12 @@ func (u *unitOfWork) ListCapabilities(ctx context.Context, selector api.Capabili
 	return limit(filtered, selector.Limit), nil
 }
 
-func normalizeUsageRecord(value api.UsageRecord) api.UsageRecord {
-	if value.Kind == "" {
-		value.Kind = api.UsageKindLegacyExecution
-	}
-	return value
-}
-
-func (u *unitOfWork) AppendUsage(ctx context.Context, value api.UsageRecord) error {
-	if value.ID == "" {
-		value.ID = uuid.NewString()
-	}
-	value = normalizeUsageRecord(value)
-	existing, err := loadRecord[api.UsageRecord](ctx, u, kindUsage, value.ID, "")
-	if err == nil {
-		existing = normalizeUsageRecord(existing)
-		if value.CreatedAt.IsZero() {
-			value.CreatedAt = existing.CreatedAt
-		}
-		if reflect.DeepEqual(existing, value) {
-			return nil
-		}
-		return fmt.Errorf("append usage %q: %w", value.ID, api.ErrIdempotencyConflict)
-	}
-	if !errors.Is(err, api.ErrNotFound) {
-		return err
-	}
-	if value.CreatedAt.IsZero() {
-		value.CreatedAt = time.Now().UTC()
-	}
-	return u.save(ctx, kindUsage, value.ID, "", value.RunID, value.TaskID, "", value.CreatedAt, "", "", value, false)
-}
-
-func (u *unitOfWork) QueryUsage(ctx context.Context, selector api.UsageSelector) ([]api.UsageRecord, error) {
-	values, err := listRecords[api.UsageRecord](ctx, u, kindUsage, selector.RunID)
-	if err != nil {
-		return nil, err
-	}
-	filtered := values[:0]
-	for _, value := range values {
-		value = normalizeUsageRecord(value)
-		if selector.TaskID != "" && value.TaskID != selector.TaskID ||
-			selector.AgentID != "" && value.AgentID != selector.AgentID ||
-			selector.Kind != "" && value.Kind != selector.Kind ||
-			selector.Provider != "" && value.Provider != selector.Provider ||
-			selector.ToolName != "" && value.ToolName != selector.ToolName ||
-			!within(value.CreatedAt, selector.Since, selector.Until) {
-			continue
-		}
-		filtered = append(filtered, value)
-	}
-	return limit(filtered, selector.Limit), nil
-}
-
-func (u *unitOfWork) SumCredits(ctx context.Context, selector api.UsageSelector) (int64, error) {
-	selector.Limit = 0
-	values, err := u.QueryUsage(ctx, selector)
-	if err != nil {
-		return 0, err
-	}
-	var total int64
-	for _, value := range values {
-		total += value.Credits
-	}
-	return total, nil
-}
-
-func (u *unitOfWork) AppendDeadLetter(ctx context.Context, value api.DeadLetterEntry) error {
+func (u *unitOfWork) AppendDeadLetter(ctx context.Context, value agentruntime.DeadLetterEntry) error {
 	return u.save(ctx, kindDeadLetter, value.ID, "", value.RunID, value.TaskID, "", value.CreatedAt, "", "", value, false)
 }
 
-func (u *unitOfWork) ListDeadLetters(ctx context.Context, selector api.DeadLetterSelector) ([]api.DeadLetterEntry, error) {
-	values, err := listRecords[api.DeadLetterEntry](ctx, u, kindDeadLetter, selector.RunID)
+func (u *unitOfWork) ListDeadLetters(ctx context.Context, selector agentruntime.DeadLetterSelector) ([]agentruntime.DeadLetterEntry, error) {
+	values, err := listRecords[agentruntime.DeadLetterEntry](ctx, u, kindDeadLetter, selector.RunID)
 	if err != nil {
 		return nil, err
 	}
@@ -474,7 +406,7 @@ func (u *unitOfWork) Requeue(context.Context, string) error {
 	return fmt.Errorf("dead-letter requeue is not supported")
 }
 
-func syncLeaseExpiry(value *api.TaskExecutionLease) {
+func syncLeaseExpiry(value *agentruntime.TaskExecutionLease) {
 	if value.ExpiresAt.IsZero() {
 		value.ExpiresAt = value.Expiry
 	}
@@ -499,4 +431,4 @@ func isConstraint(err error) bool {
 	return strings.Contains(message, "constraint") || strings.Contains(message, "unique")
 }
 
-var _ api.TraceSpanUpdater = (*unitOfWork)(nil)
+var _ agentruntime.TraceSpanUpdater = (*unitOfWork)(nil)

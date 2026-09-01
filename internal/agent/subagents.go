@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/azem/internal/blobstore"
 	"github.com/Viking602/azem/internal/store/sqlite/dbgen"
-	"github.com/Viking602/venat/api"
 )
 
 const inlinePayloadLimit = 4096
@@ -166,7 +166,7 @@ func (s *SQLSubagentRunStore) Save(ctx context.Context, run SubagentRun) (err er
 func (s *SQLSubagentRunStore) Get(ctx context.Context, id string) (SubagentRun, error) {
 	row, err := dbgen.New(s.db).GetSubagentRun(ctx, id)
 	if err == sql.ErrNoRows {
-		return SubagentRun{}, api.ErrNotFound
+		return SubagentRun{}, agentruntime.ErrNotFound
 	}
 	if err != nil {
 		return SubagentRun{}, err
@@ -372,7 +372,7 @@ func requireOneSubagentRow(result sql.Result) error {
 		return err
 	}
 	if changed != 1 {
-		return api.ErrNotFound
+		return agentruntime.ErrNotFound
 	}
 	return nil
 }

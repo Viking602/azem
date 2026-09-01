@@ -101,6 +101,15 @@ func persistToolIntent(ctx context.Context, sessions *session.Service, workspace
 	return intent, nil
 }
 
+func loadToolIntent(ctx context.Context, sessions *session.Service, sessionID, runID string, call message.ToolCall) (session.ActionIntentV1, error) {
+	store, err := workrevision.NewStore(sessions, sessionID, runID)
+	if err != nil {
+		return session.ActionIntentV1{}, err
+	}
+	intentID := "intent:" + shortEvidenceHash(sessionID+"\x00"+runID+"\x00"+call.ID+"\x00"+call.Name)
+	return store.Intent(ctx, intentID)
+}
+
 func persistToolObservation(ctx context.Context, sessions *session.Service, workspace, sessionID, runID string, intent session.ActionIntentV1, record session.ToolRecord) error {
 	if sessions == nil || intent.ID == "" {
 		return nil
@@ -180,7 +189,7 @@ func newMutatingVerificationGuardrail(sessions *session.Service, workspace, sess
 			return hyagent.OutputGuardrailResult{}, err
 		}
 		if items := guardrailTodoItems(snapshot.todo, enforceSessionTodo); len(items) > 0 {
-			return hyagent.RetryOutput(message.NewText(message.RoleUser, unfinishedTodoRetryMessage(items))), nil
+			return hyagent.RetryOutputWithPolicy(hyagent.RetryPolicy{IncludeRejectedOutput: true}, message.NewText(message.RoleUser, unfinishedTodoRetryMessage(items))), nil
 		}
 		if !snapshot.mutating {
 			return hyagent.AllowOutput(), nil
@@ -204,7 +213,7 @@ func newMutatingVerificationGuardrail(sessions *session.Service, workspace, sess
 		case "allow":
 			return hyagent.AllowOutput(), nil
 		case "retry":
-			return hyagent.RetryOutput(message.NewText(message.RoleUser, verificationRetryMessage(snapshot, state.missing))), nil
+			return hyagent.RetryOutputWithPolicy(hyagent.RetryPolicy{IncludeRejectedOutput: true}, message.NewText(message.RoleUser, verificationRetryMessage(snapshot, state.missing))), nil
 		case "surface":
 			return surfaceVerificationOutput(decision.Reason), nil
 		default:

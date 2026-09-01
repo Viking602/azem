@@ -22,7 +22,7 @@ func TestVibeWorkersRunConcurrentlyPersistAndAcceptFollowups(t *testing.T) {
 	defer runtime.Shutdown(ctx)
 	defer coding.Close(ctx)
 	parent := subagentParentRuntime{
-		SessionID: "session", ParentRunID: "director", ProviderID: "test", ModelID: "model", Reasoning: "high",
+		SessionID: "session", ParentRunID: "director", ProviderID: "test", AccountID: "test-account", ModelID: "model", Reasoning: "high",
 		Driver: provider, Coding: coding, WorkspaceRoot: t.TempDir(), DirectorReadOnly: true,
 	}
 	if _, err := runtime.Drivers(parent); err != nil {

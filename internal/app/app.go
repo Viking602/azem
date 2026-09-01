@@ -21,7 +21,6 @@ import (
 	"github.com/Viking602/azem/internal/capability"
 	"github.com/Viking602/azem/internal/commands"
 	"github.com/Viking602/azem/internal/config"
-	"github.com/Viking602/azem/internal/contextfiles"
 	"github.com/Viking602/azem/internal/customtools"
 	"github.com/Viking602/azem/internal/extensions"
 	"github.com/Viking602/azem/internal/hooks"
@@ -32,12 +31,10 @@ import (
 	"github.com/Viking602/azem/internal/recap"
 	"github.com/Viking602/azem/internal/recovery"
 	"github.com/Viking602/azem/internal/resource"
-	"github.com/Viking602/azem/internal/rules"
 	"github.com/Viking602/azem/internal/securityscan"
 	"github.com/Viking602/azem/internal/session"
 	"github.com/Viking602/azem/internal/skills"
 	"github.com/Viking602/azem/internal/toolview"
-	hyagent "github.com/Viking602/venat/agent"
 	"github.com/Viking602/venat/message"
 )
 
@@ -50,6 +47,7 @@ var (
 
 type runtimeRecoveryFence interface {
 	Close() error
+	CloseClean() error
 	FinishRecovery() error
 }
 
@@ -63,7 +61,7 @@ type Service struct {
 	activeRun                   string
 	activeSession               string
 	guidanceOpen                bool
-	turnControls                map[string]*hyagent.ControlQueue
+	turnControls                map[string]*turnControlQueue
 	currentSession              string
 	workspaceAnchor             string
 	hookSessions                map[string]struct{}
@@ -76,6 +74,9 @@ type Service struct {
 	wg                          sync.WaitGroup
 	projectContext              string
 	contextDiagnostics          []string
+	projectContextLoader        func(context.Context) (string, []string, error)
+	staticProjectContext        string
+	staticContextDiagnostics    []string
 	hookWG                      sync.WaitGroup
 	shuttingDown                bool
 	shutdownOnce                sync.Once
@@ -146,7 +147,7 @@ func NewService(parent context.Context, cfg config.Config) *Service {
 		shutdownDone: make(chan struct{}), liveApprovals: make(map[string]*liveApproval), liveUserInputs: make(map[string]*liveUserInput),
 		teamApprovals: make(map[string]struct{}), autoReviews: make(map[string]*prefetchedAutoReview), autoReviewDenials: make(map[string]*autoReviewDenialTracker),
 		hookSessions: make(map[string]struct{}), hookInitialUsers: make(map[string]string), hookInitialContext: make(map[string]string), hookAsyncContext: make(map[string][]string), approvalMode: approvalMode,
-		turnControls: make(map[string]*hyagent.ControlQueue), pendingPlanYolo: make(map[string]planYoloHandoff),
+		turnControls: make(map[string]*turnControlQueue), pendingPlanYolo: make(map[string]planYoloHandoff),
 		sessionUsage: make(map[string]session.Usage), desktopSurface: true,
 	}
 }
@@ -173,7 +174,13 @@ func (s *Service) closeRuntimeFence() {
 	if s.runtimeFence == nil {
 		return
 	}
-	if err := s.runtimeFence.Close(); err != nil {
+	var err error
+	if s.shutdownErr == nil {
+		err = s.runtimeFence.CloseClean()
+	} else {
+		err = s.runtimeFence.Close()
+	}
+	if err != nil {
 		s.shutdownErr = errors.Join(s.shutdownErr, err)
 	}
 }
@@ -224,6 +231,18 @@ func (s *Service) ToolDefinitionsSnapshot() []message.ToolDefinition {
 	return snapshot
 }
 
+func (s *Service) ToolOriginsSnapshot() map[string]string {
+	if s == nil || s.coding == nil {
+		return nil
+	}
+	policies := s.coding.ToolPolicySnapshot()
+	origins := make(map[string]string, len(policies))
+	for name, policy := range policies {
+		origins[name] = policy.Origin
+	}
+	return origins
+}
+
 func (s *Service) desktopSurfaceEnabled() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -247,22 +266,11 @@ func (s *Service) AttachMemory(memoryService *memory.Service, recapService *reca
 	s.memory, s.recap = memoryService, recapService
 }
 
-func (s *Service) AttachContextFiles(result contextfiles.Result) {
+func (s *Service) AttachProjectContextLoader(loader func(context.Context) (string, []string, error)) {
 	s.mu.Lock()
-	s.projectContext = contextfiles.Render(result)
-	s.contextDiagnostics = append([]string(nil), result.Warnings...)
-	s.mu.Unlock()
-}
-
-func (s *Service) AttachRules(result rules.Result) {
-	s.mu.Lock()
-	if prompt := rules.Render(result, s.projectContext); prompt != "" {
-		if strings.TrimSpace(s.projectContext) != "" {
-			s.projectContext += "\n\n"
-		}
-		s.projectContext += prompt
-	}
-	s.contextDiagnostics = append(s.contextDiagnostics, result.Warnings...)
+	s.projectContextLoader = loader
+	s.staticProjectContext = s.projectContext
+	s.staticContextDiagnostics = append([]string(nil), s.contextDiagnostics...)
 	s.mu.Unlock()
 }
 
@@ -464,15 +472,17 @@ func (s *Service) emitRecoveryState() {
 		return
 	}
 	type notice struct {
-		Kind     string `json:"kind"`
-		ID       string `json:"id"`
-		RunID    string `json:"runId,omitempty"`
-		TaskID   string `json:"taskId,omitempty"`
-		Title    string `json:"title"`
-		Detail   string `json:"detail,omitempty"`
-		State    string `json:"state"`
-		TokenID  string `json:"tokenId,omitempty"`
-		ToolName string `json:"toolName,omitempty"`
+		Kind        string `json:"kind"`
+		ID          string `json:"id"`
+		RunID       string `json:"runId,omitempty"`
+		TaskID      string `json:"taskId,omitempty"`
+		Title       string `json:"title"`
+		Detail      string `json:"detail,omitempty"`
+		State       string `json:"state"`
+		TokenID     string `json:"tokenId,omitempty"`
+		ToolName    string `json:"toolName,omitempty"`
+		ExecutionID string `json:"executionId,omitempty"`
+		AttemptKind string `json:"attemptKind,omitempty"`
 	}
 	notices := make([]notice, 0, len(summary.Approvals)+len(summary.ReconcileAttempts))
 	for _, pending := range summary.Approvals {
@@ -480,7 +490,15 @@ func (s *Service) emitRecoveryState() {
 		notices = append(notices, notice{Kind: "approval", ID: pending.Approval.ApprovalID, RunID: pending.Approval.RunID, TaskID: pending.Approval.TaskID, Title: "Pending approval", Detail: detail, State: "pending", TokenID: pending.Token.TokenID})
 	}
 	for _, attempt := range summary.ReconcileAttempts {
-		notices = append(notices, notice{Kind: "reconcile", ID: attempt.AttemptID, RunID: attempt.RunID, TaskID: attempt.TaskID, Title: "Unknown side effect", Detail: "Confirm the external outcome before continuing.", State: "unknown", ToolName: attempt.ToolName})
+		detail := "Confirm the external outcome before continuing."
+		if attempt.ExecutionID != "" {
+			detail = "Choose retry or record a failure. A successful durable attempt requires its complete canonical result."
+		}
+		notices = append(notices, notice{
+			Kind: "reconcile", ID: attempt.AttemptID, RunID: attempt.RunID, TaskID: attempt.TaskID,
+			Title: "Unknown side effect", Detail: detail, State: "unknown", ToolName: attempt.ToolName,
+			ExecutionID: attempt.ExecutionID, AttemptKind: attempt.AttemptKind,
+		})
 	}
 	encoded, err := json.Marshal(notices)
 	if err != nil {
@@ -697,7 +715,7 @@ func limitRunes(value string, limit int) string {
 
 // projectedToolRecord decorates a durable tool record with the shared
 // toolview file-change summary so reloaded sessions render the same
-// projection as live tool_finished events without frontend re-parsing.
+// projection as live tool_finished events without renderer re-parsing.
 type projectedToolRecord struct {
 	session.ToolRecord
 	FileChange string `json:"fileChange,omitempty"`
@@ -861,7 +879,6 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 		}
 	}
 	s.mu.Lock()
-	request.projectContext = s.projectContext
 	if s.shuttingDown {
 		s.mu.Unlock()
 		return "", fmt.Errorf("application is shutting down")
@@ -884,6 +901,26 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 			s.wg.Done()
 		}
 	}()
+	s.mu.Lock()
+	contextLoader := s.projectContextLoader
+	staticContext := s.staticProjectContext
+	staticDiagnostics := append([]string(nil), s.staticContextDiagnostics...)
+	s.mu.Unlock()
+	if contextLoader != nil {
+		projectContext, diagnostics, err := contextLoader(runCtx)
+		if err != nil {
+			cancel()
+			s.clearRun("starting")
+			return "", fmt.Errorf("load project context: %w", err)
+		}
+		s.mu.Lock()
+		s.projectContext = strings.TrimSpace(strings.Join([]string{strings.TrimSpace(projectContext), strings.TrimSpace(staticContext)}, "\n\n"))
+		s.contextDiagnostics = append(staticDiagnostics, diagnostics...)
+		s.mu.Unlock()
+	}
+	s.mu.Lock()
+	request.projectContext = s.projectContext
+	s.mu.Unlock()
 	sessionSource := "startup"
 	if s.sessions != nil {
 		if _, loadErr := s.sessions.LoadSession(s.ctx, request.SessionID); loadErr == nil {
@@ -1041,7 +1078,6 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 			s.clearRun("starting")
 			return "", err
 		}
-		observeProviderRetries(runCtx, s, request.SessionID, runID, request.Provider, resolution.driver)
 		s.mu.Lock()
 		s.activeRun = runID
 		s.mu.Unlock()
@@ -1104,6 +1140,10 @@ func userTurnBlock(runID string, request TurnRequest) session.Block {
 			block.Data = maps.Clone(request.wakeData)
 		}
 	}
+	if block.Data == nil {
+		block.Data = make(map[string]string, 1)
+	}
+	block.Data["createdAt"] = strconv.FormatInt(time.Now().UTC().UnixMilli(), 10)
 	return block
 }
 
@@ -1160,11 +1200,11 @@ func (s *Service) GuideActiveTurn(sessionID, runID, text string) error {
 	return s.GuideActiveTurnWithAttachments(sessionID, runID, text, nil)
 }
 
-// GuideActiveTurnWithAttachments steers the matching active single-agent run.
-// Steer controls interrupt a running tool, cancel undispatched sibling calls,
-// and enter the conversation at the next deterministic loop boundary.
+// GuideActiveTurnWithAttachments steers the matching active single-agent run
+// at its next model boundary. It does not interrupt an open provider stream or
+// running tool.
 func (s *Service) GuideActiveTurnWithAttachments(sessionID, runID, text string, attachments []session.Attachment) error {
-	return s.enqueueActiveTurnControl(sessionID, runID, text, attachments, hyagent.ControlSteer)
+	return s.enqueueActiveTurnControl(sessionID, runID, text, attachments, turnControlSteer)
 }
 
 // FollowUpActiveTurn queues a text-only message after the active answer.
@@ -1176,10 +1216,10 @@ func (s *Service) FollowUpActiveTurn(sessionID, runID, text string) error {
 // the provider stream or running tools. The same agent run drains it only after
 // the current answer reaches its durable turn boundary.
 func (s *Service) FollowUpActiveTurnWithAttachments(sessionID, runID, text string, attachments []session.Attachment) error {
-	return s.enqueueActiveTurnControl(sessionID, runID, text, attachments, hyagent.ControlFollowUp)
+	return s.enqueueActiveTurnControl(sessionID, runID, text, attachments, turnControlFollowUp)
 }
 
-func (s *Service) enqueueActiveTurnControl(sessionID, runID, text string, attachments []session.Attachment, kind hyagent.ControlKind) error {
+func (s *Service) enqueueActiveTurnControl(sessionID, runID, text string, attachments []session.Attachment, kind turnControlKind) error {
 	text = strings.TrimSpace(text)
 	attachments = CloneAttachments(attachments)
 	if text == "" && len(attachments) == 0 {
@@ -1204,7 +1244,7 @@ func (s *Service) enqueueActiveTurnControl(sessionID, runID, text string, attach
 		return fmt.Errorf("run %q does not support live turn control", runID)
 	}
 	state, title := "guidance", "Guidance"
-	if kind == hyagent.ControlFollowUp {
+	if kind == turnControlFollowUp {
 		state, title = "follow_up", "Follow-up"
 	}
 	var sequence int64
@@ -1226,7 +1266,7 @@ func (s *Service) enqueueActiveTurnControl(sessionID, runID, text string, attach
 		}
 		id = random
 	}
-	if err := control.Enqueue(hyagent.ControlMessage{
+	if err := control.Enqueue(turnControlMessage{
 		ID: id, Kind: kind, Message: UserMessageWithAttachments(text, attachments),
 	}); err != nil {
 		return fmt.Errorf("queue %s message: %w", state, err)
@@ -1290,10 +1330,10 @@ func (s *Service) CancelActiveWithChildren(children bool) bool {
 	}
 	if coding != nil && runID != "" && runID != "starting" {
 		// Deliver the explicit cancellation cause before returning through the
-		// desktop Bridge. A pre-cancelled wait context makes SingleRunner.Cancel
-		// signal its active execution synchronously without waiting for provider
-		// or tool cleanup. The bounded background call then owns durable
-		// convergence and only afterwards cancels the app-owned run context.
+		// desktop Bridge. A pre-cancelled wait context makes CancelTrackedRun
+		// signal the active durable execution synchronously without waiting for
+		// persistence or tool cleanup. The bounded background call then owns
+		// durable convergence and only afterwards cancels the app-owned context.
 		deliveryCtx, stopDeliveryWait := context.WithCancel(context.Background())
 		stopDeliveryWait()
 		tracked, _ := coding.CancelTrackedRun(deliveryCtx, runID)
@@ -1484,6 +1524,13 @@ func (s *Service) startSubagentAutoWake(runs []agentservice.SubagentRun) error {
 	saved, err := s.sessions.LoadSession(s.ctx, runs[0].SessionID)
 	if err != nil {
 		return err
+	}
+	archived, err := s.sessions.IsArchived(s.ctx, saved.ID)
+	if err != nil {
+		return err
+	}
+	if archived {
+		return nil
 	}
 	prompt, wakeData := subagentWakePrompt(runs)
 	_, err = s.StartConfiguredTurn(TurnRequest{

@@ -13,10 +13,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/venat/message"
 	"github.com/Viking602/venat/tool"
-	mcpclient "github.com/Viking602/venat/transport/mcp/client"
-	"github.com/Viking602/venat/transport/mcpcontract"
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 
 	"github.com/Viking602/azem/internal/config"
 )
@@ -42,7 +42,7 @@ func TestManagerNamespacesIsolatesAndGovernsTools(t *testing.T) {
 	}, "test-version", func(_ context.Context, reference string) (string, error) {
 		return "resolved:" + reference, nil
 	}, Options{
-		Dial: func(_ context.Context, _ string, _ config.MCPServerConfig, environment map[string]string, headers http.Header) (mcpcontract.Client, error) {
+		Dial: func(_ context.Context, _ string, _ config.MCPServerConfig, environment map[string]string, headers http.Header) (Client, error) {
 			gotEnv, gotHeaders = environment, headers
 			return client, nil
 		},
@@ -63,16 +63,25 @@ func TestManagerNamespacesIsolatesAndGovernsTools(t *testing.T) {
 		t.Fatalf("drivers=%v", definitionNames(drivers))
 	}
 	definitions := map[string]tool.Definition{}
+	policies := map[string]agentruntime.ToolPolicy{}
 	for _, driver := range drivers {
-		definitions[driver.Definition().Name] = driver.Definition()
+		name := driver.Definition().Name
+		definitions[name] = driver.Definition()
+		policyDriver, ok := driver.(interface {
+			ToolPolicy() agentruntime.ToolPolicy
+		})
+		if !ok {
+			t.Fatalf("driver %q does not expose app-owned policy", name)
+		}
+		policies[name] = policyDriver.ToolPolicy()
 	}
-	remote := definitions["mcp__local__read_file"]
-	if remote.EffectType != tool.EffectExternalSideEffect || !remote.RequiresApproval || !remote.RequiresActionTask {
-		t.Fatalf("default MCP governance=%#v", remote)
+	remote := policies["mcp__local__read_file"]
+	if remote.Effect != agentruntime.ToolEffectExternalSideEffect || !remote.RequiresApproval || !remote.RequiresActionTask {
+		t.Fatalf("default MCP governance=%#v definition=%#v", remote, definitions["mcp__local__read_file"])
 	}
-	safe := definitions["mcp__local__safe"]
-	if safe.EffectType != tool.EffectReadOnly || safe.RequiresApproval || safe.RequiresActionTask {
-		t.Fatalf("safe override=%#v", safe)
+	safe := policies["mcp__local__safe"]
+	if safe.Effect != agentruntime.ToolEffectReadOnly || safe.RequiresApproval || safe.RequiresActionTask {
+		t.Fatalf("safe override=%#v definition=%#v", safe, definitions["mcp__local__safe"])
 	}
 	servers := manager.Servers()
 	if len(servers) != 1 || servers[0].State != StateReady || len(servers[0].Diagnostics) != 2 {
@@ -81,10 +90,10 @@ func TestManagerNamespacesIsolatesAndGovernsTools(t *testing.T) {
 	if len(servers[0].Tools) != 2 || servers[0].Tools[0].Name != "read_file" || servers[0].Tools[1].Name != "safe" {
 		t.Fatalf("server tool snapshots=%#v", servers[0].Tools)
 	}
-	if servers[0].Tools[0].Description != "read" || servers[0].Tools[0].Effect != string(tool.EffectExternalSideEffect) || !servers[0].Tools[0].RequiresApproval {
+	if servers[0].Tools[0].Description != "read" || servers[0].Tools[0].Effect != string(agentruntime.ToolEffectExternalSideEffect) || !servers[0].Tools[0].RequiresApproval {
 		t.Fatalf("read tool snapshot=%#v", servers[0].Tools[0])
 	}
-	if servers[0].Tools[1].Effect != string(tool.EffectReadOnly) || servers[0].Tools[1].RequiresApproval {
+	if servers[0].Tools[1].Effect != string(agentruntime.ToolEffectReadOnly) || servers[0].Tools[1].RequiresApproval {
 		t.Fatalf("safe tool snapshot=%#v", servers[0].Tools[1])
 	}
 	if len(events) < 2 || events[0].State != StateConnecting || events[len(events)-1].State != StateReady {
@@ -116,7 +125,7 @@ func TestBuiltInGrepToolIsReadOnlyAndApprovalFree(t *testing.T) {
 		Name: "searchGitHub", Description: "search public code", InputSchema: message.JSONSchema{Type: "object"},
 	}}}
 	manager := NewManager(map[string]config.MCPServerConfig{"grep": serverConfig}, "test", nil, Options{
-		Dial: func(_ context.Context, name string, got config.MCPServerConfig, _ map[string]string, _ http.Header) (mcpcontract.Client, error) {
+		Dial: func(_ context.Context, name string, got config.MCPServerConfig, _ map[string]string, _ http.Header) (Client, error) {
 			if name != "grep" || got.URL != "https://mcp.grep.app" || got.Transport != "streamable_http" {
 				t.Fatalf("built-in grep dial = %q %#v", name, got)
 			}
@@ -132,8 +141,16 @@ func TestBuiltInGrepToolIsReadOnlyAndApprovalFree(t *testing.T) {
 		t.Fatalf("grep drivers = %v", definitionNames(drivers))
 	}
 	definition := drivers[0].Definition()
-	if definition.Name != "mcp__grep__searchGitHub" || definition.EffectType != tool.EffectReadOnly || definition.RequiresApproval || definition.RequiresActionTask {
-		t.Fatalf("built-in grep definition = %#v", definition)
+	policyDriver, ok := drivers[0].(interface {
+		ToolPolicy() agentruntime.ToolPolicy
+	})
+	if !ok {
+		t.Fatal("built-in grep driver does not expose app-owned policy")
+	}
+	policy := policyDriver.ToolPolicy()
+	if definition.Name != "mcp__grep__searchGitHub" || policy.Effect != agentruntime.ToolEffectReadOnly ||
+		policy.RequiresApproval || policy.RequiresActionTask {
+		t.Fatalf("built-in grep definition=%#v policy=%#v", definition, policy)
 	}
 }
 
@@ -220,7 +237,7 @@ func TestManagerCloseAdmitsDialBeforeClientExists(t *testing.T) {
 	manager := NewManager(map[string]config.MCPServerConfig{
 		"local": {Enabled: true, ConnectDuration: time.Second},
 	}, "test", nil, Options{
-		Dial: func(context.Context, string, config.MCPServerConfig, map[string]string, http.Header) (mcpcontract.Client, error) {
+		Dial: func(context.Context, string, config.MCPServerConfig, map[string]string, http.Header) (Client, error) {
 			dialStarted <- struct{}{}
 			<-releaseDial
 			return client, nil
@@ -279,7 +296,7 @@ func TestManagerCloseWaitsForSupersededDial(t *testing.T) {
 	manager := NewManager(map[string]config.MCPServerConfig{
 		"local": {Enabled: true, ConnectDuration: time.Second},
 	}, "test", nil, Options{
-		Dial: func(context.Context, string, config.MCPServerConfig, map[string]string, http.Header) (mcpcontract.Client, error) {
+		Dial: func(context.Context, string, config.MCPServerConfig, map[string]string, http.Header) (Client, error) {
 			index := int(dialCount.Add(1) - 1)
 			dialStarted <- index
 			<-releaseDial[index]
@@ -356,7 +373,7 @@ func TestManagerRefreshWithoutNameRefreshesEveryReadyServer(t *testing.T) {
 		"first":  {Enabled: true, Transport: "stdio", Command: "first", ConnectTimeout: "1s", CallTimeout: "1s", MaxConcurrency: 1},
 		"second": {Enabled: true, Transport: "stdio", Command: "second", ConnectTimeout: "1s", CallTimeout: "1s", MaxConcurrency: 1},
 	}, "test", nil, Options{
-		Dial: func(_ context.Context, name string, _ config.MCPServerConfig, _ map[string]string, _ http.Header) (mcpcontract.Client, error) {
+		Dial: func(_ context.Context, name string, _ config.MCPServerConfig, _ map[string]string, _ http.Header) (Client, error) {
 			return clients[name], nil
 		},
 		Sleep: func(context.Context, time.Duration) error { return nil },
@@ -382,7 +399,7 @@ func TestManagerRefreshWithoutNameRefreshesEveryReadyServer(t *testing.T) {
 func TestManagerConfigureAddsConnectsAndDisablesServer(t *testing.T) {
 	client := &fakeClient{tools: []message.ToolDefinition{{Name: "status", InputSchema: message.JSONSchema{Type: "object"}}}}
 	manager := NewManager(nil, "test", nil, Options{
-		Dial: func(context.Context, string, config.MCPServerConfig, map[string]string, http.Header) (mcpcontract.Client, error) {
+		Dial: func(context.Context, string, config.MCPServerConfig, map[string]string, http.Header) (Client, error) {
 			return client, nil
 		},
 		Sleep: func(context.Context, time.Duration) error { return nil },
@@ -417,7 +434,7 @@ func TestManagerRemoveStopsConnectionAndDropsFutureTools(t *testing.T) {
 	manager := NewManager(map[string]config.MCPServerConfig{
 		"demo": {Enabled: true, Transport: "stdio", Command: "demo", ConnectTimeout: "1s", CallTimeout: "1s", MaxConcurrency: 1},
 	}, "test", nil, Options{
-		Dial: func(context.Context, string, config.MCPServerConfig, map[string]string, http.Header) (mcpcontract.Client, error) {
+		Dial: func(context.Context, string, config.MCPServerConfig, map[string]string, http.Header) (Client, error) {
 			return client, nil
 		},
 		Sleep: func(context.Context, time.Duration) error { return nil },
@@ -466,7 +483,7 @@ func TestManagerRetriesConnectionWithBoundedBackoff(t *testing.T) {
 	manager := NewManager(map[string]config.MCPServerConfig{
 		"local": {Enabled: true, Transport: "stdio", Command: "fake", ConnectTimeout: "1s", CallTimeout: "1s", MaxConcurrency: 1},
 	}, "test", nil, Options{
-		Dial: func(context.Context, string, config.MCPServerConfig, map[string]string, http.Header) (mcpcontract.Client, error) {
+		Dial: func(context.Context, string, config.MCPServerConfig, map[string]string, http.Header) (Client, error) {
 			attempts++
 			if attempts < 4 {
 				return nil, errors.New("offline")
@@ -488,7 +505,7 @@ func TestManagerRetriesConnectionWithBoundedBackoff(t *testing.T) {
 
 func TestRemoteToolFailureDegradesWithoutReplay(t *testing.T) {
 	ctx := context.Background()
-	client := &fakeClient{tools: []message.ToolDefinition{{Name: "fail", InputSchema: message.JSONSchema{Type: "object"}}}, callErr: &mcpclient.RPCError{Code: -32004, Message: "server is closing"}}
+	client := &fakeClient{tools: []message.ToolDefinition{{Name: "fail", InputSchema: message.JSONSchema{Type: "object"}}}, callErr: &jsonrpc.Error{Code: -32004, Message: "server is closing"}}
 	manager := managerWithClient(client)
 	if err := manager.Start(ctx); err != nil {
 		t.Fatal(err)
@@ -509,7 +526,7 @@ func TestRemoteToolTransportRejectionReturnsToolErrorWithoutFailingRun(t *testin
 	ctx := context.Background()
 	client := &fakeClient{
 		tools:   []message.ToolDefinition{{Name: "search", InputSchema: message.JSONSchema{Type: "object"}}},
-		callErr: &mcpclient.RPCError{Code: -32005, Message: "rejected by transport"},
+		callErr: &jsonrpc.Error{Code: -32005, Message: "rejected by transport"},
 	}
 	manager := managerWithClient(client)
 	if err := manager.Start(ctx); err != nil {
@@ -520,7 +537,7 @@ func TestRemoteToolTransportRejectionReturnsToolErrorWithoutFailingRun(t *testin
 	if err != nil {
 		t.Fatalf("transport rejection escaped as a run-level error: %v", err)
 	}
-	if !result.IsError || result.ToolCallID != "call" || result.Name != driver.Definition().Name || !strings.Contains(result.Content, "rejected by transport") {
+	if !result.IsError || result.ToolCallID != "call" || result.Name != driver.Definition().Name || !strings.Contains(result.Content, "jsonrpc error -32005: rejected by transport") {
 		t.Fatalf("transport rejection result = %#v", result)
 	}
 	if manager.Servers()[0].State != StateReady || len(manager.Snapshot()) != 1 {
@@ -532,8 +549,8 @@ func TestRemoteToolBusinessErrorKeepsServerReady(t *testing.T) {
 	ctx := context.Background()
 	client := &fakeClient{
 		tools: []message.ToolDefinition{{Name: "lookup", InputSchema: message.JSONSchema{Type: "object"}}},
-		callResult: &mcpcontract.CallToolResult{
-			Content: []mcpcontract.ContentBlock{{Type: "text", Text: "object not found"}}, IsError: true,
+		callResult: &CallToolResult{
+			Content: []ContentBlock{{Type: "text", Text: "object not found"}}, IsError: true,
 		},
 	}
 	manager := managerWithClient(client)
@@ -562,8 +579,8 @@ func TestRemoteToolPreservesBoundedTextAndStructuredResult(t *testing.T) {
 	structured := map[string]any{"status": "ready", "count": float64(2)}
 	client := &fakeClient{
 		tools: []message.ToolDefinition{{Name: "status", InputSchema: message.JSONSchema{Type: "object"}}},
-		callResult: &mcpcontract.CallToolResult{
-			Content:           []mcpcontract.ContentBlock{{Type: "text", Text: "ready"}},
+		callResult: &CallToolResult{
+			Content:           []ContentBlock{{Type: "text", Text: "ready"}},
 			StructuredContent: structured,
 		},
 	}
@@ -586,8 +603,8 @@ func TestRemoteToolOversizedTextReturnsBoundedBusinessError(t *testing.T) {
 	ctx := context.Background()
 	client := &fakeClient{
 		tools: []message.ToolDefinition{{Name: "search", InputSchema: message.JSONSchema{Type: "object"}}},
-		callResult: &mcpcontract.CallToolResult{
-			Content: []mcpcontract.ContentBlock{{Type: "text", Text: strings.Repeat("x", maxMCPModelOutputBytes+1)}},
+		callResult: &CallToolResult{
+			Content: []ContentBlock{{Type: "text", Text: strings.Repeat("x", maxMCPModelOutputBytes+1)}},
 		},
 	}
 	manager := managerWithClient(client)
@@ -611,8 +628,8 @@ func TestRemoteToolOversizedStructuredResultIsNotExposed(t *testing.T) {
 	ctx := context.Background()
 	client := &fakeClient{
 		tools: []message.ToolDefinition{{Name: "query", InputSchema: message.JSONSchema{Type: "object"}}},
-		callResult: &mcpcontract.CallToolResult{
-			Content:           []mcpcontract.ContentBlock{{Type: "text", Text: "small"}},
+		callResult: &CallToolResult{
+			Content:           []ContentBlock{{Type: "text", Text: "small"}},
 			StructuredContent: map[string]any{"data": strings.Repeat("x", maxMCPModelOutputBytes)},
 		},
 	}
@@ -632,7 +649,7 @@ func TestRemoteToolCombinedContentBlocksRespectAggregateLimit(t *testing.T) {
 	ctx := context.Background()
 	client := &fakeClient{
 		tools: []message.ToolDefinition{{Name: "read", InputSchema: message.JSONSchema{Type: "object"}}},
-		callResult: &mcpcontract.CallToolResult{Content: []mcpcontract.ContentBlock{
+		callResult: &CallToolResult{Content: []ContentBlock{
 			{Type: "text", Text: strings.Repeat("a", maxMCPModelOutputBytes/2)},
 			{Type: "text", Text: strings.Repeat("b", maxMCPModelOutputBytes/2)},
 		}},
@@ -683,7 +700,7 @@ func managerWithClient(client *fakeClient) *Manager {
 	return NewManager(map[string]config.MCPServerConfig{
 		"local": {Enabled: true, Transport: "stdio", Command: "fake", ConnectTimeout: "1s", CallTimeout: "1s", MaxConcurrency: 1},
 	}, "test", nil, Options{
-		Dial: func(context.Context, string, config.MCPServerConfig, map[string]string, http.Header) (mcpcontract.Client, error) {
+		Dial: func(context.Context, string, config.MCPServerConfig, map[string]string, http.Header) (Client, error) {
 			return client, nil
 		},
 		Sleep: func(context.Context, time.Duration) error { return nil },
@@ -692,11 +709,11 @@ func managerWithClient(client *fakeClient) *Manager {
 
 func TestManagerProjectsResourcesPromptsAndSubscriptions(t *testing.T) {
 	client := &fakeClient{
-		resources:         []mcpcontract.Resource{{URI: "file:///guide.md", Name: "Guide", MimeType: "text/markdown"}},
-		resourceTemplates: []mcpcontract.ResourceTemplate{{URITemplate: "file:///{name}.md", Name: "Markdown"}},
-		resourceContent:   map[string][]mcpcontract.ResourceContent{"file:///guide.md": {{URI: "file:///guide.md", MimeType: "text/markdown", Text: "# Guide"}}},
-		prompts:           []mcpcontract.Prompt{{Name: "summarize", Description: "Summarize text", Arguments: []mcpcontract.PromptArgument{{Name: "text", Required: true}}}},
-		promptMessages:    []mcpcontract.PromptMessage{{Role: "user", Content: mcpcontract.ContentBlock{Type: "text", Text: "Summarize this"}}},
+		resources:         []Resource{{URI: "file:///guide.md", Name: "Guide", MimeType: "text/markdown"}},
+		resourceTemplates: []ResourceTemplate{{URITemplate: "file:///{name}.md", Name: "Markdown"}},
+		resourceContent:   map[string][]ResourceContent{"file:///guide.md": {{URI: "file:///guide.md", MimeType: "text/markdown", Text: "# Guide"}}},
+		prompts:           []Prompt{{Name: "summarize", Description: "Summarize text", Arguments: []PromptArgument{{Name: "text", Required: true}}}},
+		promptMessages:    []PromptMessage{{Role: "user", Content: ContentBlock{Type: "text", Text: "Summarize this"}}},
 	}
 	manager := managerWithClient(client)
 	if err := manager.Start(context.Background()); err != nil {
@@ -727,12 +744,12 @@ func TestManagerProjectsResourcesPromptsAndSubscriptions(t *testing.T) {
 }
 
 func TestManagerRefreshesCatalogAfterListChangedNotification(t *testing.T) {
-	client := &fakeClient{resources: []mcpcontract.Resource{{URI: "file:///one", Name: "One"}}}
+	client := &fakeClient{resources: []Resource{{URI: "file:///one", Name: "One"}}}
 	notifications := make(chan Notification, 1)
 	manager := NewManager(map[string]config.MCPServerConfig{
 		"local": {Enabled: true, Transport: "stdio", Command: "fake", ConnectTimeout: "1s", CallTimeout: "1s", MaxConcurrency: 1},
 	}, "test", nil, Options{
-		Dial: func(context.Context, string, config.MCPServerConfig, map[string]string, http.Header) (mcpcontract.Client, error) {
+		Dial: func(context.Context, string, config.MCPServerConfig, map[string]string, http.Header) (Client, error) {
 			return client, nil
 		},
 		Notification: func(notification Notification) { notifications <- notification },
@@ -742,9 +759,9 @@ func TestManagerRefreshesCatalogAfterListChangedNotification(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = manager.Close() })
 	client.mu.Lock()
-	client.resources = []mcpcontract.Resource{{URI: "file:///two", Name: "Two"}}
+	client.resources = []Resource{{URI: "file:///two", Name: "Two"}}
 	client.mu.Unlock()
-	manager.handleNotification(context.Background(), "local", mcpcontract.Notification{Kind: "resources/list_changed"})
+	manager.handleNotification(context.Background(), "local", ProtocolNotification{Kind: "resources/list_changed"})
 	select {
 	case notification := <-notifications:
 		if notification.Kind != "resources/list_changed" || notification.Server != "local" {
@@ -774,7 +791,7 @@ func TestManagerInjectsStoredOAuthCredentialIntoRemoteDial(t *testing.T) {
 	var authorization string
 	manager := NewManager(map[string]config.MCPServerConfig{"remote": serverConfig}, "test", nil, Options{
 		OAuth: &OAuthBroker{Store: store},
-		Dial: func(_ context.Context, _ string, _ config.MCPServerConfig, _ map[string]string, headers http.Header) (mcpcontract.Client, error) {
+		Dial: func(_ context.Context, _ string, _ config.MCPServerConfig, _ map[string]string, headers http.Header) (Client, error) {
 			authorization = headers.Get("Authorization")
 			return &fakeClient{}, nil
 		},
@@ -792,7 +809,7 @@ func TestManagerRejectsTypedNilDialClientWithoutClosePanic(t *testing.T) {
 	manager := NewManager(map[string]config.MCPServerConfig{
 		"local": {Enabled: true, Transport: "stdio", Command: "fake", ConnectTimeout: "1s", CallTimeout: "1s", MaxConcurrency: 1},
 	}, "test", nil, Options{
-		Dial: func(context.Context, string, config.MCPServerConfig, map[string]string, http.Header) (mcpcontract.Client, error) {
+		Dial: func(context.Context, string, config.MCPServerConfig, map[string]string, http.Header) (Client, error) {
 			return (*fakeClient)(nil), errors.New("dial failed")
 		},
 		Sleep: func(context.Context, time.Duration) error { return nil },
@@ -814,23 +831,23 @@ type fakeClient struct {
 	listCount          int
 	callCount          int
 	callErr            error
-	callResult         *mcpcontract.CallToolResult
+	callResult         *CallToolResult
 	closeDelay         time.Duration
 	closeBlock         <-chan struct{}
 	closeStarted       chan<- struct{}
 	initializeBlock    <-chan struct{}
 	initializeStarted  chan<- struct{}
 	closed             bool
-	resources          []mcpcontract.Resource
-	resourceContent    map[string][]mcpcontract.ResourceContent
-	resourceTemplates  []mcpcontract.ResourceTemplate
-	prompts            []mcpcontract.Prompt
-	promptMessages     []mcpcontract.PromptMessage
+	resources          []Resource
+	resourceContent    map[string][]ResourceContent
+	resourceTemplates  []ResourceTemplate
+	prompts            []Prompt
+	promptMessages     []PromptMessage
 	subscribed         string
 	unsubscribed       string
 }
 
-func (c *fakeClient) Initialize(_ context.Context, name, version string) (mcpcontract.InitializeResult, error) {
+func (c *fakeClient) Initialize(_ context.Context, name, version string) (InitializeResult, error) {
 	if c.initializeStarted != nil {
 		c.initializeStarted <- struct{}{}
 	}
@@ -840,7 +857,7 @@ func (c *fakeClient) Initialize(_ context.Context, name, version string) (mcpcon
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.initializedName, c.initializedVersion = name, version
-	return mcpcontract.InitializeResult{ServerInfo: mcpcontract.ServerInfo{Name: "fake", Version: "1"}}, nil
+	return InitializeResult{ServerInfo: ServerInfo{Name: "fake", Version: "1"}}, nil
 }
 
 func (c *fakeClient) ListTools(context.Context) ([]message.ToolDefinition, error) {
@@ -850,48 +867,48 @@ func (c *fakeClient) ListTools(context.Context) ([]message.ToolDefinition, error
 	return append([]message.ToolDefinition(nil), c.tools...), nil
 }
 
-func (c *fakeClient) CallTool(_ context.Context, name string, _ map[string]any) (mcpcontract.CallToolResult, error) {
+func (c *fakeClient) CallTool(_ context.Context, name string, _ map[string]any) (CallToolResult, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.callCount++
 	c.lastTool = name
 	if c.callErr != nil {
-		return mcpcontract.CallToolResult{}, c.callErr
+		return CallToolResult{}, c.callErr
 	}
 	if c.callResult != nil {
 		return *c.callResult, nil
 	}
-	return mcpcontract.CallToolResult{Content: []mcpcontract.ContentBlock{{Type: "text", Text: "ok"}}, StructuredContent: map[string]any{"ok": true}}, nil
+	return CallToolResult{Content: []ContentBlock{{Type: "text", Text: "ok"}}, StructuredContent: map[string]any{"ok": true}}, nil
 }
 
-func (c *fakeClient) ListResources(context.Context) ([]mcpcontract.Resource, error) {
+func (c *fakeClient) ListResources(context.Context) ([]Resource, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return append([]mcpcontract.Resource(nil), c.resources...), nil
+	return append([]Resource(nil), c.resources...), nil
 }
 
-func (c *fakeClient) ListResourceTemplates(context.Context) ([]mcpcontract.ResourceTemplate, error) {
+func (c *fakeClient) ListResourceTemplates(context.Context) ([]ResourceTemplate, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return append([]mcpcontract.ResourceTemplate(nil), c.resourceTemplates...), nil
+	return append([]ResourceTemplate(nil), c.resourceTemplates...), nil
 }
 
-func (c *fakeClient) ReadResource(_ context.Context, uri string) ([]mcpcontract.ResourceContent, error) {
+func (c *fakeClient) ReadResource(_ context.Context, uri string) ([]ResourceContent, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return append([]mcpcontract.ResourceContent(nil), c.resourceContent[uri]...), nil
+	return append([]ResourceContent(nil), c.resourceContent[uri]...), nil
 }
 
-func (c *fakeClient) ListPrompts(context.Context) ([]mcpcontract.Prompt, error) {
+func (c *fakeClient) ListPrompts(context.Context) ([]Prompt, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return append([]mcpcontract.Prompt(nil), c.prompts...), nil
+	return append([]Prompt(nil), c.prompts...), nil
 }
 
-func (c *fakeClient) GetPrompt(context.Context, string, map[string]string) ([]mcpcontract.PromptMessage, error) {
+func (c *fakeClient) GetPrompt(context.Context, string, map[string]string) ([]PromptMessage, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return append([]mcpcontract.PromptMessage(nil), c.promptMessages...), nil
+	return append([]PromptMessage(nil), c.promptMessages...), nil
 }
 
 func (c *fakeClient) SubscribeResource(_ context.Context, uri string) error {
@@ -936,7 +953,7 @@ func (c *fakeClient) listCalls() int {
 	return c.listCount
 }
 
-func (c *fakeClient) setCallResult(result *mcpcontract.CallToolResult) {
+func (c *fakeClient) setCallResult(result *CallToolResult) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.callResult = result

@@ -273,6 +273,10 @@ func (s *Service) commitToolRecord(ctx context.Context, tx *sql.Tx, tracker *blo
 	return record, nil
 }
 
+func (s *Service) LoadToolRecord(ctx context.Context, sessionID, runID, toolCallID string) (ToolRecord, error) {
+	return s.loadToolRecord(ctx, sessionID, runID, toolCallID)
+}
+
 func (s *Service) loadToolRecord(ctx context.Context, sessionID, runID, toolCallID string) (ToolRecord, error) {
 	return s.loadToolRecordFrom(ctx, s.db, sessionID, runID, toolCallID)
 }

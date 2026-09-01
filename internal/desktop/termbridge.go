@@ -21,7 +21,7 @@ type TerminalSession struct {
 	State string `json:"state"`
 }
 
-// TerminalEvent is a desktop-local event family. It uses a dedicated Wails
+// TerminalEvent is a desktop-local event family. It uses a dedicated desktop
 // channel so PTY output cannot occupy the runtime event broker (UI-002).
 type TerminalEvent struct {
 	Sequence uint64          `json:"sequence"`

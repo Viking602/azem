@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/azem/internal/blobstore"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 	"github.com/Viking602/venat/message"
@@ -459,8 +460,8 @@ func TestSaveRunCheckpointPersistsHistoryWithoutCompletingTurn(t *testing.T) {
 	summary.Kind = message.KindCompactionSummary
 	facts := message.NewText(message.RoleSystem, `{"version":1,"run_id":"run-1"}`)
 	facts.Kind = message.KindCustom
-	facts.Visibility = message.VisibilityPrivate
 	facts.Metadata = map[string]string{"azem.context.execution_checkpoint": "1"}
+	agentruntime.SetMessageVisibility(&facts, agentruntime.MessageVisibilityPrivate)
 	history := ModelHistory{
 		ProviderID: "chatgpt", ModelID: "model", InstructionFingerprint: "instructions", StaticPrefixHash: "instructions",
 		Messages: []message.Message{message.NewText(message.RoleSystem, "rules"), message.NewText(message.RoleUser, "long task"), summary, facts},
@@ -1075,6 +1076,58 @@ func TestArchiveInactiveSkipsPinnedRecentAndCurrentSessions(t *testing.T) {
 	}
 }
 
+func TestSetUIStateSkipsDurableWritesWhenTheValueIsUnchanged(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "ui-state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	service := NewService(store.DB(), store.Blobs())
+	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Session"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`CREATE TABLE ui_state_mutations (value INTEGER NOT NULL)`,
+		`CREATE TRIGGER ui_state_insert AFTER INSERT ON session_ui_state BEGIN INSERT INTO ui_state_mutations(value) VALUES(1); END`,
+		`CREATE TRIGGER ui_state_update AFTER UPDATE ON session_ui_state BEGIN INSERT INTO ui_state_mutations(value) VALUES(1); END`,
+	} {
+		if _, err := store.DB().ExecContext(ctx, statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertMutations := func(want int) {
+		t.Helper()
+		var got int
+		if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM ui_state_mutations`).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Fatalf("UI state mutations=%d, want %d", got, want)
+		}
+	}
+	if err := service.SetUIState(ctx, "session", "unread", false); err != nil {
+		t.Fatal(err)
+	}
+	assertMutations(0)
+	if err := service.SetUIState(ctx, "session", "unread", true); err != nil {
+		t.Fatal(err)
+	}
+	assertMutations(1)
+	if err := service.SetUIState(ctx, "session", "unread", true); err != nil {
+		t.Fatal(err)
+	}
+	assertMutations(1)
+	if err := service.SetUIState(ctx, "session", "unread", false); err != nil {
+		t.Fatal(err)
+	}
+	assertMutations(2)
+	if err := service.SetUIState(ctx, "session", "unread", false); err != nil {
+		t.Fatal(err)
+	}
+	assertMutations(2)
+}
+
 func TestListKeepsArchivedSessionsOutsideTheActiveLimit(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "archive-list.db"))
@@ -1447,7 +1500,7 @@ func TestForkRebuildsDerivedContextInsteadOfCopyingArchiveCheckpoint(t *testing.
 	}
 	carrier := message.NewText(message.RoleUser, "archive carrier "+archive.ID)
 	carrier.Kind = message.KindCompactionSummary
-	carrier.Visibility = message.VisibilityPrivate
+	agentruntime.SetMessageVisibility(&carrier, agentruntime.MessageVisibilityPrivate)
 	checkpoint := RunCheckpoint{
 		RunID: "run", CacheIdentity: "archive-cache", ExpectedHighWater: &sequence, Manifest: manifest,
 		ModelHistory: ModelHistory{Messages: []message.Message{carrier}},

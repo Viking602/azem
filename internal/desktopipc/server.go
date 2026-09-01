@@ -147,6 +147,29 @@ func (server *Server) serveConnection(parent context.Context, connection net.Con
 	defer transferManager.Close()
 	eventErrors := make(chan error, 1)
 	go func() { eventErrors <- server.forwardEvents(ctx, codec, subscription.Events) }()
+	// Startup refreshes use a separate, bounded FIFO so network latency cannot
+	// block navigation. Keep one dashboard query in flight per connection.
+	dashboards := make(chan Envelope, 1)
+	go func() {
+		for {
+			select {
+			case request := <-dashboards:
+				if ctx.Err() != nil {
+					return
+				}
+				response := server.dispatchResponse(request, nil)
+				if ctx.Err() != nil {
+					return
+				}
+				if err := codec.WriteEnvelope(response); err != nil {
+					_ = connection.Close()
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 	for {
 		if err := connection.SetReadDeadline(time.Now().Add(90 * time.Second)); err != nil {
 			return
@@ -198,6 +221,17 @@ func (server *Server) serveConnection(parent context.Context, connection net.Con
 			}
 			return
 		case FrameRequest:
+			// Detail reads, mutations, terminal replay and transfers stay ordered.
+			if envelope.Method == MethodPullRequestDashboard {
+				select {
+				case dashboards <- *envelope:
+				default:
+					if err := writeProtocolError(codec, envelope.ID, "request_busy", errors.New("dashboard refresh already queued")); err != nil {
+						return
+					}
+				}
+				continue
+			}
 			if envelope.Method == MethodTerminalReplay {
 				params, replayErr := decodeParams[idParams](envelope.Payload)
 				response := NewEnvelope(FrameResponse)
@@ -217,16 +251,7 @@ func (server *Server) serveConnection(parent context.Context, connection net.Con
 				}
 				continue
 			}
-			result, dispatchErr := server.dispatchRequest(*envelope, transferManager)
-			response := NewEnvelope(FrameResponse)
-			response.ID = envelope.ID
-			response.Method = envelope.Method
-			if dispatchErr != nil {
-				response.Error = &ProtocolError{Code: "request_failed", Message: dispatchErr.Error()}
-			} else {
-				response.Payload = mustJSON(result)
-			}
-			if err := codec.WriteEnvelope(response); err != nil {
+			if err := codec.WriteEnvelope(server.dispatchResponse(*envelope, transferManager)); err != nil {
 				return
 			}
 		default:
@@ -242,6 +267,18 @@ func (server *Server) serveConnection(parent context.Context, connection net.Con
 		default:
 		}
 	}
+}
+
+func (server *Server) dispatchResponse(request Envelope, transfers *TransferManager) Envelope {
+	result, err := server.dispatchRequest(request, transfers)
+	response := NewEnvelope(FrameResponse)
+	response.ID, response.Method = request.ID, request.Method
+	if err != nil {
+		response.Error = &ProtocolError{Code: "request_failed", Message: err.Error()}
+	} else {
+		response.Payload = mustJSON(result)
+	}
+	return response
 }
 
 func (server *Server) authenticate(codec *Codec) (Authenticate, error) {

@@ -67,6 +67,7 @@ func (r *ProviderRuntime) GenerateTitle(ctx context.Context, input titleGenerati
 			kind: "title", provider: providerID, model: resolvedModel, transport: driver.Metadata().Name,
 		}
 	}
+	driver = retryProviderDriver(ctx, host, input.SessionID, input.RunID, providerID, r.cfg.Retry, driver)
 	maxTokens := 0
 	if providerID != "chatgpt" {
 		maxTokens = 64
@@ -151,6 +152,7 @@ func (r *ProviderRuntime) GenerateRecap(ctx context.Context, input recapGenerati
 			kind: "recap", provider: providerID, model: resolvedModel, transport: driver.Metadata().Name,
 		}
 	}
+	driver = retryProviderDriver(ctx, r.host, input.SessionID, input.RunID, providerID, r.cfg.Retry, driver)
 	requestMaxTokens := 0
 	if providerID != "chatgpt" {
 		requestMaxTokens = maxOutputTokens

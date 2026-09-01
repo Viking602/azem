@@ -13,6 +13,7 @@ import (
 	"time"
 
 	agentservice "github.com/Viking602/azem/internal/agent"
+	"github.com/Viking602/azem/internal/agentruntime"
 	authservice "github.com/Viking602/azem/internal/auth"
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/contextfiles"
@@ -27,7 +28,6 @@ import (
 	"github.com/Viking602/azem/internal/session"
 	"github.com/Viking602/azem/internal/skills"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
-	"github.com/Viking602/venat/api"
 )
 
 type BootstrapResult struct {
@@ -54,13 +54,19 @@ func BootstrapDesktopAtWorkspace(ctx context.Context, startupWorkspace string, c
 }
 
 func (b *bootstrapAssembly) build(startupWorkspace, configFile string, forceWorkspace, desktopMode bool) (BootstrapResult, error) {
+	databasePath, err := config.RuntimeDatabasePath()
+	if err != nil {
+		return BootstrapResult{}, err
+	}
+	b.recoveryFence, b.shouldRecover, err = sqlitestore.AcquireRecoveryFence(b.ctx, databasePath)
+	if err != nil {
+		return BootstrapResult{}, err
+	}
 	if err := b.loadConfiguration(startupWorkspace, configFile, forceWorkspace, desktopMode); err != nil {
 		return BootstrapResult{}, err
 	}
-	var err error
-	b.recoveryFence, b.shouldRecover, err = sqlitestore.AcquireRecoveryFence(b.ctx, b.paths.Database)
-	if err != nil {
-		return BootstrapResult{}, err
+	if b.paths.Database != databasePath {
+		return BootstrapResult{}, fmt.Errorf("resolved database path changed after acquiring recovery fence: %q != %q", b.paths.Database, databasePath)
 	}
 	if err := b.buildCore(forceWorkspace, desktopMode); err != nil {
 		return BootstrapResult{}, err
@@ -105,13 +111,19 @@ func (b *bootstrapAssembly) loadConfiguration(startupWorkspace, configFile strin
 		return fmt.Errorf("resolve config directory for skills: %w", err)
 	}
 	b.cfg, b.paths, b.homeDir, b.configDir = cfg, paths, homeDir, configDir
-	return b.loadPlugins(desktopMode)
+	if err := b.loadPlugins(desktopMode); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (b *bootstrapAssembly) restoreDesktopWorkspace(paths *config.Paths) error {
 	var err error
 	b.store, err = sqlitestore.Open(b.ctx, paths.Database, sqlitestore.WithBlobRoot(filepath.Join(paths.DataDir, "blobs")))
 	if err != nil {
+		return err
+	}
+	if err := b.prepareRuntimeRecovery(); err != nil {
 		return err
 	}
 	b.sessions = session.NewService(b.store.DB(), b.store.Blobs())
@@ -139,23 +151,13 @@ func (b *bootstrapAssembly) buildCore(forceWorkspace, desktopMode bool) error {
 			return err
 		}
 	}
+	if err := b.prepareRuntimeRecovery(); err != nil {
+		return err
+	}
 	if b.sessions == nil {
 		b.sessions = session.NewService(b.store.DB(), b.store.Blobs())
 	}
 	b.memory = memory.NewService(b.store.DB(), b.paths.Workspace)
-	if b.cfg.Discovery.ContextFiles {
-		disabled := make(map[string]bool, len(b.cfg.Discovery.DisabledProviders))
-		for _, provider := range b.cfg.Discovery.DisabledProviders {
-			disabled[strings.ToLower(strings.TrimSpace(provider))] = true
-		}
-		b.contextFiles, err = contextfiles.Discover(b.ctx, contextfiles.Options{
-			Workspace: b.paths.Workspace, HomeDir: b.homeDir, DisabledProviders: disabled,
-			AdditionalFiles: append([]string(nil), b.cfg.Discovery.AdditionalContextFiles...),
-		})
-		if err != nil {
-			return fmt.Errorf("discover context files: %w", err)
-		}
-	}
 	if b.cfg.Discovery.Rules {
 		disabledProviders := make(map[string]bool, len(b.cfg.Discovery.DisabledProviders))
 		for _, provider := range b.cfg.Discovery.DisabledProviders {
@@ -280,8 +282,6 @@ func (b *bootstrapAssembly) wireService() error {
 	b.service.SetWorkspaceAnchor(canonicalWorkspaceAnchor(b.paths.Workspace))
 	b.service.AttachAttachments(filepath.Join(b.paths.DataDir, "attachments"))
 	b.service.AttachMemory(b.memory, recap.NewService(b.store.DB(), b.cfg.Workspace.Root))
-	b.service.AttachContextFiles(b.contextFiles)
-	b.service.AttachRules(b.ruleResult)
 	b.service.AttachAuth(b.authentication, b.modelCatalog)
 	b.service.AttachSkills(b.skillCatalog)
 	if b.cfg.AutoLearn.Enabled {
@@ -330,6 +330,32 @@ func (b *bootstrapAssembly) wireService() error {
 	if b.cfg.AutoLearn.Enabled {
 		b.service.AttachAutoLearnInstructions()
 	}
+	disabledContextProviders := make(map[string]bool, len(b.cfg.Discovery.DisabledProviders))
+	for _, provider := range b.cfg.Discovery.DisabledProviders {
+		disabledContextProviders[strings.ToLower(strings.TrimSpace(provider))] = true
+	}
+	contextOptions := contextfiles.Options{
+		Workspace: b.paths.Workspace, HomeDir: b.homeDir, DisabledProviders: disabledContextProviders,
+		AdditionalFiles: append([]string(nil), b.cfg.Discovery.AdditionalContextFiles...),
+	}
+	discoverContextFiles := b.cfg.Discovery.ContextFiles
+	ruleResult := b.ruleResult
+	b.service.AttachProjectContextLoader(func(ctx context.Context) (string, []string, error) {
+		var result contextfiles.Result
+		var err error
+		if discoverContextFiles {
+			result, err = contextfiles.Discover(ctx, contextOptions)
+			if err != nil {
+				return "", nil, fmt.Errorf("discover context files: %w", err)
+			}
+		}
+		rendered := contextfiles.Render(result)
+		if prompt := rules.Render(ruleResult, rendered); prompt != "" {
+			rendered = strings.TrimSpace(strings.Join([]string{rendered, prompt}, "\n\n"))
+		}
+		diagnostics := append(append([]string(nil), result.Warnings...), ruleResult.Warnings...)
+		return rendered, diagnostics, nil
+	})
 	if err := b.resources.Register("mcp", mcpResourceHandler{manager: b.manager}); err != nil {
 		return err
 	}
@@ -427,7 +453,7 @@ func (b *bootstrapAssembly) attachRecovery(teamResumer recovery.TeamResumer, run
 	if err != nil {
 		return err
 	}
-	b.recoveryService.SetBeforeResume(func(recoveryCtx context.Context, runs []api.Run) error {
+	b.recoveryService.SetBeforeResume(func(recoveryCtx context.Context, runs []agentruntime.Run) error {
 		for _, run := range runs {
 			if err := b.sessions.InterruptRunningToolRecordsForRun(recoveryCtx, run.ID, time.Now().UTC()); err != nil {
 				return err
@@ -456,12 +482,31 @@ func (b *bootstrapAssembly) start() error {
 	return nil
 }
 
+func (b *bootstrapAssembly) prepareRuntimeRecovery() error {
+	if !b.shouldRecover || b.recoveryPrepared {
+		return nil
+	}
+	at := time.Now().UTC()
+	expired, quarantined, err := b.store.PrepareRecovery(b.ctx, at)
+	if err != nil {
+		return err
+	}
+	b.recoveryPrepared = true
+	b.recoveryPreparedAt = at
+	b.recoveryExpiredLeases = expired
+	b.recoveryQuarantinedAttempts = quarantined
+	return nil
+}
+
 func (b *bootstrapAssembly) recover() error {
 	if !b.shouldRecover {
 		b.service.AttachReconcileResolver(b.coding)
 		return nil
 	}
-	summary, err := b.recoveryService.Recover(b.ctx)
+	summary, err := b.recoveryService.RecoverPrepared(b.ctx, recovery.Preparation{
+		At: b.recoveryPreparedAt, ExpiredLeases: b.recoveryExpiredLeases,
+		QuarantinedAttempts: b.recoveryQuarantinedAttempts,
+	})
 	if err != nil {
 		return err
 	}

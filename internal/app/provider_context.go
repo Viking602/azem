@@ -12,10 +12,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/contextarchive"
 	"github.com/Viking602/azem/internal/session"
-	"github.com/Viking602/venat/api"
+	hyagent "github.com/Viking602/venat/agent"
 	"github.com/Viking602/venat/message"
 	"github.com/Viking602/venat/tool"
 )
@@ -71,8 +72,8 @@ type automationTurn struct {
 	MaxSubagents         int
 	Drivers              []tool.Driver
 	Metadata             map[string]string
-	Budget               api.TaskBudget
-	ChildBudget          api.TaskBudget
+	Budget               agentruntime.TaskBudget
+	ChildBudget          agentruntime.TaskBudget
 	ObservePath          func(string)
 	ObserveTool          func(string)
 }
@@ -111,7 +112,6 @@ type TurnRequest struct {
 	modelHistory           session.ModelHistory
 	toolRecords            []session.ToolRecord
 	checkpointBoundary     *int64
-	immutableIdentity      string
 	origin                 string
 	wakeData               map[string]string
 	automation             *automationTurn
@@ -245,7 +245,7 @@ func (c turnContext) savedModelHistoryCompatible() bool {
 		*saved.CoveredThroughSequence == *c.checkpointBoundary
 }
 
-func (c turnContext) Build(ctx context.Context, task api.Task) ([]message.Message, error) {
+func (c turnContext) Build(ctx context.Context, request hyagent.Request) ([]message.Message, error) {
 	saved := c.modelHistory
 	compatible := c.savedModelHistoryCompatible()
 	messages := make([]message.Message, 0, len(saved.Messages)+len(c.history)+6)
@@ -270,17 +270,17 @@ func (c turnContext) Build(ctx context.Context, task api.Task) ([]message.Messag
 	messages = append(messages, c.toolContinuityMessages(ctx)...)
 	if text := strings.TrimSpace(c.privateContext); text != "" {
 		value := message.NewText(message.RoleSystem, "[Trusted private hook context]\n"+text)
-		value.Visibility = message.VisibilityPrivate
+		markPrivateMessage(&value)
 		messages = append(messages, value)
 	}
 	if text := runtimeDeadlineContext(ctx, c.deadlineAt); text != "" {
 		value := message.NewText(message.RoleSystem, "[Trusted runtime deadline]\n"+text)
-		value.Visibility = message.VisibilityPrivate
+		markPrivateMessage(&value)
 		messages = append(messages, value)
 	}
 	if text := strings.TrimSpace(c.approvedPlanContext); text != "" {
 		value := message.NewText(message.RoleSystem, "[Trusted approved execution plan]\n"+text)
-		value.Visibility = message.VisibilityPrivate
+		markPrivateMessage(&value)
 		messages = append(messages, value)
 	}
 	todo, err := c.currentTodo(ctx)
@@ -293,7 +293,7 @@ func (c turnContext) Build(ctx context.Context, task api.Task) ([]message.Messag
 	historical := strings.TrimSpace(c.historicalContext)
 	if historical != "" {
 		policy := message.NewText(message.RoleSystem, historicalEvidencePolicy)
-		policy.Visibility = message.VisibilityPrivate
+		markPrivateMessage(&policy)
 		messages = append(messages, policy)
 	}
 	if compatible {
@@ -307,15 +307,15 @@ func (c turnContext) Build(ctx context.Context, task api.Task) ([]message.Messag
 	}
 	if historical != "" {
 		data := message.NewText(message.RoleUser, "<historical-evidence-json>\n"+historical+"\n</historical-evidence-json>")
-		data.Visibility = message.VisibilityPrivate
+		markPrivateMessage(&data)
 		messages = append(messages, data)
 	}
 	if visual := visionEvidenceText(c.visionContext); visual != "" {
 		data := message.NewText(message.RoleUser, visual)
-		data.Visibility = message.VisibilityPrivate
+		markPrivateMessage(&data)
 		messages = append(messages, data)
 	}
-	goal := strings.TrimSpace(task.Goal)
+	goal := strings.TrimSpace(request.Prompt)
 	images := c.images
 	for _, block := range c.history {
 		if c.runID != "" && block.RunID == c.runID && block.Kind == "user" {
@@ -386,7 +386,7 @@ func (c turnContext) validateModelVisibleDurability(messages []message.Message, 
 		admit(UserMessageWithAttachments(goal, images))
 	}
 	for _, value := range messages {
-		if value.Visibility == message.VisibilityPrivate {
+		if isPrivateMessage(value) {
 			continue
 		}
 		if _, ok := durable[durableMessageKey(value)]; !ok {
@@ -400,7 +400,7 @@ func (c turnContext) validateModelVisibleDurability(messages []message.Message, 
 }
 
 func durableMessageKey(value message.Message) string {
-	value.CreatedAt = time.Time{}
+	setMessageCreatedAt(&value, time.Time{})
 	payload, err := json.Marshal(value)
 	if err != nil {
 		return fmt.Sprintf("unencodable:%s:%s:%s", value.Role, value.Kind, value.Text)
@@ -469,9 +469,9 @@ func (c turnContext) todoReminderMessage(reminder string) message.Message {
 }
 
 func (c turnContext) tagTodoReminder(value message.Message) message.Message {
-	value.Visibility = message.VisibilityPrivate
+	markPrivateMessage(&value)
 	if c.runID != "" {
-		value.Metadata = map[string]string{todoReminderRunMetadataKey: c.runID}
+		value.Metadata[todoReminderRunMetadataKey] = c.runID
 	}
 	return value
 }
@@ -509,7 +509,7 @@ func (c turnContext) refreshTodoReminder(ctx context.Context, history []message.
 	}
 	target := -1
 	for index, current := range history {
-		if current.Role != message.RoleSystem || current.Visibility != message.VisibilityPrivate || !strings.HasPrefix(current.Text, todoReminderPrefix) {
+		if current.Role != message.RoleSystem || !isPrivateMessage(current) || !strings.HasPrefix(current.Text, todoReminderPrefix) {
 			continue
 		}
 		if c.runID == "" || current.Metadata[todoReminderRunMetadataKey] == c.runID {
@@ -575,7 +575,7 @@ func compactionAtomicGroups(messages []message.Message) ([]compactionAtomicGroup
 func recentUserIndexes(history []message.Message, prefixEnd, count int) []int {
 	indexes := make([]int, 0, count)
 	for index := len(history) - 1; index >= prefixEnd && len(indexes) < count; index-- {
-		if history[index].Role == message.RoleUser && history[index].Visibility != message.VisibilityPrivate {
+		if history[index].Role == message.RoleUser && !isPrivateMessage(history[index]) {
 			indexes = append(indexes, index)
 		}
 	}

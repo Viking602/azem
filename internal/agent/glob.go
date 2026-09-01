@@ -6,14 +6,13 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Viking602/venat/coding"
 	"github.com/Viking602/venat/tool"
 )
 
-const ToolGlob = "coding.glob"
+const ToolGlob = "glob"
 
 type globDriver struct {
-	ws coding.Workspace
+	ws Workspace
 }
 
 type globInput struct {
@@ -22,7 +21,7 @@ type globInput struct {
 	Limit   int    `json:"limit,omitempty"`
 }
 
-func newGlobDriver(ws coding.Workspace) tool.Driver {
+func newGlobDriver(ws Workspace) tool.Driver {
 	return globDriver{ws: ws}
 }
 
@@ -41,10 +40,6 @@ func (d globDriver) Definition() tool.Definition {
 			Required:             []string{"pattern"},
 			AdditionalProperties: &additional,
 		},
-		EffectType:         tool.EffectReadOnly,
-		RequiresActionTask: false,
-		RiskLevel:          "low",
-		PolicyTags:         []string{"coding", "read"},
 	}
 }
 
@@ -58,7 +53,7 @@ func (d globDriver) Execute(ctx context.Context, call tool.Call, _ tool.UpdateSi
 		return globError(call, "pattern is required"), nil
 	}
 	glob := joinWorkspaceGlob(in.Path, pattern)
-	res, err := d.ws.ListFiles(ctx, coding.ListFilesRequest{Glob: glob, Limit: in.Limit})
+	res, err := d.ws.ListFiles(ctx, ListFilesRequest{Glob: glob, Limit: in.Limit})
 	if err != nil {
 		return globError(call, err.Error()), nil
 	}
@@ -71,7 +66,7 @@ func (d globDriver) Execute(ctx context.Context, call tool.Call, _ tool.UpdateSi
 }
 
 func globError(call tool.Call, message string) tool.Result {
-	return tool.Result{ToolCallID: call.ID, Name: call.Name, Content: "coding.glob failed: " + message, IsError: true}
+	return tool.Result{ToolCallID: call.ID, Name: call.Name, Content: "glob failed: " + message, IsError: true}
 }
 
 func joinWorkspaceGlob(base, pattern string) string {

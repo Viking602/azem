@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"testing"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	sdk "github.com/Viking602/llmux"
 	"github.com/Viking602/venat/message"
 	hyprovider "github.com/Viking602/venat/provider"
@@ -222,7 +223,7 @@ func TestConvertRequestPreservesPrivateSystemRoleOnOpenAIFollowup(t *testing.T) 
 
 func privateSystemFollowupRequest() hyprovider.Request {
 	private := message.NewText(message.RoleSystem, "trusted follow-up context")
-	private.Visibility = message.VisibilityPrivate
+	agentruntime.SetMessageVisibility(&private, agentruntime.MessageVisibilityPrivate)
 	return hyprovider.Request{Messages: []message.Message{
 		message.NewText(message.RoleSystem, "base instructions"),
 		message.NewText(message.RoleUser, "first question"),

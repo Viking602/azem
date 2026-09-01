@@ -39,8 +39,7 @@ func SelectDeterministicChecks(input SelectInput) (session.VerificationPlanV1, e
 	}
 	goFiles := make([]string, 0)
 	goPackages := make(map[string]struct{})
-	frontendTests := make([]string, 0)
-	frontendTouched, pythonTouched, sqliteTouched, contractsTouched := false, false, false, false
+	gpuiTouched, pythonTouched, sqliteTouched, contractsTouched := false, false, false, false
 	artifacts := make([]string, 0)
 	for _, touched := range input.Touched {
 		path, err := normalizeTouchedPath(touched.Path)
@@ -50,11 +49,8 @@ func SelectDeterministicChecks(input SelectInput) (session.VerificationPlanV1, e
 		if touched.Generated {
 			artifacts = append(artifacts, path)
 		}
-		if strings.HasPrefix(path, "frontend/") {
-			frontendTouched = true
-			if strings.HasSuffix(path, ".test.ts") || strings.HasSuffix(path, ".test.tsx") {
-				frontendTests = append(frontendTests, strings.TrimPrefix(path, "frontend/"))
-			}
+		if strings.HasPrefix(path, "gpui/") {
+			gpuiTouched = true
 		}
 		if strings.HasSuffix(path, ".py") {
 			pythonTouched = true
@@ -62,7 +58,7 @@ func SelectDeterministicChecks(input SelectInput) (session.VerificationPlanV1, e
 		if strings.HasPrefix(path, "internal/store/sqlite/") && (strings.HasSuffix(path, ".sql") || strings.Contains(path, "/dbgen/")) {
 			sqliteTouched = true
 		}
-		if path == "internal/app/contracts.go" || strings.HasPrefix(path, "internal/desktop/") || path == "frontend/src/contracts.ts" {
+		if path == "internal/app/contracts.go" || strings.HasPrefix(path, "internal/desktop/") || path == "gpui/crates/azem-ipc/src/generated.rs" {
 			contractsTouched = true
 		}
 		if strings.HasSuffix(path, ".go") {
@@ -70,12 +66,11 @@ func SelectDeterministicChecks(input SelectInput) (session.VerificationPlanV1, e
 			goPackages["./"+filepath.ToSlash(filepath.Dir(path))] = struct{}{}
 			continue
 		}
-		if packagePath := nearestGoPackage(input.Workspace, path); packagePath != "" && !strings.HasPrefix(path, "frontend/") {
+		if packagePath := nearestGoPackage(input.Workspace, path); packagePath != "" && !strings.HasPrefix(path, "gpui/") {
 			goPackages[packagePath] = struct{}{}
 		}
 	}
 	sort.Strings(goFiles)
-	sort.Strings(frontendTests)
 	sort.Strings(artifacts)
 	checks := make([]session.VerificationCheckV1, 0, 8+len(artifacts)+len(input.Plan.Checks))
 	appendCommand := func(id, cwd string, timeout int64, environment map[string]string, command ...string) {
@@ -101,11 +96,8 @@ func SelectDeterministicChecks(input SelectInput) (session.VerificationPlanV1, e
 	if contractsTouched {
 		appendCommand("contracts-check", "", 120_000, map[string]string{"GOWORK": "off"}, "go", "run", "./cmd/gen-contracts", "-check")
 	}
-	if frontendTouched {
-		appendCommand("frontend-typecheck", "frontend", 180_000, nil, "bun", "run", "typecheck")
-		if len(frontendTests) > 0 {
-			appendCommand("frontend-tests", "frontend", 300_000, nil, append([]string{"bun", "run", "test", "--"}, frontendTests...)...)
-		}
+	if gpuiTouched {
+		appendCommand("gpui-tests", "gpui", 300_000, nil, "cargo", "test", "--workspace", "--all-targets")
 	}
 	if pythonTouched {
 		appendCommand("python-tests", "", 180_000, nil, "python3", "-m", "unittest", "discover", "eval/harbor", "-p", "*_test.py")

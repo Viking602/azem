@@ -9,8 +9,8 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/azem/internal/blobstore"
-	"github.com/Viking602/venat/api"
 	_ "modernc.org/sqlite"
 )
 
@@ -62,19 +62,18 @@ func Open(ctx context.Context, path string, opts ...OpenOption) (*Provider, erro
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
-	if memory {
-		db.SetMaxOpenConns(1)
-	} else {
-		db.SetMaxOpenConns(8)
-	}
-	db.SetMaxIdleConns(2)
+	// Every unit of work starts an immediate transaction, so SQLite has one
+	// effective writer. Let database/sql queue that writer instead of racing
+	// multiple connections until SQLITE_BUSY.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 	if err := db.PingContext(ctx); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("ping sqlite: %w", err)
 	}
 	for _, pragma := range []string{
 		`PRAGMA foreign_keys = ON`,
-		`PRAGMA busy_timeout = 5000`,
+		`PRAGMA busy_timeout = 30000`,
 	} {
 		if _, err := db.ExecContext(ctx, pragma); err != nil {
 			db.Close()
@@ -144,7 +143,7 @@ func (p *Provider) Blobs() blobstore.Store {
 	return p.blobs
 }
 
-func (p *Provider) Begin(ctx context.Context) (api.UnitOfWork, error) {
+func (p *Provider) Begin(ctx context.Context) (agentruntime.UnitOfWork, error) {
 	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		return nil, fmt.Errorf("begin sqlite unit of work: %w", err)
@@ -152,14 +151,13 @@ func (p *Provider) Begin(ctx context.Context) (api.UnitOfWork, error) {
 	return &unitOfWork{db: p.db, tx: tx, blobs: p.Blobs()}, nil
 }
 
-func (p *Provider) Capabilities(context.Context) (api.StoreCapabilities, error) {
-	return api.StoreCapabilities{
+func (p *Provider) Capabilities(context.Context) (agentruntime.StoreCapabilities, error) {
+	return agentruntime.StoreCapabilities{
 		SupportsTransactions:          true,
 		SupportsBlackboardSubscribe:   false,
 		SupportsListPending:           true,
-		SupportsConcurrentWriters:     true,
+		SupportsConcurrentWriters:     false,
 		SupportsDeadLetterRequeue:     false,
-		SupportsDefinitionSnapshots:   true,
 		SupportsAdmissionReservations: true,
 		SupportsResourceClaims:        true,
 	}, nil
@@ -179,7 +177,7 @@ func (p *Provider) Close(context.Context) error {
 func (p *Provider) DB() *sql.DB { return p.db }
 
 func sqliteDSN(path string, memory bool) string {
-	pragmas := "_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_txlock=immediate"
+	pragmas := "_pragma=foreign_keys(1)&_pragma=busy_timeout(30000)&_txlock=immediate"
 	if memory {
 		return fmt.Sprintf("file:azem-%d?mode=memory&cache=shared&%s", memoryCounter.Add(1), pragmas)
 	}
@@ -224,7 +222,7 @@ func isBusy(err error) bool {
 }
 
 var (
-	_ api.StoreProvider      = (*Provider)(nil)
-	_ api.CapabilityReporter = (*Provider)(nil)
-	_ api.ProviderCloser     = (*Provider)(nil)
+	_ agentruntime.StoreProvider      = (*Provider)(nil)
+	_ agentruntime.CapabilityReporter = (*Provider)(nil)
+	_ agentruntime.ProviderCloser     = (*Provider)(nil)
 )

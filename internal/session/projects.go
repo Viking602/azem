@@ -16,12 +16,14 @@ type Project struct {
 	UpdatedAt time.Time `json:"updatedAt"`
 }
 
+// TouchProject records startup or runtime access without undoing a person's
+// explicit catalog removal. A previously unknown workspace starts visible.
 func (s *Service) TouchProject(ctx context.Context, workspace string) error {
 	workspace, err := canonicalProject(workspace)
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO desktop_projects(workspace,updated_at) VALUES(?,?)
+	_, err = s.db.ExecContext(ctx, `INSERT INTO desktop_projects(workspace,updated_at,visible) VALUES(?,?,1)
 		ON CONFLICT(workspace) DO UPDATE SET updated_at=excluded.updated_at`, workspace, time.Now().UTC().UnixNano())
 	if err != nil {
 		return fmt.Errorf("touch project: %w", err)
@@ -29,8 +31,22 @@ func (s *Service) TouchProject(ctx context.Context, workspace string) error {
 	return nil
 }
 
+// RestoreProject records an explicit open and makes a hidden project visible.
+func (s *Service) RestoreProject(ctx context.Context, workspace string) error {
+	workspace, err := canonicalProject(workspace)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO desktop_projects(workspace,updated_at,visible) VALUES(?,?,1)
+		ON CONFLICT(workspace) DO UPDATE SET updated_at=excluded.updated_at,visible=1`, workspace, time.Now().UTC().UnixNano())
+	if err != nil {
+		return fmt.Errorf("restore project: %w", err)
+	}
+	return nil
+}
+
 func (s *Service) Projects(ctx context.Context) ([]Project, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT workspace,updated_at FROM desktop_projects ORDER BY updated_at DESC,workspace`)
+	rows, err := s.db.QueryContext(ctx, `SELECT workspace,updated_at FROM desktop_projects WHERE visible=1 ORDER BY updated_at DESC,workspace`)
 	if err != nil {
 		return nil, fmt.Errorf("list projects: %w", err)
 	}
@@ -49,6 +65,20 @@ func (s *Service) Projects(ctx context.Context) ([]Project, error) {
 		projects = append(projects, Project{Workspace: canonical, UpdatedAt: time.Unix(0, updatedAt).UTC()})
 	}
 	return projects, rows.Err()
+}
+
+// HideProject removes a workspace from the application catalog without
+// changing its files, sessions, or immutable session ownership. RestoreProject
+// makes an explicitly reopened workspace visible again.
+func (s *Service) HideProject(ctx context.Context, workspace string) error {
+	workspace, err := projectKey(workspace)
+	if err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE desktop_projects SET visible=0 WHERE workspace=?`, workspace); err != nil {
+		return fmt.Errorf("hide project: %w", err)
+	}
+	return nil
 }
 
 func (s *Service) LastProject(ctx context.Context) (string, error) {
@@ -117,8 +147,8 @@ func persistWorkspaceSession(ctx context.Context, tx *sql.Tx, workspace, session
 		query string
 		args  []any
 	}{
-		{"remember project", `INSERT INTO desktop_projects(workspace,updated_at) VALUES(?,?)
-			ON CONFLICT(workspace) DO UPDATE SET updated_at=excluded.updated_at`, []any{workspace, now}},
+		{"remember project", `INSERT INTO desktop_projects(workspace,updated_at,visible) VALUES(?,?,1)
+			ON CONFLICT(workspace) DO UPDATE SET updated_at=excluded.updated_at,visible=1`, []any{workspace, now}},
 		{"assign session project", `INSERT INTO session_workspaces(session_id,workspace,assigned_at) VALUES(?,?,?)
 			ON CONFLICT(session_id) DO UPDATE SET assigned_at=excluded.assigned_at`, []any{sessionID, workspace, now}},
 		{"remember workspace session", `INSERT INTO workspace_session_state(anchor,session_id,updated_at) VALUES(?,?,?)

@@ -303,12 +303,6 @@ func (d *shellDriver) Definition() tool.Definition {
 			Required:             []string{"command"},
 			AdditionalProperties: &additional,
 		},
-		EffectType:         tool.EffectExternalSideEffect,
-		RequiresApproval:   d.approval != "allow",
-		RequiresActionTask: true,
-		RiskLevel:          "high",
-		PolicyTags:         []string{"coding", "shell", "workspace"},
-		Metadata:           map[string]string{"approval": d.approval, "network": d.allowNetwork, "platform": runtime.GOOS, "max_wall_clock_seconds": fmt.Sprint(maxSec)},
 	}
 }
 
@@ -422,7 +416,7 @@ func (d *shellDriver) Execute(ctx context.Context, call tool.Call, sink tool.Upd
 		if d.jobs == nil {
 			return shellError(call, "background jobs are unavailable"), nil
 		}
-		caller, _ := tool.CallerFromContext(ctx)
+		caller, _ := InvocationFromContext(ctx)
 		owner := firstString(caller.AgentID, "Main")
 		backgroundInput := input
 		backgroundInput.Async = false
@@ -434,7 +428,7 @@ func (d *shellDriver) Execute(ctx context.Context, call tool.Call, sink tool.Upd
 			label = label[:117] + "..."
 		}
 		snapshot, err := d.jobs.start("bash", label, owner, func(jobCtx context.Context) (tool.Result, error) {
-			jobCtx = tool.WithCaller(jobCtx, caller)
+			jobCtx = WithInvocation(jobCtx, caller)
 			return d.Execute(jobCtx, backgroundCall, nil)
 		})
 		if err != nil {
@@ -496,7 +490,7 @@ func (d *shellDriver) Execute(ctx context.Context, call tool.Call, sink tool.Upd
 	deadline := startedAt.Add(inactivityTimeout)
 	absoluteDeadline := startedAt.Add(wallClock)
 	sum := sha256.Sum256([]byte(input.Command))
-	caller, _ := tool.CallerFromContext(ctx)
+	caller, _ := InvocationFromContext(ctx)
 	snap := ShellExecutionSnapshot{SessionID: caller.SessionID, RunID: caller.TeamRunID, AgentID: caller.AgentID, ToolCallID: call.ID, CommandHash: hex.EncodeToString(sum[:]), State: "running", PID: command.Process.Pid, PGID: supervisor.owner.PGID(), JobID: supervisor.owner.JobID(), StartedAt: startedAt, Deadline: deadline, ExitCode: -1}
 	registryKey := fmt.Sprintf("%s/%d", call.ID, command.Process.Pid)
 	d.runtime.mu.Lock()
@@ -523,13 +517,14 @@ func (d *shellDriver) Execute(ctx context.Context, call tool.Call, sink tool.Upd
 	finished := false
 	if sink != nil {
 		startedData := map[string]string{
-			"cwd": d.root, "pid": fmt.Sprint(command.Process.Pid), "health": "running",
+			"phase": "started",
+			"cwd":   d.root, "pid": fmt.Sprint(command.Process.Pid), "health": "running",
 			"timeout_mode": "output_inactivity_with_wall_clock_limit", "timeout_seconds": fmt.Sprint(int(inactivityTimeout / time.Second)),
 			"wall_clock_seconds": fmt.Sprint(int((wallClock + time.Second - 1) / time.Second)),
 			"output":             "", "output_bytes": "0", "deadline": deadline.UTC().Format(time.RFC3339Nano),
 			"wall_clock_deadline": absoluteDeadline.UTC().Format(time.RFC3339Nano),
 		}
-		if sinkErr := sink(tool.Update{Kind: "started", Data: startedData}); sinkErr != nil {
+		if sinkErr := sink(tool.Update{Kind: tool.UpdateProgress, Data: startedData}); sinkErr != nil {
 			reason = "update_sink_failure"
 			updateSinkErr = fmt.Errorf("started update sink failed: %w", sinkErr)
 		}
@@ -584,7 +579,8 @@ func (d *shellDriver) Execute(ctx context.Context, call tool.Call, sink tool.Upd
 			d.runtime.mu.Unlock()
 			if sink != nil {
 				data := map[string]string{
-					"pid": fmt.Sprint(command.Process.Pid), "health": "running",
+					"phase": "progress",
+					"pid":   fmt.Sprint(command.Process.Pid), "health": "running",
 					"timeout_mode": "output_inactivity_with_wall_clock_limit", "timeout_seconds": fmt.Sprint(int(inactivityTimeout / time.Second)),
 					"wall_clock_seconds": fmt.Sprint(int((wallClock + time.Second - 1) / time.Second)),
 					"output":             liveOutput, "output_bytes": fmt.Sprint(outputBytes), "deadline": deadline.UTC().Format(time.RFC3339Nano),
@@ -593,7 +589,7 @@ func (d *shellDriver) Execute(ctx context.Context, call tool.Call, sink tool.Upd
 				if !lastOutputAt.IsZero() {
 					data["last_output_at"] = lastOutputAt.UTC().Format(time.RFC3339Nano)
 				}
-				if sinkErr := sink(tool.Update{Kind: "progress", Data: data}); sinkErr != nil {
+				if sinkErr := sink(tool.Update{Kind: tool.UpdateProgress, Data: data}); sinkErr != nil {
 					reason = "update_sink_failure"
 					updateSinkErr = fmt.Errorf("progress update sink failed: %w", sinkErr)
 				}
@@ -673,10 +669,11 @@ func (d *shellDriver) Execute(ctx context.Context, call tool.Call, sink tool.Upd
 	}
 	if sink != nil {
 		finishedData := map[string]string{
-			"pid": fmt.Sprint(command.Process.Pid), "health": status, "status": status,
+			"phase": "finished",
+			"pid":   fmt.Sprint(command.Process.Pid), "health": status, "status": status,
 			"exit_code": fmt.Sprint(exitCode), "reason": reason, "output": contextOut, "output_bytes": fmt.Sprint(total),
 		}
-		if sinkErr := sink(tool.Update{Kind: "finished", Data: finishedData}); sinkErr != nil {
+		if sinkErr := sink(tool.Update{Kind: tool.UpdateProgress, Data: finishedData}); sinkErr != nil {
 			result.IsError = true
 			result.Content = strings.TrimSpace(result.Content + "\nfinished update sink failed: " + sinkErr.Error())
 		}

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 	"github.com/Viking602/venat/message"
 )
@@ -23,12 +24,11 @@ func TestImportSessionPreservesSourceTreeAndModelMessages(t *testing.T) {
 	workspace := t.TempDir()
 	createdAt := time.Unix(100, 0).UTC()
 	toolMessage := message.Message{
-		Role:       message.RoleAssistant,
-		ToolCalls:  []message.ToolCall{{ID: "call-1", Name: "read", Arguments: json.RawMessage(`{"path":"a.txt"}`)}},
-		Visibility: message.VisibilityShared,
-		CreatedAt:  createdAt.Add(time.Second),
+		Role:      message.RoleAssistant,
+		ToolCalls: []message.ToolCall{{ID: "call-1", Name: "read", Arguments: json.RawMessage(`{"path":"a.txt"}`)}},
 	}
-	encodedTool, err := json.Marshal(toolMessage)
+	agentruntime.SetMessageCreatedAt(&toolMessage, createdAt.Add(time.Second))
+	encodedTool, err := json.Marshal(agentruntime.PersistMessage(toolMessage))
 	if err != nil {
 		t.Fatal(err)
 	}

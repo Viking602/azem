@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/venat/tool"
 )
 
@@ -55,13 +56,13 @@ func TestDebugDynamicGovernanceAndReadOnlyRestriction(t *testing.T) {
 	root := t.TempDir()
 	driver := newDebugDriver(root, newLSPBridgeRuntime(), false).(*debugDriver)
 	readArguments, _ := json.Marshal(map[string]any{"action": "threads"})
-	read := driver.DefinitionForCall(tool.Call{Name: ToolDebug, Arguments: readArguments})
-	if read.EffectType != tool.EffectReadOnly || read.RequiresApproval {
+	read := driver.PolicyForCall(tool.Call{Name: ToolDebug, Arguments: readArguments})
+	if read.Effect != agentruntime.ToolEffectReadOnly || read.RequiresApproval {
 		t.Fatalf("threads governance = %#v", read)
 	}
 	launchArguments, _ := json.Marshal(map[string]any{"action": "launch", "program": "."})
-	launch := driver.DefinitionForCall(tool.Call{Name: ToolDebug, Arguments: launchArguments})
-	if launch.EffectType != tool.EffectExternalSideEffect || !launch.RequiresApproval || !launch.RequiresActionTask {
+	launch := driver.PolicyForCall(tool.Call{Name: ToolDebug, Arguments: launchArguments})
+	if launch.Effect != agentruntime.ToolEffectExternalSideEffect || !launch.RequiresApproval || !launch.RequiresActionTask {
 		t.Fatalf("launch governance = %#v", launch)
 	}
 	readOnly := ReadOnlyDebugDriver(driver)

@@ -4,9 +4,40 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
+
+	"github.com/Viking602/azem/internal/config"
 )
+
+func TestDesktopPluginBootstrapDoesNotLaunchCodex(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("executable test fixture uses a POSIX script")
+	}
+	root := t.TempDir()
+	bin := filepath.Join(root, "bin")
+	if err := os.MkdirAll(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(root, "called")
+	script := "#!/bin/sh\n/usr/bin/touch " + marker + "\nprintf '{\"installed\":[]}'\n"
+	if err := os.WriteFile(filepath.Join(bin, "codex"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	t.Setenv("AZEM_FAKE_PROVIDER", "")
+	assembly := bootstrapAssembly{
+		ctx: context.Background(), cfg: config.Default(), homeDir: root,
+		paths: config.Paths{DataDir: filepath.Join(root, "data"), Workspace: filepath.Join(root, "workspace")},
+	}
+	if err := assembly.loadPlugins(true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatal("desktop startup launched the Codex plugin catalog subprocess")
+	}
+}
 
 func TestDesktopBootstrapRestoresLastProjectWithoutChangingConfiguration(t *testing.T) {
 	root := t.TempDir()

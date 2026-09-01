@@ -4,6 +4,10 @@
 
 package dbgen
 
+import (
+	"database/sql"
+)
+
 type Account struct {
 	ID            string `db:"id"`
 	ProviderID    string `db:"provider_id"`
@@ -33,6 +37,94 @@ type AgentDefinitionSnapshot struct {
 	Version      string `db:"version"`
 	CreatedAt    int64  `db:"created_at"`
 	Data         []byte `db:"data"`
+}
+
+type AgentEffectAttempt struct {
+	ExecutionID   string `db:"execution_id"`
+	OperationID   string `db:"operation_id"`
+	AttemptNumber int64  `db:"attempt_number"`
+	Kind          string `db:"kind"`
+	InputHash     []byte `db:"input_hash"`
+	Status        string `db:"status"`
+	LeaseOwner    string `db:"lease_owner"`
+	LeaseToken    int64  `db:"lease_token"`
+	Version       int64  `db:"version"`
+	AttemptInline []byte `db:"attempt_inline"`
+	AttemptDigest string `db:"attempt_digest"`
+}
+
+type AgentExecution struct {
+	ExecutionID     string `db:"execution_id"`
+	SpecHash        []byte `db:"spec_hash"`
+	Status          string `db:"status"`
+	Version         int64  `db:"version"`
+	LeaseOwner      string `db:"lease_owner"`
+	LeaseClaim      []byte `db:"lease_claim"`
+	LeaseToken      int64  `db:"lease_token"`
+	LeaseExpiresAt  int64  `db:"lease_expires_at"`
+	NextLeaseToken  int64  `db:"next_lease_token"`
+	ExecutionInline []byte `db:"execution_inline"`
+	ExecutionDigest string `db:"execution_digest"`
+	UpdatedAt       int64  `db:"updated_at"`
+}
+
+type AgentExecutionBinding struct {
+	ExecutionID    string `db:"execution_id"`
+	SessionID      string `db:"session_id"`
+	RunID          string `db:"run_id"`
+	StableID       string `db:"stable_id"`
+	AgentID        string `db:"agent_id"`
+	Kind           string `db:"kind"`
+	Segment        int64  `db:"segment"`
+	ManifestInline []byte `db:"manifest_inline"`
+	ManifestDigest string `db:"manifest_digest"`
+	ProfileHash    string `db:"profile_hash"`
+	State          string `db:"state"`
+	Version        int64  `db:"version"`
+	UpdatedAt      int64  `db:"updated_at"`
+}
+
+type AgentExecutionReceipt struct {
+	ExecutionID   string `db:"execution_id"`
+	CommandKind   string `db:"command_kind"`
+	CommandKey    string `db:"command_key"`
+	RequestHash   []byte `db:"request_hash"`
+	LeaseToken    int64  `db:"lease_token"`
+	ReceiptInline []byte `db:"receipt_inline"`
+	ReceiptDigest string `db:"receipt_digest"`
+}
+
+type AuthBrokerBlock struct {
+	CredentialID string `db:"credential_id"`
+	ProviderID   string `db:"provider_id"`
+	Scope        string `db:"scope"`
+	BlockedUntil int64  `db:"blocked_until"`
+	Reason       string `db:"reason"`
+	UpdatedAt    int64  `db:"updated_at"`
+}
+
+type AuthBrokerDisabled struct {
+	CredentialID string `db:"credential_id"`
+	ProviderID   string `db:"provider_id"`
+	AccountID    string `db:"account_id"`
+	Cause        string `db:"cause"`
+	UpdatedAt    int64  `db:"updated_at"`
+}
+
+type AuthBrokerState struct {
+	ID         int64 `db:"id"`
+	Generation int64 `db:"generation"`
+	UpdatedAt  int64 `db:"updated_at"`
+}
+
+type AuthBrokerUsageObservation struct {
+	ID           string `db:"id"`
+	ClientID     string `db:"client_id"`
+	CredentialID string `db:"credential_id"`
+	ProviderID   string `db:"provider_id"`
+	AccountID    string `db:"account_id"`
+	Payload      []byte `db:"payload"`
+	ObservedAt   int64  `db:"observed_at"`
 }
 
 type AuthCredential struct {
@@ -77,6 +169,17 @@ type Event struct {
 	RecordedAt int64  `db:"recorded_at"`
 	Data       []byte `db:"data"`
 	DataSha256 string `db:"data_sha256"`
+}
+
+type GithubWebhookDelivery struct {
+	DeliveryID        string `db:"delivery_id"`
+	EventName         string `db:"event_name"`
+	Repository        string `db:"repository"`
+	PullRequestNumber int64  `db:"pull_request_number"`
+	Action            string `db:"action"`
+	PayloadSha256     string `db:"payload_sha256"`
+	Status            string `db:"status"`
+	ReceivedAt        int64  `db:"received_at"`
 }
 
 type HistoryFt struct {
@@ -369,6 +472,45 @@ type SessionBlock struct {
 	AgentID    string `db:"agent_id"`
 	Data       []byte `db:"data"`
 	DataSha256 string `db:"data_sha256"`
+}
+
+type SessionBranch struct {
+	SessionID   string `db:"session_id"`
+	Name        string `db:"name"`
+	HeadEntryID string `db:"head_entry_id"`
+	CreatedAt   int64  `db:"created_at"`
+	UpdatedAt   int64  `db:"updated_at"`
+}
+
+type SessionGraph struct {
+	SessionID         string         `db:"session_id"`
+	RootSessionID     string         `db:"root_session_id"`
+	ParentSessionID   sql.NullString `db:"parent_session_id"`
+	ForkedFromEntryID string         `db:"forked_from_entry_id"`
+	PromptCacheKey    string         `db:"prompt_cache_key"`
+	ActiveBranch      string         `db:"active_branch"`
+	ActiveLeafEntryID string         `db:"active_leaf_entry_id"`
+	SourceKind        string         `db:"source_kind"`
+	SourceRef         string         `db:"source_ref"`
+	CreatedAt         int64          `db:"created_at"`
+	UpdatedAt         int64          `db:"updated_at"`
+}
+
+type SessionGraphEntry struct {
+	SessionID     string         `db:"session_id"`
+	EntryID       string         `db:"entry_id"`
+	SourceEntryID string         `db:"source_entry_id"`
+	ParentEntryID sql.NullString `db:"parent_entry_id"`
+	BlockSequence int64          `db:"block_sequence"`
+	Kind          string         `db:"kind"`
+	CreatedAt     int64          `db:"created_at"`
+}
+
+type SessionLabel struct {
+	SessionID string `db:"session_id"`
+	EntryID   string `db:"entry_id"`
+	Label     string `db:"label"`
+	UpdatedAt int64  `db:"updated_at"`
 }
 
 type SessionProjection struct {

@@ -391,8 +391,8 @@ func archiveCarrierMessage(result contextarchive.Result, attachments []session.A
 	}
 	carrier := UserMessageWithAttachments(archiveCarrierText(result), attachments)
 	carrier.Kind = message.KindCompactionSummary
-	carrier.Visibility = message.VisibilityPrivate
-	carrier.CreatedAt = time.Time{}
+	markPrivateMessage(&carrier)
+	setMessageCreatedAt(&carrier, time.Time{})
 	if carrier.Metadata == nil {
 		carrier.Metadata = make(map[string]string, 2)
 	}

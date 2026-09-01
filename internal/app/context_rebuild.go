@@ -208,7 +208,7 @@ func messageStableReferences(value message.Message, runID string) []string {
 }
 
 func messageContentHash(value message.Message) string {
-	value.CreatedAt = time.Time{}
+	setMessageCreatedAt(&value, time.Time{})
 	encoded, _ := json.Marshal(value)
 	return hashText(string(encoded))
 }

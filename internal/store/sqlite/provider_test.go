@@ -11,9 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/azem/internal/blobstore"
-	"github.com/Viking602/venat/api"
-	"github.com/Viking602/venat/contract"
 )
 
 func TestLargeEventsAndRecordsSpillOutOfSQLite(t *testing.T) {
@@ -29,11 +28,11 @@ func TestLargeEventsAndRecordsSpillOutOfSQLite(t *testing.T) {
 		t.Fatal(err)
 	}
 	payload := strings.Repeat("event-body ", 2000)
-	event := api.Event{RunID: "run-large", Sequence: 1, Type: api.EventTaskCompleted, RecordedAt: time.Now().UTC(), Payload: map[string]any{"text": payload}}
+	event := agentruntime.Event{RunID: "run-large", Sequence: 1, Type: agentruntime.EventTaskCompleted, RecordedAt: time.Now().UTC(), Payload: map[string]any{"text": payload}}
 	if err := work.Events().AppendEvent(ctx, event); err != nil {
 		t.Fatal(err)
 	}
-	if err := work.Runs().SaveRun(ctx, api.Run{ID: "run-large", Status: api.RunStatusCompleted, CreatedAt: time.Now().UTC(), Metadata: map[string]string{"note": payload}}); err != nil {
+	if err := work.Runs().SaveRun(ctx, agentruntime.Run{ID: "run-large", Status: agentruntime.RunStatusCompleted, CreatedAt: time.Now().UTC(), Metadata: map[string]string{"note": payload}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := work.Commit(ctx); err != nil {
@@ -68,19 +67,21 @@ func TestLargeEventsAndRecordsSpillOutOfSQLite(t *testing.T) {
 	}
 }
 
-func TestStoreProviderContract(t *testing.T) {
-	contract.RunStoreProviderContractTests(t, func(t *testing.T) (api.StoreProvider, func()) {
-		t.Helper()
-		provider, err := Open(context.Background(), ":memory:")
-		if err != nil {
-			t.Fatalf("Open: %v", err)
-		}
-		return provider, func() {
-			if err := provider.Close(context.Background()); err != nil {
-				t.Errorf("Close: %v", err)
-			}
-		}
-	})
+func TestSQLiteDSNWaitsForSerializedWriter(t *testing.T) {
+	if got := sqliteDSN("azem.db", false); !strings.Contains(got, "busy_timeout(30000)") {
+		t.Fatalf("sqlite DSN = %q, want 30 second writer wait", got)
+	}
+}
+
+func TestProviderQueuesImmediateTransactionsOnOneConnection(t *testing.T) {
+	provider, err := Open(t.Context(), filepath.Join(t.TempDir(), "azem.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer provider.Close(t.Context())
+	if got := provider.DB().Stats().MaxOpenConnections; got != 1 {
+		t.Fatalf("max open connections = %d, want 1", got)
+	}
 }
 
 func TestDuplicateEnvelopeReturnsIdempotencyConflict(t *testing.T) {
@@ -91,7 +92,7 @@ func TestDuplicateEnvelopeReturnsIdempotencyConflict(t *testing.T) {
 	}
 	defer provider.Close(ctx)
 
-	envelope := api.TaskEnvelope{
+	envelope := agentruntime.TaskEnvelope{
 		ID:        "env-1",
 		RunID:     "run-1",
 		TaskID:    "task-1",
@@ -121,7 +122,7 @@ func TestDuplicateEnvelopeReturnsIdempotencyConflict(t *testing.T) {
 	}
 	duplicateDigest := blobstore.Sum(duplicateData)
 	err = second.MailboxOutbox().QueueEnvelope(ctx, duplicate)
-	if !errors.Is(err, api.ErrIdempotencyConflict) {
+	if !errors.Is(err, agentruntime.ErrIdempotencyConflict) {
 		t.Fatalf("duplicate envelope error = %v, want ErrIdempotencyConflict", err)
 	}
 	if _, err := provider.Blobs().Get(ctx, duplicateDigest); err == nil {
@@ -131,7 +132,7 @@ func TestDuplicateEnvelopeReturnsIdempotencyConflict(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rolledBack := api.TaskEnvelope{
+	rolledBack := agentruntime.TaskEnvelope{
 		ID: "env-rollback", RunID: "run-1", TaskID: "task-1", Status: "pending", CreatedAt: time.Now().UTC(),
 		Payload: map[string]any{"body": strings.Repeat("rollback-payload ", 1_000)},
 	}
@@ -173,8 +174,8 @@ func TestUnitOfWorkDoesNotInstallSupersededLargePayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	large := api.Run{
-		ID: "superseded", Status: api.RunStatusRunning, CreatedAt: time.Now().UTC(),
+	large := agentruntime.Run{
+		ID: "superseded", Status: agentruntime.RunStatusRunning, CreatedAt: time.Now().UTC(),
 		Metadata: map[string]string{"body": strings.Repeat("superseded-payload ", 1_000)},
 	}
 	largeData, err := marshalJSON(large)
@@ -202,6 +203,57 @@ type failSecondPutBlobStore struct {
 	puts int
 }
 
+type failDeleteBlobStore struct {
+	blobstore.Store
+}
+
+func (s *failDeleteBlobStore) Delete(context.Context, string) error {
+	return errors.New("injected blob delete failure")
+}
+
+type countingGetBlobStore struct {
+	blobstore.Store
+	gets int
+}
+
+func (s *countingGetBlobStore) Get(ctx context.Context, digest string) ([]byte, error) {
+	s.gets++
+	return s.Store.Get(ctx, digest)
+}
+
+func TestListRunsFiltersStatusBeforeHydratingPayloads(t *testing.T) {
+	ctx := t.Context()
+	provider := openMemoryTestProvider(t)
+	blobs := &countingGetBlobStore{Store: blobstore.NewMemory()}
+	provider.blobs = blobs
+	work := beginTestUnitOfWork(t, provider)
+	createdAt := time.Now().UTC()
+	for _, run := range []agentruntime.Run{
+		{ID: "completed", Status: agentruntime.RunStatusCompleted, CreatedAt: createdAt, Metadata: map[string]string{"body": strings.Repeat("completed ", 2_000)}},
+		{ID: "running", Status: agentruntime.RunStatusRunning, CreatedAt: createdAt, Metadata: map[string]string{"body": strings.Repeat("running ", 2_000)}},
+	} {
+		mustSaveRun(t, ctx, work, run)
+	}
+	if err := work.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	blobs.gets = 0
+	read := beginTestUnitOfWork(t, provider)
+	runs, err := read.Runs().ListRuns(ctx, agentruntime.RunSelector{Statuses: []agentruntime.RunStatus{agentruntime.RunStatusRunning}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := read.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || runs[0].ID != "running" {
+		t.Fatalf("runs = %+v, want running", runs)
+	}
+	if blobs.gets != 1 {
+		t.Fatalf("blob reads = %d, want 1", blobs.gets)
+	}
+}
+
 func (s *failSecondPutBlobStore) InstallAt(ctx context.Context, digest string, payload []byte) (bool, error) {
 	s.puts++
 	if s.puts == 2 {
@@ -217,12 +269,12 @@ func TestUnitOfWorkRemovesInstalledBlobsWhenLaterPutFails(t *testing.T) {
 	provider.blobs = &failSecondPutBlobStore{Store: memory}
 	work := beginTestUnitOfWork(t, provider)
 	payload := strings.Repeat("partial-commit ", 1_000)
-	run := api.Run{
-		ID: "partial-run", Status: api.RunStatusRunning, CreatedAt: time.Now().UTC(),
+	run := agentruntime.Run{
+		ID: "partial-run", Status: agentruntime.RunStatusRunning, CreatedAt: time.Now().UTC(),
 		Metadata: map[string]string{"body": payload},
 	}
-	event := api.Event{
-		RunID: "partial-run", Sequence: 1, Type: api.EventTaskCompleted, RecordedAt: time.Now().UTC(),
+	event := agentruntime.Event{
+		RunID: "partial-run", Sequence: 1, Type: agentruntime.EventTaskCompleted, RecordedAt: time.Now().UTC(),
 		Payload: map[string]any{"body": payload + "event"},
 	}
 	mustSaveRun(t, ctx, work, run)
@@ -231,13 +283,51 @@ func TestUnitOfWorkRemovesInstalledBlobsWhenLaterPutFails(t *testing.T) {
 	assertBlobsMissing(t, ctx, memory, digestOf(t, run), digestOf(t, event))
 }
 
+func TestUnitOfWorkDoesNotFailCommittedMutationWhenObsoleteBlobCleanupFails(t *testing.T) {
+	ctx := t.Context()
+	provider := openMemoryTestProvider(t)
+	memory := blobstore.NewMemory()
+	provider.blobs = &failDeleteBlobStore{Store: memory}
+	run := agentruntime.Run{
+		ID: "cleanup-failure", Status: agentruntime.RunStatusRunning, CreatedAt: time.Now().UTC(),
+		Metadata: map[string]string{"body": strings.Repeat("obsolete ", 2_000)},
+	}
+	first := beginTestUnitOfWork(t, provider)
+	mustSaveRun(t, ctx, first, run)
+	if err := first.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	obsoleteDigest := digestOf(t, run)
+
+	run.Metadata = map[string]string{"body": strings.Repeat("current ", 2_000)}
+	second := beginTestUnitOfWork(t, provider)
+	mustSaveRun(t, ctx, second, run)
+	if err := second.Commit(ctx); err != nil {
+		t.Fatalf("committed mutation reported cleanup failure: %v", err)
+	}
+	read := beginTestUnitOfWork(t, provider)
+	runs, err := read.Runs().ListRuns(ctx, agentruntime.RunSelector{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := read.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || runs[0].Metadata["body"] != run.Metadata["body"] {
+		t.Fatalf("committed run = %+v, want current payload", runs)
+	}
+	if exists, err := memory.Exists(ctx, obsoleteDigest); err != nil || !exists {
+		t.Fatalf("best-effort cleanup retained old blob=%v error=%v", exists, err)
+	}
+}
+
 func TestUnitOfWorkRemovesInstalledBlobWhenSQLCommitFails(t *testing.T) {
 	ctx := t.Context()
 	provider := openMemoryTestProvider(t)
 	work := beginTestUnitOfWork(t, provider).(*unitOfWork)
 	deferForeignKeyCommitFailure(t, ctx, work)
-	run := api.Run{
-		ID: "failed-sql-commit", Status: api.RunStatusRunning, CreatedAt: time.Now().UTC(),
+	run := agentruntime.Run{
+		ID: "failed-sql-commit", Status: agentruntime.RunStatusRunning, CreatedAt: time.Now().UTC(),
 		Metadata: map[string]string{"body": strings.Repeat("failed-sql-commit ", 1_000)},
 	}
 	mustSaveRun(t, ctx, work, run)
@@ -259,7 +349,7 @@ func openMemoryTestProvider(t *testing.T) *Provider {
 	return provider
 }
 
-func beginTestUnitOfWork(t *testing.T, provider *Provider) api.UnitOfWork {
+func beginTestUnitOfWork(t *testing.T, provider *Provider) agentruntime.UnitOfWork {
 	t.Helper()
 	work, err := provider.Begin(t.Context())
 	if err != nil {
@@ -277,21 +367,21 @@ func digestOf(t *testing.T, value any) string {
 	return blobstore.Sum(data)
 }
 
-func mustSaveRun(t *testing.T, ctx context.Context, work api.UnitOfWork, run api.Run) {
+func mustSaveRun(t *testing.T, ctx context.Context, work agentruntime.UnitOfWork, run agentruntime.Run) {
 	t.Helper()
 	if err := work.Runs().SaveRun(ctx, run); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func mustAppendEvent(t *testing.T, ctx context.Context, work api.UnitOfWork, event api.Event) {
+func mustAppendEvent(t *testing.T, ctx context.Context, work agentruntime.UnitOfWork, event agentruntime.Event) {
 	t.Helper()
 	if err := work.Events().AppendEvent(ctx, event); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func assertCommitFailsWith(t *testing.T, ctx context.Context, work api.UnitOfWork, expected string) {
+func assertCommitFailsWith(t *testing.T, ctx context.Context, work agentruntime.UnitOfWork, expected string) {
 	t.Helper()
 	if err := work.Commit(ctx); err == nil || !strings.Contains(err.Error(), expected) {
 		t.Fatalf("commit error = %v", err)

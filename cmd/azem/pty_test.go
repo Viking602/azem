@@ -16,7 +16,7 @@ import (
 
 	"github.com/creack/pty"
 
-	"github.com/Viking602/venat/coding"
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/venat/tool"
 
 	agentservice "github.com/Viking602/azem/internal/agent"
@@ -267,17 +267,25 @@ func seedPendingEditApproval(t *testing.T, workspace string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := service.SealExecutionProfile(ctx, run, agentruntime.ExecutableProfile{
+		Provider: "test", AccountID: "account", RawModel: "test-model", Model: "test-model", Reasoning: "none",
+		ActiveSkills: []string{}, ToolSetHash: "tools", ToolProfileHash: "tool-profile",
+		StaticIdentity: "static", WorkspaceAnchor: workspace,
+		PromptFingerprint: "prompt", ToolSchemaFingerprint: "tool-schema",
+	}); err != nil {
+		t.Fatal(err)
+	}
 	readArguments, _ := json.Marshal(map[string]string{"path": "note.txt"})
-	read, err := service.ExecuteTool(ctx, run, tool.Call{ID: "read-1", Name: coding.ToolReadFile, Arguments: readArguments}, nil)
+	read, err := service.ExecuteTool(ctx, run, tool.Call{ID: "read-1", Name: agentservice.ToolReadFile, Arguments: readArguments}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var readResult coding.ReadFileToolResult
+	var readResult agentservice.ReadFileToolResult
 	if err := json.Unmarshal(read.Result.Structured, &readResult); err != nil {
 		t.Fatal(err)
 	}
 	editArguments, _ := json.Marshal(map[string]string{"input": readResult.Header + "\nreplace 1:\n+after\n"})
-	pending, err := service.ExecuteTool(ctx, run, tool.Call{ID: "edit-1", Name: coding.ToolEditHashline, Arguments: editArguments}, nil)
+	pending, err := service.ExecuteTool(ctx, run, tool.Call{ID: "edit-1", Name: agentservice.ToolEditHashline, Arguments: editArguments}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

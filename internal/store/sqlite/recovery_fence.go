@@ -12,6 +12,7 @@ import (
 // recover durable runs owned by another still-running process.
 type RecoveryFence interface {
 	io.Closer
+	CloseClean() error
 	FinishRecovery() error
 }
 
@@ -28,4 +29,5 @@ func AcquireRecoveryFence(ctx context.Context, databasePath string) (RecoveryFen
 type noopRecoveryFence struct{}
 
 func (noopRecoveryFence) FinishRecovery() error { return nil }
+func (noopRecoveryFence) CloseClean() error     { return nil }
 func (noopRecoveryFence) Close() error          { return nil }

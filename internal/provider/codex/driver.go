@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"time"
 
 	"resty.dev/v3"
 
@@ -29,9 +28,6 @@ type Driver struct {
 	toolItemIDs     map[string]string
 	reasoningEffort string
 	serviceTier     string
-	retryDelay      func(int) time.Duration
-	maxRetryDelay   time.Duration
-	retryObserver   hyprovider.RetryObserver
 }
 
 func New(authentication *auth.Service, accountID string, endpoint string, models []string, reasoningEffort string) (*Driver, error) {
@@ -47,21 +43,12 @@ func New(authentication *auth.Service, accountID string, endpoint string, models
 	return &Driver{
 		auth: authentication, accountID: accountID, endpoint: endpoint,
 		models: append([]string(nil), models...), toolItemIDs: make(map[string]string),
-		reasoningEffort: reasoningEffort, retryDelay: providerStreamRetryDelay,
+		reasoningEffort: reasoningEffort,
 	}, nil
 }
 
 func (d *Driver) Metadata() hyprovider.Metadata {
 	return hyprovider.Metadata{Name: "chatgpt-codex-responses", Models: append([]string(nil), d.models...), Version: "1"}
-}
-
-// SetRetryObserver reports SDK-managed provider stream retries.
-func (d *Driver) SetRetryObserver(observer hyprovider.RetryObserver) {
-	d.retryObserver = observer
-}
-
-func (d *Driver) SetMaxRetryDelay(delay time.Duration) {
-	d.maxRetryDelay = delay
 }
 
 func (d *Driver) SetServiceTier(tier string) {
@@ -71,22 +58,14 @@ func (d *Driver) SetServiceTier(tier string) {
 func (d *Driver) Stream(ctx context.Context, request hyprovider.Request) (hyprovider.Stream, error) {
 	cacheKey := promptCacheKey(request)
 	request, reverseNames := mapToolNames(request)
-	payload, err := responses.Build(request, responses.BuildOptions{
+	payload, err := responses.BuildContext(ctx, request, responses.BuildOptions{
 		IncludeEncryptedReasoning: true, DefaultParallelTools: true, ToolCallItemID: d.toolItemID,
 		DefaultReasoningEffort: d.reasoningEffort, ServiceTier: d.serviceTier,
 	})
 	if err != nil {
 		return nil, err
 	}
-	open := func() (hyprovider.Stream, error) {
-		return d.openStream(ctx, payload, reverseNames, cacheKey, nil)
-	}
-	return hyprovider.OpenRetryingStream(ctx, open, hyprovider.StreamRetryOptions{
-		Max:      maxProviderStreamRetries,
-		Delay:    d.retryDelay,
-		MaxDelay: d.maxRetryDelay,
-		Observer: d.retryObserver,
-	})
+	return d.openStream(ctx, payload, reverseNames, cacheKey, nil)
 }
 
 func (d *Driver) openStream(ctx context.Context, payload []byte, reverseNames map[string]string, cacheKey string, reporter responses.UsageReporter) (hyprovider.Stream, error) {
@@ -123,13 +102,6 @@ func (d *Driver) openStream(ctx context.Context, payload []byte, reverseNames ma
 
 func promptCacheKey(request hyprovider.Request) string {
 	return strings.TrimSpace(request.PromptCacheKey)
-}
-
-const maxProviderStreamRetries = hyprovider.DefaultMaxStreamRetries
-
-func providerStreamRetryDelay(attempt int) time.Duration {
-	delay := 500 * time.Millisecond * time.Duration(1<<max(0, attempt-1))
-	return min(delay, 8*time.Second)
 }
 
 func (d *Driver) toolItemID(callID string) string {

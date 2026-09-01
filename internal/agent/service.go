@@ -17,23 +17,25 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/azem/internal/memory"
 	"github.com/Viking602/azem/internal/resource"
 	"github.com/Viking602/azem/internal/skills"
-	"github.com/Viking602/venat"
 	hyagent "github.com/Viking602/venat/agent"
-	"github.com/Viking602/venat/api"
-	"github.com/Viking602/venat/coding"
-	"github.com/Viking602/venat/stream"
+	"github.com/Viking602/venat/durable"
+	"github.com/Viking602/venat/message"
+	hyprovider "github.com/Viking602/venat/provider"
 	"github.com/Viking602/venat/tool"
-	hyworker "github.com/Viking602/venat/worker"
 )
 
-const mainAgentID = "azem-main"
-
-const defaultRunLeaseTTL = 10 * time.Minute
+const (
+	mainAgentID              = "azem-main"
+	durableLeaseTTL          = 2 * time.Minute
+	durableSettlementTimeout = 35 * time.Second
+)
 
 const (
+	approvalMetadataExecutionID   = "azem.execution_id"
 	approvalMetadataOperationID   = "azem.operation_id"
 	approvalMetadataScope         = "azem.scope_fingerprint"
 	singleRunMetadataAgentID      = "azem.single_agent_id"
@@ -46,10 +48,25 @@ type recoveredApprovalDecision struct {
 	approved    bool
 }
 
+type runtimeStore interface {
+	agentruntime.StoreProvider
+	agentruntime.ExecutionBindingRepository
+	agentruntime.RunExecutionRepository
+	agentruntime.DurableAttemptRepository
+	DurableBackend() durable.Backend
+}
+
+type activeRun struct {
+	executionID string
+	cancel      context.CancelCauseFunc
+	done        chan struct{}
+}
+
 type Service struct {
-	runner             *venat.Runner
-	store              api.StoreProvider
-	workspace          coding.Workspace
+	store              runtimeStore
+	durable            *durable.Runtime
+	runtimeOwnerID     string
+	workspace          Workspace
 	tools              *tool.Bus
 	workspaceRoot      string
 	externalDrivers    []tool.Driver
@@ -59,6 +76,7 @@ type Service struct {
 	shellPolicy        string
 	allowNetwork       string
 	shellRuntime       *shellRuntime
+	toolGovernor       toolPolicyGovernor
 	teamMaxConcurrency int
 	teamMaxTicks       int
 	skills             *skills.Catalog
@@ -66,16 +84,19 @@ type Service struct {
 	resources          *resource.Router
 	hashlineClipboard  *hashlineClipboard
 	ast                *astBridge
-	runLeaseTTL        time.Duration
 	ctx                context.Context
 	cancel             context.CancelFunc
 	wg                 sync.WaitGroup
+	lifecycleMu        sync.Mutex
+	closed             bool
+	closeDone          chan struct{}
+	closeErr           error
 	lsp                *lspBridgeRuntime
 	jobs               *backgroundJobManager
 	hubPeers           *hubPeerBrokerRef
 	fileBroker         *fileMutationBrokerRef
 	singleRunMu        sync.Mutex
-	singleRuns         map[string]*hyworker.SingleRunner
+	singleRuns         map[string]activeRun
 	approvalMu         sync.Mutex
 	recoveredApprovals map[string]map[string]recoveredApprovalDecision
 	externalMu         sync.Mutex
@@ -100,16 +121,20 @@ PUT N.=M:
 *** End Patch
 Reuse current [PATH#TAG] and original line numbers when a syntax/no-op rejection left the file unchanged. Re-read only for a stale/file-changed tag or unseen lines. Use PUT/CUT locators; never use @@ hunks, -old rows, or bare context.`
 
-type callDefinitionDriver interface {
-	DefinitionForCall(tool.Call) tool.Definition
-}
-
 type definitionOverrideDriver struct {
 	tool.Driver
 	definition tool.Definition
 }
 
 func (d definitionOverrideDriver) Definition() tool.Definition { return d.definition }
+
+func (d definitionOverrideDriver) PolicyForCall(call tool.Call) agentruntime.ToolPolicy {
+	descriptor, err := DescribeTool(d.Driver)
+	if err != nil {
+		return conservativeToolPolicy(d.definition.Name)
+	}
+	return descriptor.PolicyForCall(call)
+}
 
 type goTestStatusDriver struct {
 	tool.Driver
@@ -120,7 +145,7 @@ func (driver goTestStatusDriver) Execute(ctx context.Context, call tool.Call, si
 	if err != nil || result.IsError || len(result.Structured) == 0 {
 		return result, err
 	}
-	var status coding.GoTestToolResult
+	var status GoTestToolResult
 	if json.Unmarshal(result.Structured, &status) == nil && !status.Passed {
 		result.IsError = true
 	}
@@ -148,7 +173,7 @@ func (recovery *EditRecovery) RequiredEditReadTarget() (string, bool) {
 }
 
 func (recovery *EditRecovery) BlockedEdit(call tool.Call) (tool.Result, bool) {
-	if recovery == nil || call.Name != coding.ToolEditHashline {
+	if recovery == nil || call.Name != ToolEditHashline {
 		return tool.Result{}, false
 	}
 	target, required := recovery.RequiredEditReadTarget()
@@ -160,14 +185,14 @@ func (recovery *EditRecovery) BlockedEdit(call tool.Call) (tool.Result, bool) {
 		Name:       call.Name,
 		Content: fmt.Sprintf(
 			"edit blocked: the previous edit for %q failed. Call %s for that file, then rebuild the patch from the new header and visible lines before editing again.",
-			target, coding.ToolReadFile,
+			target, ToolReadFile,
 		),
 		IsError: true,
 	}, true
 }
 
 func addHashlineRetryGuidance(call tool.Call, result tool.Result) tool.Result {
-	if call.Name != coding.ToolEditHashline || !result.IsError || strings.Contains(result.Content, "Required OMP Hashline retry format:") {
+	if call.Name != ToolEditHashline || !result.IsError || strings.Contains(result.Content, "Required OMP Hashline retry format:") {
 		return result
 	}
 	result.Content = strings.TrimSpace(result.Content) + "\n\n" + hashlineRetryGuidance
@@ -185,7 +210,7 @@ func (recovery *EditRecovery) Observe(call tool.Call, result tool.Result, execut
 	recovery.mu.Lock()
 	defer recovery.mu.Unlock()
 	switch call.Name {
-	case coding.ToolEditHashline:
+	case ToolEditHashline:
 		if executionErr == nil && !result.IsError {
 			return
 		}
@@ -196,7 +221,7 @@ func (recovery *EditRecovery) Observe(call tool.Call, result tool.Result, execut
 			recovery.readRequired = make(map[string]struct{})
 		}
 		recovery.readRequired[target] = struct{}{}
-	case coding.ToolReadFile:
+	case ToolReadFile:
 		if executionErr != nil || result.IsError {
 			return
 		}
@@ -225,13 +250,14 @@ func hashlineFailureRequiresRead(content string) bool {
 }
 
 type RunExecutionPolicy struct {
-	AgentID        string
-	AgentVersion   string
-	Governance     api.GovernancePolicy
-	Budget         *api.TaskBudget
-	OutputSchema   json.RawMessage
-	RetryPolicy    api.RetryPolicy
-	ResourceClaims []api.ResourceClaimSpec
+	AgentID           string
+	AgentVersion      string
+	Governance        agentruntime.GovernancePolicy
+	Budget            *agentruntime.TaskBudget
+	OutputSchema      json.RawMessage
+	RetryPolicy       agentruntime.RetryPolicy
+	ResourceClaims    []agentruntime.ResourceClaimSpec
+	ExecutableProfile *agentruntime.ExecutableProfile
 }
 
 type Run struct {
@@ -240,16 +266,19 @@ type Run struct {
 	TaskID       string
 	EnvelopeID   string
 	LeaseID      string
+	ExecutionID  string
 	TaskVersion  int
 	HolderID     string
+	binding      agentruntime.ExecutionBinding
+	resumeTarget durable.ResumeTarget
 	pending      map[string]PendingApproval
 	approvedOnce map[string]string
 	editRecovery EditRecovery
 }
 
 type PendingApproval struct {
-	Request    api.ApprovalRequest
-	Token      api.ResumeToken
+	Request    agentruntime.ApprovalRequest
+	Token      agentruntime.ResumeToken
 	Call       tool.Call
 	Scope      invocationScope
 	Effect     string
@@ -332,7 +361,13 @@ func WithShellOptions(options ShellOptions) ServiceOption {
 	return func(settings *serviceOptions) { settings.shellOptions = options }
 }
 
-func NewService(store api.StoreProvider, workspaceRoot string, options ...ServiceOption) (*Service, error) {
+func NewService(store runtimeStore, workspaceRoot string, options ...ServiceOption) (*Service, error) {
+	if store == nil {
+		return nil, fmt.Errorf("agent runtime store is nil")
+	}
+	if strings.TrimSpace(workspaceRoot) == "" {
+		return nil, fmt.Errorf("workspace root is empty")
+	}
 	settings := serviceOptions{allowWrite: true, shellPolicy: "prompt", network: "prompt", teamMaxConcurrency: 2, teamMaxTicks: 12}
 	for _, option := range options {
 		if option != nil {
@@ -340,47 +375,82 @@ func NewService(store api.StoreProvider, workspaceRoot string, options ...Servic
 		}
 	}
 	policy := NewApprovalPolicy()
-	runner, err := venat.NewProduction(api.Config{StoreProvider: store, PolicyEngine: policy})
-	if err != nil {
-		return nil, err
-	}
-	runner.RegisterAgent(api.AgentProfile{ID: mainAgentID, Role: "coding"})
-	workspace := coding.NewLocalWorkspace(workspaceRoot)
+	workspace := NewLocalWorkspace(workspaceRoot)
 	serviceCtx, serviceCancel := context.WithCancel(context.Background())
 	service := &Service{
-		runner: runner, store: store, workspace: workspace, workspaceRoot: filepath.Clean(workspaceRoot), policy: policy,
+		store: store, workspace: workspace, workspaceRoot: workspace.Root(), policy: policy,
 		allowWrite: settings.allowWrite, shellPolicy: settings.shellPolicy, allowNetwork: settings.network,
 		teamMaxConcurrency: settings.teamMaxConcurrency, teamMaxTicks: settings.teamMaxTicks,
-		skills: settings.skills, resources: settings.resources, memory: settings.memory, hashlineClipboard: newHashlineClipboard(), ast: newASTBridge(), lsp: newLSPBridgeRuntime(), jobs: newBackgroundJobManager(serviceCtx), hubPeers: &hubPeerBrokerRef{}, fileBroker: &fileMutationBrokerRef{}, runLeaseTTL: defaultRunLeaseTTL,
+		skills: settings.skills, resources: settings.resources, memory: settings.memory, hashlineClipboard: newHashlineClipboard(), ast: newASTBridge(), lsp: newLSPBridgeRuntime(), jobs: newBackgroundJobManager(serviceCtx), hubPeers: &hubPeerBrokerRef{}, fileBroker: &fileMutationBrokerRef{},
 		ctx: serviceCtx, cancel: serviceCancel,
-		singleRuns:         make(map[string]*hyworker.SingleRunner),
+		singleRuns:         make(map[string]activeRun),
 		recoveredApprovals: make(map[string]map[string]recoveredApprovalDecision),
+		closeDone:          make(chan struct{}),
 	}
+	constructed := false
+	defer func() {
+		if constructed {
+			return
+		}
+		serviceCancel()
+		if service.shellRuntime != nil {
+			service.shellRuntime.shutdown()
+		}
+		_ = service.jobs.shutdown(context.Background())
+		_ = service.lsp.Close(context.Background())
+	}()
 	if settings.resources != nil && settings.resources.Handler("xd") == nil {
 		if err := settings.resources.Register("xd", newASTXDevHandler(service.ast, settings.resources)); err != nil {
-			serviceCancel()
 			return nil, fmt.Errorf("register xd resources: %w", err)
 		}
 	}
 	if settings.resources != nil && settings.resources.Handler("ssh") == nil {
 		if err := settings.resources.Register("ssh", newSSHResourceHandler(service.lsp, settings.network)); err != nil {
-			serviceCancel()
 			return nil, fmt.Errorf("register ssh resources: %w", err)
 		}
 	}
 	if settings.resources != nil && settings.memory != nil && settings.resources.Handler("memory") == nil {
 		if err := settings.resources.Register("memory", memoryResourceHandler{memory: settings.memory}); err != nil {
-			serviceCancel()
 			return nil, fmt.Errorf("register memory resources: %w", err)
 		}
 	}
 	service.shellRuntime = newShellRuntime(serviceCtx, settings.shellOptions)
-	drivers, err := service.WorkspaceDrivers(context.Background(), workspaceRoot)
+	drivers, err := service.WorkspaceDrivers(context.Background(), service.workspaceRoot)
 	if err != nil {
 		return nil, err
 	}
 	service.tools = tool.NewBus(drivers...)
+	service.runtimeOwnerID, err = newID("runtime_owner")
+	if err != nil {
+		return nil, fmt.Errorf("create durable runtime owner: %w", err)
+	}
+	service.durable, err = durable.New(store.DurableBackend(), durable.Options{
+		OwnerID:           service.runtimeOwnerID,
+		LeaseTTL:          durableLeaseTTL,
+		SettlementTimeout: durableSettlementTimeout,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create durable agent runtime: %w", err)
+	}
+	constructed = true
 	return service, nil
+}
+
+func (s *Service) beginRuntimeWork() error {
+	if s == nil {
+		return fmt.Errorf("agent service is nil")
+	}
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if s.closed {
+		return fmt.Errorf("agent service: %w", durable.ErrClosed)
+	}
+	s.wg.Add(1)
+	return nil
+}
+
+func (s *Service) endRuntimeWork() {
+	s.wg.Done()
 }
 
 func (s *Service) SetHubPeerBroker(broker HubPeerBroker) {
@@ -395,22 +465,154 @@ func (s *Service) SetFileMutationBroker(broker FileMutationBroker) {
 	}
 }
 
-func (s *Service) Runner() *venat.Runner { return s.runner }
-func (s *Service) MatchASTSnapshot(ctx context.Context, source, language string, patterns []string) (bool, error) {
-	if s == nil || s.ast == nil {
-		return false, errors.New("AST matcher is unavailable")
-	}
-	result, err := s.ast.match(ctx, source, language, append([]string(nil), patterns...))
-	return result.TotalMatches > 0, err
+type reconciliationEvidence struct {
+	ModelEvents       []hyprovider.Event     `json:"model_events,omitempty"`
+	ToolResult        *tool.Result           `json:"tool_result,omitempty"`
+	Failure           *durable.FailureRecord `json:"failure,omitempty"`
+	ExternalResultRef string                 `json:"external_result_ref,omitempty"`
 }
 
-func (s *Service) ResolveReconcileAttempt(ctx context.Context, attemptID string, status api.ActionAttemptStatus, externalResultRef string) error {
-	_, err := s.runner.ResolveActionAttempt(ctx, api.ResolveActionAttemptCommand{
-		AttemptID:         attemptID,
-		Status:            status,
-		ExternalResultRef: externalResultRef,
-	})
-	return err
+func (s *Service) ResolveReconcileAttempt(ctx context.Context, attemptID string, status agentruntime.ActionAttemptStatus, payload json.RawMessage) error {
+	attempt, err := s.store.LoadDurableReconcileAttempt(ctx, attemptID)
+	if err == nil {
+		return s.resolveDurableReconcileAttempt(ctx, attempt, status, payload)
+	}
+	if !errors.Is(err, agentruntime.ErrNotFound) {
+		return err
+	}
+	return s.resolveLegacyReconcileAttempt(ctx, attemptID, status, payload)
+}
+
+func (s *Service) resolveDurableReconcileAttempt(ctx context.Context, attempt agentruntime.ActionAttempt, status agentruntime.ActionAttemptStatus, payload json.RawMessage) error {
+	evidence, err := decodeReconciliationEvidence(payload)
+	if err != nil {
+		return err
+	}
+	reconciliation := durable.Reconciliation{
+		AttemptNumber:  attempt.AttemptNumber,
+		AttemptVersion: attempt.AttemptVersion,
+	}
+	switch status {
+	case agentruntime.ActionAttemptSucceeded:
+		reconciliation.Resolution = durable.ReconcileResolutionSucceed
+		switch attempt.AttemptKind {
+		case string(durable.AttemptKindModel):
+			if len(evidence.ModelEvents) == 0 || evidence.ToolResult != nil || evidence.Failure != nil {
+				return fmt.Errorf("reconcile model attempt: a complete model event sequence is required")
+			}
+			reconciliation.ModelEvents = evidence.ModelEvents
+		case string(durable.AttemptKindTool):
+			if evidence.ToolResult == nil || len(evidence.ModelEvents) != 0 || evidence.Failure != nil {
+				return fmt.Errorf("reconcile tool attempt: a canonical tool result is required")
+			}
+			reconciliation.ToolResult = evidence.ToolResult
+		default:
+			return fmt.Errorf("reconcile attempt: unknown attempt kind %q", attempt.AttemptKind)
+		}
+	case agentruntime.ActionAttemptFailed, agentruntime.ActionAttemptTimeout, agentruntime.ActionAttemptCancelled:
+		if len(evidence.ModelEvents) != 0 || evidence.ToolResult != nil {
+			return fmt.Errorf("reconcile failed attempt: success evidence is not allowed")
+		}
+		reconciliation.Resolution = durable.ReconcileResolutionFail
+		reconciliation.Failure = evidence.Failure
+		if reconciliation.Failure == nil {
+			reconciliation.Failure = &durable.FailureRecord{
+				Code: string(status), Message: "operator reconciled the durable attempt as " + string(status),
+			}
+		}
+	case agentruntime.ActionAttemptRetry:
+		if len(evidence.ModelEvents) != 0 || evidence.ToolResult != nil || evidence.Failure != nil {
+			return fmt.Errorf("reconcile retry attempt: evidence is not allowed")
+		}
+		reconciliation.Resolution = durable.ReconcileResolutionRetry
+	default:
+		return fmt.Errorf("reconcile action attempt: succeed, fail, or retry resolution required")
+	}
+	if err := s.durable.Reconcile(ctx, durable.ExecutionID(attempt.ExecutionID), attempt.OperationID, reconciliation); err != nil {
+		return err
+	}
+	remaining, err := s.store.ListDurableReconcileAttempts(ctx)
+	if err != nil {
+		return err
+	}
+	for _, current := range remaining {
+		if current.ExecutionID == attempt.ExecutionID {
+			return nil
+		}
+	}
+	binding, err := s.store.LoadExecutionBinding(ctx, attempt.ExecutionID)
+	if err != nil {
+		return err
+	}
+	if binding.State == agentruntime.ExecutionBindingReconcileRequired {
+		if err := s.finishExecutionBinding(ctx, attempt.ExecutionID, agentruntime.ExecutionBindingSuspended); err != nil {
+			return err
+		}
+	}
+	return s.clearRunReconciliation(ctx, attempt.RunID, attempt.TaskID)
+}
+
+func (s *Service) resolveLegacyReconcileAttempt(ctx context.Context, attemptID string, status agentruntime.ActionAttemptStatus, payload json.RawMessage) error {
+	switch status {
+	case agentruntime.ActionAttemptSucceeded, agentruntime.ActionAttemptFailed, agentruntime.ActionAttemptTimeout, agentruntime.ActionAttemptCancelled:
+	default:
+		return fmt.Errorf("reconcile legacy action attempt: terminal status required")
+	}
+	evidence, err := decodeReconciliationEvidence(payload)
+	if err != nil {
+		return err
+	}
+	if len(evidence.ModelEvents) != 0 || evidence.ToolResult != nil || evidence.Failure != nil {
+		return fmt.Errorf("reconcile legacy action attempt: durable evidence is not supported")
+	}
+	work, err := s.store.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer work.Rollback(context.Background())
+	attempt, err := work.ActionAttempts().LoadActionAttempt(ctx, attemptID)
+	if err != nil {
+		return err
+	}
+	if attempt.Status != agentruntime.ActionAttemptUnknown || !attempt.RequiresReconcile {
+		return agentruntime.ErrConflict
+	}
+	attempt.Status = status
+	attempt.RequiresReconcile = false
+	attempt.ExternalResultRef = evidence.ExternalResultRef
+	if attempt.ExternalResultRef == "" {
+		attempt.ExternalResultRef = "operator-reconciled"
+	}
+	resolved, err := work.ActionAttempts().ResolveActionAttempt(ctx, attempt)
+	if err != nil {
+		return err
+	}
+	if !resolved {
+		return agentruntime.ErrConflict
+	}
+	if err := clearReconciliationInWork(ctx, work, attempt.RunID, attempt.TaskID); err != nil {
+		return err
+	}
+	return work.Commit(ctx)
+}
+
+func decodeReconciliationEvidence(payload json.RawMessage) (reconciliationEvidence, error) {
+	if len(bytes.TrimSpace(payload)) == 0 {
+		return reconciliationEvidence{}, nil
+	}
+	var evidence reconciliationEvidence
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&evidence); err != nil {
+		return reconciliationEvidence{}, fmt.Errorf("decode reconciliation evidence: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return reconciliationEvidence{}, fmt.Errorf("decode reconciliation evidence: multiple JSON values")
+		}
+		return reconciliationEvidence{}, fmt.Errorf("decode reconciliation evidence: %w", err)
+	}
+	return evidence, nil
 }
 
 func (s *Service) SkillSnapshot() skills.Snapshot {
@@ -425,6 +627,10 @@ func (s *Service) StartRun(ctx context.Context, request string) (*Run, error) {
 }
 
 func (s *Service) StartRunWithMetadata(ctx context.Context, request string, metadata map[string]string, policies ...RunExecutionPolicy) (*Run, error) {
+	if err := s.beginRuntimeWork(); err != nil {
+		return nil, err
+	}
+	defer s.endRuntimeWork()
 	runID, err := newID("run")
 	if err != nil {
 		return nil, err
@@ -434,6 +640,10 @@ func (s *Service) StartRunWithMetadata(ctx context.Context, request string, meta
 		return nil, err
 	}
 	taskID, err := newID("task")
+	if err != nil {
+		return nil, err
+	}
+	envelopeID, err := newID("envelope")
 	if err != nil {
 		return nil, err
 	}
@@ -460,188 +670,685 @@ func (s *Service) StartRunWithMetadata(ctx context.Context, request string, meta
 	durableMetadata[singleRunMetadataAgentID] = agentID
 	durableMetadata[singleRunMetadataAgentVersion] = agentVersion
 	durableMetadata[singleRunMetadataGovernance] = string(governance)
-	if agentID != mainAgentID {
-		s.runner.RegisterAgent(api.AgentProfile{ID: agentID, Role: agentID})
-	}
-	coordinator := s.newSingleRunner(agentID, agentVersion, executionPolicy.Governance)
-	state, err := coordinator.Start(ctx, hyworker.StartSingleRunRequest{
-		RunID: runID, RootTaskID: rootID, TaskID: taskID,
-		Request: request, Metadata: durableMetadata, Goal: request, AllowsAction: true,
-		Budget: executionPolicy.Budget, RetryPolicy: executionPolicy.RetryPolicy,
-		OutputSchema:   append(json.RawMessage(nil), executionPolicy.OutputSchema...),
-		ResourceClaims: append([]api.ResourceClaimSpec(nil), executionPolicy.ResourceClaims...),
-	})
+	durableMetadata["task_id"] = taskID
+	kind := executionKind(agentID, durableMetadata)
+	executionID, err := agentruntime.ExecutionID(kind, runID, 0)
 	if err != nil {
 		return nil, err
 	}
-	s.trackSingleRunner(runID, coordinator)
-	return trackedRun(state), nil
+	now := time.Now().UTC()
+	budget := taskBudget(executionPolicy.Budget)
+	manifest := agentruntime.ExecutionManifest{
+		Version: agentruntime.ExecutionManifestVersion, SessionID: durableMetadata["session_id"], RunID: runID,
+		AgentID: agentID, StableID: runID, AgentVersion: agentVersion, Kind: kind, Segment: 0, Prompt: request,
+		Budget: budget, OutputSchema: append(json.RawMessage(nil), executionPolicy.OutputSchema...),
+		Governance: executionPolicy.Governance, RetryPolicy: executionPolicy.RetryPolicy,
+		ResourceClaims: append([]agentruntime.ResourceClaimSpec(nil), executionPolicy.ResourceClaims...),
+		Metadata:       maps.Clone(durableMetadata), WorkspaceAnchor: s.workspaceRoot, StartedAt: now,
+	}
+	if executionPolicy.ExecutableProfile != nil {
+		applyExecutableProfile(&manifest, *executionPolicy.ExecutableProfile)
+		manifest.Sealed = true
+		if err := validateExecutableProfile(manifest); err != nil {
+			return nil, err
+		}
+	}
+	manifest.ProfileHash, err = executionProfileHash(manifest)
+	if err != nil {
+		return nil, err
+	}
+	binding := agentruntime.ExecutionBinding{
+		ExecutionID: executionID, SessionID: manifest.SessionID, RunID: runID, StableID: runID, AgentID: agentID, Kind: kind,
+		Segment: 0, Manifest: manifest, ProfileHash: manifest.ProfileHash, State: agentruntime.ExecutionBindingPending,
+	}
+	runRecord := agentruntime.Run{
+		ID: runID, Status: agentruntime.RunStatusRunning, Request: request, RootTaskID: rootID,
+		AgentVersion: agentVersion, Metadata: durableMetadata, CreatedAt: now, UpdatedAt: now,
+	}
+	taskRecord := agentruntime.Task{
+		ID: taskID, RunID: runID, Type: agentruntime.TaskTypeWorker, Goal: request, AssignedAgentID: agentID,
+		OwnerAgentID: agentID, OwnerComponent: "azem", Status: agentruntime.TaskStatusDispatched, Version: 1,
+		AllowsAction: true, Budget: cloneTaskBudget(executionPolicy.Budget),
+		OutputSchema: append(json.RawMessage(nil), executionPolicy.OutputSchema...),
+		RetryPolicy:  executionPolicy.RetryPolicy, ResourceClaims: append([]agentruntime.ResourceClaimSpec(nil), executionPolicy.ResourceClaims...),
+		CreatedAt: now, UpdatedAt: now,
+	}
+	envelope := agentruntime.TaskEnvelope{
+		ID: envelopeID, RunID: runID, TaskID: taskID, TargetAgentID: agentID, TargetComponent: "azem",
+		TaskVersion: 1, Status: agentruntime.EnvelopeStatusAcked, CreatedAt: now, DeliveredAt: now,
+	}
+	if err := s.store.CreateRunExecution(ctx, runRecord, taskRecord, envelope, binding); err != nil {
+		return nil, err
+	}
+	binding.Version = 1
+	binding.UpdatedAt = now
+	return runFromBinding(binding, taskRecord, envelope), nil
 }
 
-// ResumeRun delegates recovery, redispatch, and resumability checks to Venat's
-// durable single-run coordinator. A lease is acquired only when ExecuteRun
-// starts, after the host has rebuilt the immutable execution profile.
 func (s *Service) ResumeRun(ctx context.Context, runID string) (*Run, error) {
-	coordinator, err := s.singleRunner(ctx, runID)
-	if err != nil {
-		return nil, err
-	}
-	state, err := coordinator.Resume(ctx, runID)
-	if err != nil {
-		return nil, err
-	}
-	s.trackSingleRunner(runID, coordinator)
-	return trackedRun(state), nil
+	return s.resumeRun(ctx, runID, "")
 }
 
-// ExecuteRun binds a rebuilt transient engine to the durable single-run
-// coordinator. The lease observer publishes lease-scoped authorization to the
-// governed Azem tools before the agent can call them.
-func (s *Service) ExecuteRun(ctx context.Context, run *Run, engine hyagent.Engine, sink stream.Sink) (hyworker.ExecutionOutcome, error) {
+// ClassifyRunRecovery validates whether a non-terminal application run has an
+// exact v1 durable execution to replay. Legacy runs and invalid bindings are
+// moved to explicit reconciliation before any provider or tool can run.
+func (s *Service) ClassifyRunRecovery(ctx context.Context, runID string) (kind string, replay bool, err error) {
+	runRecord, _, _, err := s.loadRunAggregate(ctx, runID)
+	if err != nil {
+		return "", false, err
+	}
+	agentID := strings.TrimSpace(runRecord.Metadata[singleRunMetadataAgentID])
+	if agentID == "" {
+		agentID = mainAgentID
+	}
+	kind = executionKind(agentID, runRecord.Metadata)
+	binding, err := s.store.LoadLatestExecutionBinding(ctx, runID, agentID, kind)
+	if errors.Is(err, agentruntime.ErrNotFound) {
+		if err := s.RequireRunReconciliation(ctx, runID, "legacy run has no v1 continuation"); err != nil {
+			return kind, false, err
+		}
+		return kind, false, nil
+	}
+	if err != nil {
+		return kind, false, err
+	}
+	reconcile := func(reason string) (string, bool, error) {
+		if err := s.RequireRunReconciliation(ctx, runID, reason); err != nil {
+			return kind, false, err
+		}
+		return kind, false, nil
+	}
+	if binding.State == agentruntime.ExecutionBindingReconcileRequired {
+		return kind, false, nil
+	}
+	if binding.RunID != runID || binding.AgentID != agentID || binding.Kind != kind ||
+		binding.Manifest.RunID != runID || binding.Manifest.AgentID != agentID ||
+		binding.Manifest.Kind != kind || binding.Manifest.Version != agentruntime.ExecutionManifestVersion {
+		return reconcile("durable execution identity does not match the recoverable run")
+	}
+	if !binding.Manifest.Sealed {
+		return reconcile("durable execution profile is not sealed")
+	}
+	if err := validateExecutableProfile(binding.Manifest); err != nil {
+		return reconcile(err.Error())
+	}
+	profileHash, err := executionProfileHash(binding.Manifest)
+	if err != nil {
+		return kind, false, err
+	}
+	if binding.ProfileHash == "" || binding.ProfileHash != binding.Manifest.ProfileHash || profileHash != binding.ProfileHash {
+		return reconcile("durable execution profile hash changed")
+	}
+	if binding.State == agentruntime.ExecutionBindingPending {
+		return kind, true, nil
+	}
+	execution, err := s.store.DurableBackend().LoadExecution(ctx, durable.ExecutionID(binding.ExecutionID))
+	if errors.Is(err, durable.ErrNotFound) {
+		return reconcile("durable execution state is missing")
+	}
+	if err != nil {
+		return kind, false, err
+	}
+	if execution.ID != durable.ExecutionID(binding.ExecutionID) {
+		return reconcile("durable execution identity changed")
+	}
+	switch binding.State {
+	case agentruntime.ExecutionBindingRunning, agentruntime.ExecutionBindingSuspended:
+		if execution.Status != durable.ExecutionStatusRunning && execution.Status != durable.ExecutionStatusSuspended {
+			return reconcile("durable execution state disagrees with the recoverable run")
+		}
+	case agentruntime.ExecutionBindingCompleted:
+		if execution.Status != durable.ExecutionStatusCompleted {
+			return reconcile("durable terminal state disagrees with the completed binding")
+		}
+	case agentruntime.ExecutionBindingFailed:
+		if execution.Status != durable.ExecutionStatusFailed {
+			return reconcile("durable terminal state disagrees with the failed binding")
+		}
+	case agentruntime.ExecutionBindingCancelled:
+		return kind, false, nil
+	default:
+		return reconcile(fmt.Sprintf("durable execution has unsupported binding state %q", binding.State))
+	}
+	return kind, true, nil
+}
+
+// ResumeChildRun rebuilds an app-owned child execution. A child that has not
+// started yet uses the ordinary pending path. Approval suspension resumes the
+// selected operation; other suspension replays the checkpoint normally.
+func (s *Service) ResumeChildRun(ctx context.Context, runID string) (*Run, error) {
+	runRecord, _, _, err := s.loadRunAggregate(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+	agentID := strings.TrimSpace(runRecord.Metadata[singleRunMetadataAgentID])
+	if agentID == "" {
+		agentID = mainAgentID
+	}
+	binding, err := s.store.LoadLatestExecutionBinding(ctx, runID, agentID, executionKind(agentID, runRecord.Metadata))
+	if err != nil {
+		return nil, err
+	}
+	if binding.State == agentruntime.ExecutionBindingPending {
+		return s.ResumeRun(ctx, runID)
+	}
+	execution, err := s.store.DurableBackend().LoadExecution(ctx, durable.ExecutionID(binding.ExecutionID))
+	if err != nil {
+		return nil, err
+	}
+	if execution.Checkpoint == nil || execution.Checkpoint.Continuation.Phase != hyagent.ContinuationModelComplete {
+		return s.ResumeRun(ctx, runID)
+	}
+	operationID, err := s.resolvedApprovalOperation(ctx, runID, binding.ExecutionID, execution)
+	if err != nil {
+		if errors.Is(err, agentruntime.ErrNotFound) {
+			return s.ResumeRun(ctx, runID)
+		}
+		return nil, err
+	}
+	return s.ResumeRunAtOperation(ctx, runID, operationID)
+}
+
+// ResumeRunAtOperation rebuilds a suspended execution at the exact operation
+// that was approved. Venat validates the checkpoint sequence, phase, and
+// operation before opening another model stream or invoking a tool.
+func (s *Service) ResumeRunAtOperation(ctx context.Context, runID, operationID string) (*Run, error) {
+	operationID = strings.TrimSpace(operationID)
+	if operationID == "" {
+		return nil, fmt.Errorf("resume operation id is empty")
+	}
+	return s.resumeRun(ctx, runID, operationID)
+}
+
+// ResumeRunAfterApproval resumes the operation selected by the latest durable
+// approval decision in the current model-complete checkpoint. It is used by
+// independently owned child executions whose controller observes the durable
+// decision asynchronously.
+func (s *Service) ResumeRunAfterApproval(ctx context.Context, runID string) (*Run, error) {
+	runRecord, _, _, err := s.loadRunAggregate(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+	agentID := strings.TrimSpace(runRecord.Metadata[singleRunMetadataAgentID])
+	if agentID == "" {
+		agentID = mainAgentID
+	}
+	binding, err := s.store.LoadLatestExecutionBinding(ctx, runID, agentID, executionKind(agentID, runRecord.Metadata))
+	if err != nil {
+		return nil, err
+	}
+	execution, err := s.store.DurableBackend().LoadExecution(ctx, durable.ExecutionID(binding.ExecutionID))
+	if err != nil {
+		return nil, err
+	}
+	operationID, err := s.resolvedApprovalOperation(ctx, runID, binding.ExecutionID, execution)
+	if err != nil {
+		return nil, err
+	}
+	return s.ResumeRunAtOperation(ctx, runID, operationID)
+}
+
+func (s *Service) resumeRun(ctx context.Context, runID, operationID string) (*Run, error) {
+	if err := s.beginRuntimeWork(); err != nil {
+		return nil, err
+	}
+	defer s.endRuntimeWork()
+	runRecord, taskRecord, envelope, err := s.loadRunAggregate(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+	agentID := strings.TrimSpace(runRecord.Metadata[singleRunMetadataAgentID])
+	if agentID == "" {
+		agentID = mainAgentID
+	}
+	kind := executionKind(agentID, runRecord.Metadata)
+	binding, err := s.store.LoadLatestExecutionBinding(ctx, runID, agentID, kind)
+	if err != nil {
+		if errors.Is(err, agentruntime.ErrNotFound) {
+			_ = s.markLegacyReconciliation(ctx, runRecord, taskRecord, "legacy run has no v1 continuation")
+		}
+		return nil, err
+	}
+	resumed := runFromBinding(binding, taskRecord, envelope)
+	if binding.State == agentruntime.ExecutionBindingPending {
+		if operationID != "" {
+			return nil, fmt.Errorf("run %s has no durable checkpoint for operation %s: %w", runID, operationID, agentruntime.ErrConflict)
+		}
+		return resumed, nil
+	}
+	execution, err := s.store.DurableBackend().LoadExecution(ctx, durable.ExecutionID(binding.ExecutionID))
+	if err != nil {
+		return nil, err
+	}
+	resumed.resumeTarget, err = resumeTargetForOperation(execution, operationID)
+	if err != nil {
+		return nil, err
+	}
+	return resumed, nil
+}
+
+func (s *Service) ExecuteRun(ctx context.Context, run *Run, engine hyagent.Engine, sink hyagent.Sink) (ExecutionOutcome, error) {
+	if err := s.beginRuntimeWork(); err != nil {
+		return ExecutionOutcome{}, err
+	}
+	defer s.endRuntimeWork()
 	if run == nil {
-		return hyworker.ExecutionOutcome{}, fmt.Errorf("run is nil")
+		return ExecutionOutcome{}, fmt.Errorf("run is nil")
 	}
-	coordinator, err := s.singleRunner(ctx, run.RunID)
+	binding, err := s.store.LoadExecutionBinding(ctx, run.ExecutionID)
 	if err != nil {
-		return hyworker.ExecutionOutcome{}, err
+		return ExecutionOutcome{}, err
 	}
-	result, executeErr := coordinator.Execute(ctx, hyworker.ExecuteSingleRunRequest{
-		RunID: run.RunID, Sink: sink, TTL: s.runLeaseTTL, Engine: &engine,
-		OnLeaseAcquired: func(lease api.TaskExecutionLease) error {
-			run.EnvelopeID = lease.EnvelopeID
-			run.LeaseID = lease.ID
-			run.TaskVersion = lease.TaskVersion
-			run.HolderID = lease.HolderID
-			return nil
-		},
-	})
-	if result.Execution.State != hyworker.ExecutionSuspended {
-		s.untrackSingleRunner(run.RunID, coordinator)
+	if binding.ProfileHash != binding.Manifest.ProfileHash {
+		return ExecutionOutcome{}, fmt.Errorf("run %s execution profile changed: %w", run.RunID, agentruntime.ErrConflict)
 	}
-	return result.Execution, executeErr
+	outcome := ExecutionOutcome{RunID: run.RunID, TaskID: run.TaskID, LeaseID: run.ExecutionID}
+	switch binding.State {
+	case agentruntime.ExecutionBindingCancelled:
+		outcome.State = ExecutionCancelled
+		return outcome, nil
+	case agentruntime.ExecutionBindingReconcileRequired:
+		outcome.State = ExecutionSuspended
+		outcome.Suspension = &Suspension{
+			Kind:   SuspensionReconciliation,
+			Reason: "durable execution requires explicit reconciliation",
+		}
+		return outcome, nil
+	case agentruntime.ExecutionBindingPending,
+		agentruntime.ExecutionBindingRunning,
+		agentruntime.ExecutionBindingSuspended,
+		agentruntime.ExecutionBindingCompleted,
+		agentruntime.ExecutionBindingFailed:
+	default:
+		return ExecutionOutcome{}, fmt.Errorf("run %s has unsupported execution state %q: %w", run.RunID, binding.State, agentruntime.ErrConflict)
+	}
+	if !binding.Manifest.Sealed {
+		return ExecutionOutcome{}, fmt.Errorf("run %s execution profile is not sealed: %w", run.RunID, agentruntime.ErrConflict)
+	}
+	if err := validateExecutableProfile(binding.Manifest); err != nil {
+		return ExecutionOutcome{}, err
+	}
+	profileHash, err := executionProfileHash(binding.Manifest)
+	if err != nil {
+		return ExecutionOutcome{}, err
+	}
+	if profileHash != binding.ProfileHash {
+		return ExecutionOutcome{}, fmt.Errorf("run %s execution profile hash changed: %w", run.RunID, agentruntime.ErrConflict)
+	}
+
+	executionCtx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	activeDone := make(chan struct{})
+	s.singleRunMu.Lock()
+	if _, exists := s.singleRuns[run.RunID]; exists {
+		s.singleRunMu.Unlock()
+		cancel(durable.ErrBusy)
+		return ExecutionOutcome{}, &TaskExecutionUnavailableError{TaskID: run.TaskID}
+	}
+	s.singleRuns[run.RunID] = activeRun{executionID: run.ExecutionID, cancel: cancel, done: activeDone}
+	s.singleRunMu.Unlock()
+	defer func() {
+		s.singleRunMu.Lock()
+		delete(s.singleRuns, run.RunID)
+		s.singleRunMu.Unlock()
+		close(activeDone)
+	}()
+	if strings.TrimSpace(engine.Model) != binding.Manifest.Model {
+		return ExecutionOutcome{}, fmt.Errorf("run %s engine model %q does not match sealed model %q: %w", run.RunID, engine.Model, binding.Manifest.Model, agentruntime.ErrConflict)
+	}
+
+	priorState := binding.State
+	terminalReplay := priorState == agentruntime.ExecutionBindingCompleted || priorState == agentruntime.ExecutionBindingFailed
+	var claimDecision agentruntime.ResourceClaimDecision
+	claimsReleased := true
+	if !terminalReplay {
+		claimDecision, err = s.acquireRunResourceClaims(executionCtx, run, binding.Manifest.ResourceClaims)
+		if err != nil {
+			return ExecutionOutcome{}, err
+		}
+		if !claimDecision.Acquired {
+			return ExecutionOutcome{}, &TaskExecutionUnavailableError{TaskID: run.TaskID, ResourceClaims: claimDecision}
+		}
+		claimsReleased = false
+		defer func() {
+			if !claimsReleased {
+				_ = s.releaseRunResourceClaims(context.WithoutCancel(ctx), claimDecision.Claims)
+			}
+		}()
+		binding.State = agentruntime.ExecutionBindingRunning
+		binding, err = s.store.SaveExecutionBinding(executionCtx, binding, binding.Version)
+		if err != nil {
+			releaseErr := s.releaseRunResourceClaims(context.WithoutCancel(ctx), claimDecision.Claims)
+			claimsReleased = true
+			return ExecutionOutcome{}, errors.Join(err, releaseErr)
+		}
+	}
+	run.binding = binding
+	run.TaskVersion = 1
+	run.LeaseID = run.ExecutionID
+	run.HolderID = binding.AgentID
+	request := hyagent.Request{Prompt: binding.Manifest.Prompt}
+	if binding.Manifest.Budget != (hyagent.Budget{}) {
+		budget := binding.Manifest.Budget
+		request.Budget = &budget
+	}
+	outputPolicy := hyagent.OutputPolicy{
+		Schema:   append(json.RawMessage(nil), binding.Manifest.OutputSchema...),
+		Validate: len(binding.Manifest.OutputSchema) > 0,
+		Repair:   len(binding.Manifest.OutputSchema) > 0,
+	}
+	var result hyagent.Result
+	var runtimeErr error
+	if priorState == agentruntime.ExecutionBindingPending {
+		result, runtimeErr = s.durable.StartStream(executionCtx, durable.ExecutionID(run.ExecutionID), engine, request, outputPolicy, sink)
+	} else {
+		result, runtimeErr = s.durable.ResumeStreamWithOptions(
+			executionCtx, durable.ExecutionID(run.ExecutionID), engine, sink,
+			durable.ResumeOptions{Target: run.resumeTarget},
+		)
+	}
+	var releaseErr error
+	if !terminalReplay {
+		releaseErr = s.releaseRunResourceClaims(context.WithoutCancel(ctx), claimDecision.Claims)
+		claimsReleased = true
+	}
+	outcome.Result = result
+	outcome.Failure = result.Failure
+	if errors.Is(runtimeErr, durable.ErrBusy) {
+		return outcome, errors.Join(&TaskExecutionUnavailableError{TaskID: run.TaskID}, releaseErr)
+	}
+
+	cancelled := false
+	var cancellationStateErr error
+	if runtimeErr != nil {
+		latest, loadErr := s.store.LoadExecutionBinding(context.WithoutCancel(ctx), run.ExecutionID)
+		if loadErr != nil {
+			cancellationStateErr = loadErr
+		} else {
+			cancelled = latest.State == agentruntime.ExecutionBindingCancelled
+		}
+	}
+	nextState := agentruntime.ExecutionBindingCompleted
+	outcome.State = ExecutionCompleted
+	switch {
+	case cancelled:
+		nextState = agentruntime.ExecutionBindingCancelled
+		outcome.State = ExecutionCancelled
+	case errors.Is(runtimeErr, durable.ErrSuspended):
+		nextState = agentruntime.ExecutionBindingSuspended
+		outcome.State = ExecutionSuspended
+		outcome.Suspension = &Suspension{Kind: SuspensionRequested, Reason: runtimeErr.Error()}
+	case errors.Is(runtimeErr, durable.ErrReconcileRequired):
+		nextState = agentruntime.ExecutionBindingReconcileRequired
+		outcome.State = ExecutionSuspended
+		outcome.Suspension = &Suspension{Kind: SuspensionReconciliation, Reason: runtimeErr.Error()}
+	case runtimeErr != nil:
+		nextState = agentruntime.ExecutionBindingSuspended
+		outcome.State = ExecutionSuspended
+		outcome.Suspension = &Suspension{Kind: SuspensionRequested, Reason: runtimeErr.Error()}
+	case releaseErr != nil:
+		nextState = agentruntime.ExecutionBindingReconcileRequired
+		outcome.State = ExecutionSuspended
+		outcome.Suspension = &Suspension{Kind: SuspensionReconciliation, Reason: releaseErr.Error()}
+	case result.Failure != nil:
+		nextState = agentruntime.ExecutionBindingFailed
+		outcome.State = ExecutionFailed
+	}
+	operationErr := errors.Join(runtimeErr, releaseErr, cancellationStateErr)
+	if cancelled {
+		operationErr = errors.Join(releaseErr, cancellationStateErr)
+	}
+	if operationErr == nil && (nextState == agentruntime.ExecutionBindingCompleted || nextState == agentruntime.ExecutionBindingFailed) {
+		var terminalFailure error
+		if result.Failure != nil {
+			terminalFailure = result.Failure
+		}
+		if completionErr := s.saveRunCompletion(context.WithoutCancel(ctx), run, result.Text, terminalFailure, &result); completionErr != nil {
+			operationErr = completionErr
+			nextState = agentruntime.ExecutionBindingReconcileRequired
+			outcome.State = ExecutionSuspended
+			outcome.Suspension = &Suspension{Kind: SuspensionReconciliation, Reason: completionErr.Error()}
+		}
+	}
+	if nextState == agentruntime.ExecutionBindingReconcileRequired {
+		reason := "durable execution requires reconciliation"
+		if operationErr != nil {
+			reason = operationErr.Error()
+		}
+		operationErr = errors.Join(operationErr, s.markExecutionReconciliation(context.WithoutCancel(ctx), run.RunID, reason))
+	}
+	if transitionErr := s.finishExecutionBinding(context.WithoutCancel(ctx), run.ExecutionID, nextState); transitionErr != nil {
+		operationErr = errors.Join(operationErr, transitionErr)
+		if outcome.State == ExecutionCompleted || outcome.State == ExecutionFailed {
+			outcome.State = ExecutionSuspended
+			outcome.Suspension = &Suspension{Kind: SuspensionReconciliation, Reason: transitionErr.Error()}
+		}
+	}
+	return outcome, operationErr
 }
 
-// ReleaseRun durably suspends a rebuilt run that cannot safely execute. The
-// run remains resumable after its immutable profile mismatch is resolved.
+// SuspendRun requests a checkpointed suspension and waits until ExecuteRun has
+// persisted the suspended execution binding. It must be called from outside
+// the hook goroutine that is currently blocking the durable execution.
+func (s *Service) SuspendRun(ctx context.Context, run *Run) error {
+	if run == nil {
+		return fmt.Errorf("run is nil")
+	}
+	if err := s.beginRuntimeWork(); err != nil {
+		return err
+	}
+	defer s.endRuntimeWork()
+	s.singleRunMu.Lock()
+	active, ok := s.singleRuns[run.RunID]
+	s.singleRunMu.Unlock()
+	if !ok || active.executionID != run.ExecutionID {
+		return durable.ErrNotActive
+	}
+	err := s.durable.Suspend(ctx, durable.ExecutionID(run.ExecutionID))
+	if err != nil && !errors.Is(err, durable.ErrNotActive) {
+		return err
+	}
+	select {
+	case <-active.done:
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	}
+	binding, loadErr := s.store.LoadExecutionBinding(ctx, run.ExecutionID)
+	if loadErr != nil {
+		return loadErr
+	}
+	if binding.State != agentruntime.ExecutionBindingSuspended {
+		return fmt.Errorf("run %s suspension settled in state %q: %w", run.RunID, binding.State, agentruntime.ErrConflict)
+	}
+	return nil
+}
+
 func (s *Service) ReleaseRun(ctx context.Context, run *Run) error {
 	if run == nil {
 		return nil
 	}
-	coordinator, err := s.singleRunner(ctx, run.RunID)
-	if err != nil {
+	err := s.durable.Suspend(ctx, durable.ExecutionID(run.ExecutionID))
+	if err != nil && !errors.Is(err, durable.ErrNotActive) {
 		return err
 	}
-	err = coordinator.Suspend(ctx, run.RunID)
-	if err == nil {
-		s.untrackSingleRunner(run.RunID, coordinator)
-	}
-	return err
+	return s.finishExecutionBinding(ctx, run.ExecutionID, agentruntime.ExecutionBindingSuspended)
 }
 
 func (s *Service) RequireRunReconciliation(ctx context.Context, runID, reason string) error {
-	if strings.TrimSpace(reason) == "" {
-		reason = "reconciliation required"
-	}
-	if _, err := s.runner.Recover(ctx, runID); err != nil {
-		return err
-	}
-	run, err := s.runner.Run(ctx, runID)
+	runRecord, taskRecord, _, err := s.loadRunAggregate(ctx, runID)
 	if err != nil {
 		return err
 	}
-	if run.Status == api.RunStatusReconcileRequired {
-		s.untrackSingleRunner(runID, nil)
-		return nil
+	if err := s.markLegacyReconciliation(ctx, runRecord, taskRecord, reason); err != nil {
+		return err
 	}
-	if run.Status == api.RunStatusBlocked || run.Status == api.RunStatusWaitingUserInput {
-		if err := s.runner.TransitionRun(ctx, api.TransitionRunCommand{RunID: runID, To: api.RunStatusRunning}); err != nil {
-			return fmt.Errorf("prepare run %s for reconciliation: %w", runID, err)
-		}
-	}
-	if err := s.runner.TransitionRun(ctx, api.TransitionRunCommand{RunID: runID, To: api.RunStatusReconcileRequired}); err != nil {
-		return fmt.Errorf("mark run %s reconciliation required from %s: %w", runID, run.Status, err)
-	}
-	s.untrackSingleRunner(runID, nil)
-	return nil
-}
-
-func (s *Service) newSingleRunner(agentID, agentVersion string, governance api.GovernancePolicy) *hyworker.SingleRunner {
-	return &hyworker.SingleRunner{
-		Runner: s.runner,
-		Worker: hyworker.AgentWorker{
-			Runner: s.runner, AgentID: agentID, TTL: s.runLeaseTTL,
-		},
-		Admission:    hyworker.StandardAdmissionController{Runner: s.runner},
-		AgentVersion: agentVersion,
-		Governance:   governance,
-	}
-}
-
-func (s *Service) singleRunner(ctx context.Context, runID string) (*hyworker.SingleRunner, error) {
-	s.singleRunMu.Lock()
-	coordinator := s.singleRuns[runID]
-	s.singleRunMu.Unlock()
-	if coordinator != nil {
-		return coordinator, nil
-	}
-	run, err := s.runner.Run(ctx, runID)
-	if err != nil {
-		return nil, err
-	}
-	agentID := strings.TrimSpace(run.Metadata[singleRunMetadataAgentID])
+	agentID := strings.TrimSpace(runRecord.Metadata[singleRunMetadataAgentID])
 	if agentID == "" {
 		agentID = mainAgentID
 	}
-	agentVersion := strings.TrimSpace(run.Metadata[singleRunMetadataAgentVersion])
-	if agentVersion == "" {
-		agentVersion = "legacy"
+	binding, err := s.store.LoadLatestExecutionBinding(ctx, runID, agentID, executionKind(agentID, runRecord.Metadata))
+	if errors.Is(err, agentruntime.ErrNotFound) {
+		return nil
 	}
-	var governance api.GovernancePolicy
-	if encoded := strings.TrimSpace(run.Metadata[singleRunMetadataGovernance]); encoded != "" {
-		if err := json.Unmarshal([]byte(encoded), &governance); err != nil {
-			return nil, fmt.Errorf("decode coding run governance: %w", err)
-		}
+	if err != nil {
+		return err
 	}
-	coordinator = s.newSingleRunner(agentID, agentVersion, governance)
-	s.singleRunMu.Lock()
-	if existing := s.singleRuns[runID]; existing != nil {
-		s.singleRunMu.Unlock()
-		return existing, nil
-	}
-	s.singleRuns[runID] = coordinator
-	s.singleRunMu.Unlock()
-	return coordinator, nil
+	binding.State = agentruntime.ExecutionBindingReconcileRequired
+	_, err = s.store.SaveExecutionBinding(ctx, binding, binding.Version)
+	return err
 }
 
-func (s *Service) trackSingleRunner(runID string, coordinator *hyworker.SingleRunner) {
-	s.singleRunMu.Lock()
-	s.singleRuns[runID] = coordinator
-	s.singleRunMu.Unlock()
-}
-
-func (s *Service) untrackSingleRunner(runID string, expected *hyworker.SingleRunner) {
-	s.singleRunMu.Lock()
-	if expected == nil || s.singleRuns[runID] == expected {
-		delete(s.singleRuns, runID)
-	}
-	s.singleRunMu.Unlock()
-}
-
-func trackedRun(state hyworker.SingleRun) *Run {
-	goal := state.Task.Goal
+func runFromBinding(binding agentruntime.ExecutionBinding, task agentruntime.Task, envelope agentruntime.TaskEnvelope) *Run {
+	goal := task.Goal
 	if goal == "" {
-		goal = state.Run.Request
-	}
-	taskVersion := state.Envelope.TaskVersion
-	if taskVersion == 0 {
-		taskVersion = state.Task.Version
+		goal = binding.Manifest.Prompt
 	}
 	return &Run{
-		RunID: state.Run.ID, Goal: goal, TaskID: state.Task.ID,
-		EnvelopeID: state.Envelope.ID, TaskVersion: taskVersion,
-		HolderID: state.Task.AssignedAgentID,
-		pending:  make(map[string]PendingApproval), approvedOnce: make(map[string]string),
+		RunID: binding.RunID, Goal: goal, TaskID: task.ID, EnvelopeID: envelope.ID,
+		ExecutionID: binding.ExecutionID, TaskVersion: task.Version, HolderID: binding.AgentID, binding: binding,
+		pending: make(map[string]PendingApproval), approvedOnce: make(map[string]string),
 	}
+}
+
+func resumeTargetForExecution(execution durable.Execution) durable.ResumeTarget {
+	if execution.Checkpoint == nil {
+		return durable.ResumeTarget{}
+	}
+	continuation := execution.Checkpoint.Continuation
+	target := durable.ResumeTarget{
+		CheckpointSequence: execution.Checkpoint.Sequence,
+		Phase:              continuation.Phase,
+	}
+	switch continuation.Phase {
+	case hyagent.ContinuationReady:
+		target.OperationID = fmt.Sprintf("turn:%d:model", continuation.NextOperationTurn)
+	case hyagent.ContinuationModelComplete:
+		var operationID string
+		for index := len(continuation.Messages) - 1; index >= 0; index-- {
+			calls := continuation.Messages[index].ToolCalls
+			if len(calls) == 0 {
+				continue
+			}
+			if len(calls) == 1 {
+				operationID = calls[0].OperationID
+			}
+			break
+		}
+		target.OperationID = operationID
+	}
+	return target
+}
+
+func resumeTargetForOperation(execution durable.Execution, operationID string) (durable.ResumeTarget, error) {
+	target := resumeTargetForExecution(execution)
+	if operationID == "" {
+		return target, nil
+	}
+	if execution.Checkpoint == nil {
+		return durable.ResumeTarget{}, fmt.Errorf("durable execution has no checkpoint for operation %s: %w", operationID, agentruntime.ErrConflict)
+	}
+	continuation := execution.Checkpoint.Continuation
+	if continuation.Phase != hyagent.ContinuationModelComplete {
+		return durable.ResumeTarget{}, fmt.Errorf(
+			"durable checkpoint %d is in phase %q, not %q for operation %s: %w",
+			execution.Checkpoint.Sequence, continuation.Phase, hyagent.ContinuationModelComplete, operationID, agentruntime.ErrConflict,
+		)
+	}
+	for index := len(continuation.Messages) - 1; index >= 0; index-- {
+		calls := continuation.Messages[index].ToolCalls
+		if len(calls) == 0 {
+			continue
+		}
+		for _, call := range calls {
+			if call.OperationID == operationID {
+				target.OperationID = operationID
+				return target, nil
+			}
+		}
+		break
+	}
+	return durable.ResumeTarget{}, fmt.Errorf(
+		"durable checkpoint %d does not contain operation %s: %w",
+		execution.Checkpoint.Sequence, operationID, agentruntime.ErrConflict,
+	)
+}
+
+func (s *Service) resolvedApprovalOperation(ctx context.Context, runID, executionID string, execution durable.Execution) (string, error) {
+	if execution.Checkpoint == nil || execution.Checkpoint.Continuation.Phase != hyagent.ContinuationModelComplete {
+		return "", fmt.Errorf("run %s has no model-complete approval checkpoint: %w", runID, agentruntime.ErrConflict)
+	}
+	var calls []message.ToolCall
+	for index := len(execution.Checkpoint.Continuation.Messages) - 1; index >= 0; index-- {
+		if current := execution.Checkpoint.Continuation.Messages[index].ToolCalls; len(current) != 0 {
+			calls = current
+			break
+		}
+	}
+	if len(calls) == 0 {
+		return "", fmt.Errorf("run %s approval checkpoint has no tool operation: %w", runID, agentruntime.ErrConflict)
+	}
+	callOperations := make(map[string]struct{}, len(calls))
+	for _, call := range calls {
+		if operationID := strings.TrimSpace(call.OperationID); operationID != "" {
+			callOperations[operationID] = struct{}{}
+		}
+	}
+	s.approvalMu.Lock()
+	recovered := maps.Clone(s.recoveredApprovals[runID])
+	s.approvalMu.Unlock()
+	if len(recovered) == 1 {
+		for operationID := range recovered {
+			if _, found := callOperations[operationID]; found {
+				return operationID, nil
+			}
+		}
+	}
+	work, err := s.store.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer work.Rollback(context.Background())
+	var selected string
+	var decidedAt time.Time
+	for operationID := range callOperations {
+		approvalID, _, _, err := approvalRecordIDs(agentruntime.RequestApprovalCommand{Metadata: map[string]string{
+			approvalMetadataExecutionID: executionID,
+			approvalMetadataOperationID: operationID,
+		}})
+		if err != nil {
+			return "", err
+		}
+		approval, err := work.Approvals().LoadApproval(ctx, approvalID)
+		if errors.Is(err, agentruntime.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		if approval.RunID != runID || approval.ActionID != operationID ||
+			approval.Metadata[approvalMetadataExecutionID] != executionID ||
+			approval.Metadata[approvalMetadataOperationID] != operationID {
+			return "", fmt.Errorf("approval %s does not own operation %s: %w", approval.ApprovalID, operationID, agentruntime.ErrConflict)
+		}
+		if approval.Status != "approved" && approval.Status != "rejected" {
+			continue
+		}
+		currentDecidedAt, err := time.Parse(time.RFC3339Nano, approval.Metadata["decided_at"])
+		if err != nil {
+			return "", fmt.Errorf("approval %s has invalid decision time: %w", approval.ApprovalID, agentruntime.ErrConflict)
+		}
+		if selected == "" || currentDecidedAt.After(decidedAt) {
+			selected, decidedAt = operationID, currentDecidedAt
+			continue
+		}
+		if currentDecidedAt.Equal(decidedAt) {
+			return "", fmt.Errorf("run %s has ambiguous approval decisions: %w", runID, agentruntime.ErrConflict)
+		}
+	}
+	if selected == "" {
+		return "", fmt.Errorf("run %s has no resolved approval operation: %w", runID, agentruntime.ErrNotFound)
+	}
+	return selected, nil
 }
 
 const maxToolArgumentDepth = 128
@@ -699,6 +1406,7 @@ func validateToolArgumentValue(decoder *json.Decoder, depth int, requireObject b
 				return err
 			}
 		}
+
 		end, err := decoder.Token()
 		if err != nil {
 			return err
@@ -725,6 +1433,51 @@ func validateToolArgumentValue(decoder *json.Decoder, depth int, requireObject b
 	return nil
 }
 
+func operationApprovalCommand(run *Run, operationID, scopeFingerprint string) agentruntime.RequestApprovalCommand {
+	return agentruntime.RequestApprovalCommand{
+		RunID: run.RunID, TaskID: run.TaskID, ActionID: operationID,
+		Metadata: map[string]string{
+			approvalMetadataExecutionID: run.ExecutionID,
+			approvalMetadataOperationID: operationID,
+			approvalMetadataScope:       scopeFingerprint,
+		},
+	}
+}
+
+func (s *Service) loadOperationApproval(ctx context.Context, run *Run, operationID, scopeFingerprint string) (agentruntime.ApprovalRequest, agentruntime.ResumeToken, bool, error) {
+	if strings.TrimSpace(run.ExecutionID) == "" {
+		return agentruntime.ApprovalRequest{}, agentruntime.ResumeToken{}, false, nil
+	}
+	command := operationApprovalCommand(run, operationID, scopeFingerprint)
+	approvalID, tokenID, deterministic, err := approvalRecordIDs(command)
+	if err != nil {
+		return agentruntime.ApprovalRequest{}, agentruntime.ResumeToken{}, false, err
+	}
+	if !deterministic {
+		return agentruntime.ApprovalRequest{}, agentruntime.ResumeToken{}, false, fmt.Errorf("operation approval identity is not deterministic: %w", agentruntime.ErrConflict)
+	}
+	work, err := s.store.Begin(ctx)
+	if err != nil {
+		return agentruntime.ApprovalRequest{}, agentruntime.ResumeToken{}, false, err
+	}
+	defer work.Rollback(context.Background())
+	approval, err := work.Approvals().LoadApproval(ctx, approvalID)
+	if errors.Is(err, agentruntime.ErrNotFound) {
+		return agentruntime.ApprovalRequest{}, agentruntime.ResumeToken{}, false, nil
+	}
+	if err != nil {
+		return agentruntime.ApprovalRequest{}, agentruntime.ResumeToken{}, false, err
+	}
+	token, err := work.ResumeTokens().LoadResumeToken(ctx, tokenID)
+	if err != nil {
+		return agentruntime.ApprovalRequest{}, agentruntime.ResumeToken{}, false, err
+	}
+	if err := validateApprovalIdentity(command, approval, token); err != nil {
+		return agentruntime.ApprovalRequest{}, agentruntime.ResumeToken{}, false, err
+	}
+	return approval, token, true, nil
+}
+
 func invalidToolArguments(call tool.Call, err error) ExecutionResult {
 	return ExecutionResult{
 		Result: tool.Result{
@@ -735,6 +1488,15 @@ func invalidToolArguments(call tool.Call, err error) ExecutionResult {
 		},
 		Executed: true,
 	}
+}
+
+func deniedToolExecution(call tool.Call) ExecutionResult {
+	return ExecutionResult{Result: tool.Result{
+		ToolCallID: call.ID,
+		Name:       call.Name,
+		Content:    "Denied by user",
+		IsError:    true,
+	}}
 }
 
 func (s *Service) ExecuteTool(ctx context.Context, run *Run, call tool.Call, sink tool.UpdateSink) (ExecutionResult, error) {
@@ -757,56 +1519,75 @@ func (s *Service) PrepareDriver(ctx context.Context, run *Run, driver tool.Drive
 	if driver == nil {
 		return ExecutionResult{}, false, fmt.Errorf("tool driver is nil")
 	}
-	definition := driver.Definition()
+	descriptor, err := DescribeTool(driver)
+	if err != nil {
+		return ExecutionResult{}, false, err
+	}
+	definition := descriptor.WireDefinition
 	if call.Name != definition.Name {
 		return ExecutionResult{}, false, fmt.Errorf("tool call %q does not match driver %q", call.Name, definition.Name)
 	}
 	if err := validateToolArguments(call.Arguments); err != nil {
 		return invalidToolArguments(call, err), false, nil
 	}
-	if dynamic, ok := driver.(callDefinitionDriver); ok {
-		definition = dynamic.DefinitionForCall(call)
-	}
+	policy := descriptor.PolicyForCall(call)
 	if blocked, required := run.editRecovery.BlockedEdit(call); required {
 		return ExecutionResult{Result: blocked, Executed: true}, false, nil
 	}
-	scope := scopeForCall(definition, call)
+	scope := scopeForCall(policy, call)
 	approvalKey := approvalCallKey(call)
-	needsApproval := definition.RequiresApproval || definition.Security.RequiresApproval || definition.RequiresActionTask || definition.EffectType == tool.EffectWrite || definition.EffectType == tool.EffectExternalSideEffect
-	if definition.Metadata["approval"] == "allow" {
-		needsApproval = definition.Metadata["network"] == "prompt" && toolCallRequestsNetwork(call.Arguments)
+	needsApproval := policy.RequiresApproval || policy.RequiresActionTask ||
+		policy.Effect == agentruntime.ToolEffectWrite || policy.Effect == agentruntime.ToolEffectExternalSideEffect
+	if policy.Metadata["approval"] == "allow" {
+		needsApproval = policy.Metadata["network"] == "prompt" && toolCallRequestsNetwork(call.Arguments)
 	}
 	approved := s.policy.sessionGranted(scope.Fingerprint) || run.approvedOnce[approvalKey] == scope.Fingerprint
 	if needsApproval && !approved {
+		if pending, found := run.pending[approvalKey]; found && pending.Scope.Fingerprint == scope.Fingerprint {
+			return ExecutionResult{Approval: &pending}, false, nil
+		}
 		if recovered, found := s.consumeRecoveredApproval(run.RunID, approvalKey, scope.Fingerprint); found {
 			if !recovered.approved {
-				return ExecutionResult{Result: tool.Result{
-					ToolCallID: call.ID,
-					Name:       call.Name,
-					Content:    "Denied by user",
-					IsError:    true,
-				}}, false, nil
+				return deniedToolExecution(call), false, nil
 			}
 			approved = true
 		}
 	}
 	if needsApproval && !approved {
-		if pending, found := run.pending[approvalKey]; found && pending.Scope.Fingerprint == scope.Fingerprint {
-			return ExecutionResult{Approval: &pending}, false, nil
+		approval, token, found, loadErr := s.loadOperationApproval(ctx, run, approvalKey, scope.Fingerprint)
+		if loadErr != nil {
+			return ExecutionResult{}, false, loadErr
 		}
-		approval, token, requestErr := s.runner.RequestApproval(ctx, api.RequestApprovalCommand{
-			RunID: run.RunID, TaskID: run.TaskID, ActionID: approvalKey, RequesterAgentID: run.HolderID,
-			Reason: fmt.Sprintf("%s requests %s", run.HolderID, call.Name), RiskSummary: scope.Risk + " · " + scope.Target,
-			RequestedAction: summarizeArguments(call.Arguments),
-			Metadata: map[string]string{
-				approvalMetadataOperationID: approvalKey,
-				approvalMetadataScope:       scope.Fingerprint,
-			},
-		})
+		if found {
+			switch approval.Status {
+			case "pending":
+				command := operationApprovalCommand(run, approvalKey, scope.Fingerprint)
+				if err := validateExistingApproval(command, approval, token, time.Now().UTC()); err != nil {
+					return ExecutionResult{}, false, err
+				}
+				pending := PendingApproval{Request: approval, Token: token, Call: call, Scope: scope, Effect: string(policy.Effect), Replayable: policy.Idempotent}
+				run.pending[approvalKey] = pending
+				return ExecutionResult{Approval: &pending}, false, nil
+			case "approved":
+				approved = true
+			case "rejected":
+				return deniedToolExecution(call), false, nil
+			default:
+				return ExecutionResult{}, false, fmt.Errorf("durable approval %s has invalid status %q: %w", approval.ApprovalID, approval.Status, agentruntime.ErrConflict)
+			}
+		}
+	}
+	if needsApproval && !approved {
+		command := operationApprovalCommand(run, approvalKey, scope.Fingerprint)
+		command.RequesterAgentID = run.HolderID
+		command.Reason = fmt.Sprintf("%s requests %s", run.HolderID, call.Name)
+		command.RiskSummary = scope.Risk + " · " + scope.Target
+		command.RequestedAction = summarizeArguments(call.Arguments)
+		approval, token, requestErr := s.requestApproval(ctx, command)
 		if requestErr != nil {
 			return ExecutionResult{}, false, requestErr
 		}
-		pending := PendingApproval{Request: approval, Token: token, Call: call, Scope: scope, Effect: string(definition.EffectType), Replayable: definition.Idempotent || definition.Security.Idempotent}
+		pending := PendingApproval{Request: approval, Token: token, Call: call, Scope: scope, Effect: string(policy.Effect), Replayable: policy.Idempotent}
 		run.pending[approvalKey] = pending
 		return ExecutionResult{Approval: &pending}, false, nil
 	}
@@ -816,7 +1597,7 @@ func (s *Service) PrepareDriver(ctx context.Context, run *Run, driver tool.Drive
 // ExecutePreparedDriver runs an operation that already passed PrepareDriver.
 func (s *Service) ExecutePreparedDriver(ctx context.Context, run *Run, driver tool.Driver, call tool.Call, sink tool.UpdateSink) (ExecutionResult, error) {
 	delete(run.approvedOnce, approvalCallKey(call))
-	result, err := driver.Execute(ctx, call, sink)
+	result, err := s.ExecutePolicyCall(ctx, driver, call, sink)
 	result = addHashlineRetryGuidance(call, result)
 	run.editRecovery.Observe(call, result, err)
 	if err != nil {
@@ -838,7 +1619,7 @@ func (s *Service) ExecuteDriver(ctx context.Context, run *Run, driver tool.Drive
 func (s *Service) ResolveApproval(ctx context.Context, run *Run, callID string, mode ApprovalMode, decidedBy string) error {
 	pending, ok := run.pending[callID]
 	if !ok {
-		return api.ErrNotFound
+		return agentruntime.ErrNotFound
 	}
 	decision := "approved"
 	if mode == ApprovalDenied {
@@ -850,7 +1631,7 @@ func (s *Service) ResolveApproval(ctx context.Context, run *Run, callID string, 
 	if strings.TrimSpace(decidedBy) == "" {
 		return fmt.Errorf("approval decider is empty")
 	}
-	if err := s.runner.DecideApproval(ctx, api.DecideApprovalCommand{
+	if err := s.decideApproval(ctx, agentruntime.DecideApprovalCommand{
 		RunID: run.RunID, ApprovalID: pending.Request.ApprovalID, DecidedBy: decidedBy, Decision: decision,
 	}); err != nil {
 		return err
@@ -865,7 +1646,7 @@ func (s *Service) ResolveApproval(ctx context.Context, run *Run, callID string, 
 	return nil
 }
 
-func (s *Service) ResolveRecoveredApproval(ctx context.Context, approval api.ApprovalRequest, tokenID, decision string) error {
+func (s *Service) ResolveRecoveredApproval(ctx context.Context, approval agentruntime.ApprovalRequest, tokenID, decision string) error {
 	mode := ApprovalOnce
 	switch decision {
 	case "session":
@@ -888,7 +1669,7 @@ func (s *Service) ResolveRecoveredApproval(ctx context.Context, approval api.App
 		return fmt.Errorf("recovered approval %s is missing its durable operation scope", approval.ApprovalID)
 	}
 	if tokenID != "" {
-		token, err := s.runner.RecoverResumeToken(ctx, api.RecoverResumeTokenCommand{TokenID: tokenID})
+		token, err := s.recoverResumeToken(ctx, tokenID)
 		if err != nil {
 			return err
 		}
@@ -896,7 +1677,7 @@ func (s *Service) ResolveRecoveredApproval(ctx context.Context, approval api.App
 			return fmt.Errorf("recovered approval %s does not own resume token %s", approval.ApprovalID, tokenID)
 		}
 	}
-	if err := s.runner.DecideApproval(ctx, api.DecideApprovalCommand{
+	if err := s.decideApproval(ctx, agentruntime.DecideApprovalCommand{
 		RunID: approval.RunID, ApprovalID: approval.ApprovalID, DecidedBy: "user", Decision: decision,
 	}); err != nil {
 		return err
@@ -947,6 +1728,22 @@ func (s *Service) consumeRecoveredApproval(runID, operationID, fingerprint strin
 
 func (s *Service) ToolDefinitions() []tool.Definition {
 	return s.tools.Definitions()
+}
+
+func (s *Service) ToolPolicySnapshot() map[string]agentruntime.ToolPolicy {
+	if s == nil || s.tools == nil {
+		return nil
+	}
+	policies := make(map[string]agentruntime.ToolPolicy)
+	for _, driver := range s.ToolDrivers() {
+		descriptor, err := DescribeTool(driver)
+		if err != nil {
+			continue
+		}
+		name := descriptor.WireDefinition.Name
+		policies[name] = descriptor.PolicyForCall(tool.Call{Name: name, Arguments: json.RawMessage(`{}`)})
+	}
+	return policies
 }
 
 func (s *Service) ToolDrivers() []tool.Driver {
@@ -1029,53 +1826,28 @@ func (s *Service) WorkspaceDrivers(ctx context.Context, root string) ([]tool.Dri
 	if err != nil {
 		return nil, fmt.Errorf("resolve workspace root: %w", err)
 	}
-	workspace := coding.NewLocalWorkspace(absoluteRoot)
-	candidates := coding.NewToolSet(workspace)
+	workspace := NewLocalWorkspace(absoluteRoot)
 	isGitRepo := workspaceIsGitRepo(ctx, absoluteRoot)
-	drivers := make([]tool.Driver, 0, len(candidates)+4)
-	var readDriver, snapshotReadDriver, editDriver, searchDriver tool.Driver
-	for _, driver := range candidates {
-		definition := driver.Definition()
-		if definition.Name == coding.ToolGitDiff && !isGitRepo {
-			continue
-		}
-		if !s.allowWrite && definition.EffectType == tool.EffectWrite {
-			continue
-		}
-		if definition.Name == coding.ToolReadFile {
-			snapshotReadDriver = driver
-			driver = newOMPReadDriver(absoluteRoot, driver, s.resources, s.allowNetwork)
-		}
-		if definition.Name == coding.ToolWriteFile {
-			driver = newOMPWriteDriver(absoluteRoot, snapshotReadDriver, s.resources, s.fileBroker)
-		}
-		if definition.Name == coding.ToolEditHashline {
-			definition.Description = hashlineEditToolDescription
-			driver = definitionOverrideDriver{Driver: driver, definition: definition}
-			driver = newOMPHashlineDriver(absoluteRoot, snapshotReadDriver, s.hashlineClipboard, s.fileBroker)
-		}
-		if definition.Name == coding.ToolGoTest {
-			driver = goTestStatusDriver{Driver: driver}
-		}
-		switch definition.Name {
-		case coding.ToolReadFile:
-			readDriver = driver
-		case coding.ToolSearch:
-			searchDriver = driver
-			continue
-		case coding.ToolEditHashline:
-			editDriver = driver
-		}
-		drivers = append(drivers, driver)
+	snapshotDriver := snapshotReadDriver{workspace: workspace}
+	readDriver := newOMPReadDriver(absoluteRoot, snapshotDriver, s.resources, s.allowNetwork)
+	drivers := make([]tool.Driver, 0, 24)
+	drivers = append(drivers, listFilesDriver{workspace: workspace}, readDriver)
+
+	var editDriver tool.Driver
+	if s.allowWrite {
+		editDriver = newOMPHashlineDriver(absoluteRoot, snapshotDriver, s.hashlineClipboard, s.fileBroker)
+		drivers = append(drivers,
+			editDriver,
+			newOMPWriteDriver(absoluteRoot, snapshotDriver, s.resources, s.fileBroker),
+			gofmtDriver{workspace: workspace},
+		)
 	}
-	if searchDriver != nil {
-		if snapshotReadDriver != nil {
-			drivers = append(drivers, newReliableSearchDriver(absoluteRoot, workspace, snapshotReadDriver, s.resources))
-		} else {
-			drivers = append(drivers, searchDriver)
-		}
+	drivers = append(drivers, goTestStatusDriver{Driver: goTestDriver{root: absoluteRoot}})
+	if isGitRepo {
+		drivers = append(drivers, gitDiffDriver{root: absoluteRoot})
 	}
-	drivers = append(drivers, newASTGrepDriver(absoluteRoot, s.ast, snapshotReadDriver, s.resources))
+	drivers = append(drivers, newReliableSearchDriver(absoluteRoot, workspace, snapshotDriver, s.resources))
+	drivers = append(drivers, newASTGrepDriver(absoluteRoot, s.ast, snapshotDriver, s.resources))
 	drivers = append(drivers, newGlobDriver(workspace))
 	drivers = append(drivers, newLSPDriver(absoluteRoot, s.lsp, false))
 	drivers = append(drivers, newDebugDriver(absoluteRoot, s.lsp, false))
@@ -1099,7 +1871,7 @@ func (s *Service) WorkspaceDrivers(ctx context.Context, root string) ([]tool.Dri
 	if s.shellPolicy != "deny" {
 		drivers = append(drivers, newRuntimeShellDriver(absoluteRoot, s.shellPolicy, s.allowNetwork, s.shellRuntime, s.jobs))
 	}
-	if filepath.Clean(absoluteRoot) == s.workspaceRoot {
+	if workspace.Root() == s.workspaceRoot {
 		s.externalMu.Lock()
 		drivers = append(drivers, s.externalDrivers...)
 		s.externalMu.Unlock()
@@ -1119,62 +1891,79 @@ func (s *Service) CompleteRun(ctx context.Context, run *Run, summary string, fai
 	if run == nil {
 		return fmt.Errorf("run is nil")
 	}
-	coordinator, err := s.singleRunner(ctx, run.RunID)
-	if err != nil {
+	if err := s.saveRunCompletion(ctx, run, summary, failure, nil); err != nil {
 		return err
 	}
-	report := api.TypedReport{Status: api.ReportStatusSuccess, Summary: summary}
+	bindingState := agentruntime.ExecutionBindingCompleted
 	if failure != nil {
-		report.Status = api.ReportStatusFailed
-		report.Kind = "agent_error"
-		if report.Summary == "" {
-			report.Summary = failure.Error()
-		}
+		bindingState = agentruntime.ExecutionBindingFailed
 	}
-	if _, err := coordinator.Report(ctx, run.RunID, report); err != nil {
-		return err
-	}
-	s.untrackSingleRunner(run.RunID, coordinator)
-	return nil
+	return s.finishExecutionBinding(ctx, run.ExecutionID, bindingState)
 }
 
-// CancelRun records an explicit terminal cancellation through the same
-// coordinator that owns execution. Application shutdown cancels the ExecuteRun
-// context instead, which produces a resumable suspension.
 func (s *Service) CancelRun(ctx context.Context, run *Run, cause error) error {
 	if run == nil {
 		return fmt.Errorf("run is nil")
 	}
-	_ = cause
-	coordinator, err := s.singleRunner(ctx, run.RunID)
-	if err != nil {
-		return err
+	if cause == nil {
+		cause = context.Canceled
 	}
-	if err := coordinator.Cancel(ctx, run.RunID); err != nil {
-		return err
+	bindingErr := s.finishExecutionBinding(ctx, run.ExecutionID, agentruntime.ExecutionBindingCancelled)
+	runErr := s.markRunCancelled(ctx, run.RunID, run.TaskID, cause)
+	s.singleRunMu.Lock()
+	active, ok := s.singleRuns[run.RunID]
+	s.singleRunMu.Unlock()
+	if ok && active.cancel != nil {
+		active.cancel(cause)
 	}
-	s.untrackSingleRunner(run.RunID, coordinator)
-	return nil
+	return errors.Join(bindingErr, runErr)
 }
 
-// CancelTrackedRun cancels a locally coordinated single run. false means the
-// ID belongs to a different runtime path, such as TeamRunner.
 func (s *Service) CancelTrackedRun(ctx context.Context, runID string) (bool, error) {
 	s.singleRunMu.Lock()
-	coordinator := s.singleRuns[runID]
+	active, ok := s.singleRuns[runID]
 	s.singleRunMu.Unlock()
-	if coordinator == nil {
+	if !ok {
 		return false, nil
 	}
-	err := coordinator.Cancel(ctx, runID)
-	if err == nil {
-		s.untrackSingleRunner(runID, coordinator)
+	binding, loadErr := s.store.LoadExecutionBinding(ctx, active.executionID)
+	var bindingErr, runErr error
+	if loadErr == nil {
+		bindingErr = s.finishExecutionBinding(ctx, active.executionID, agentruntime.ExecutionBindingCancelled)
+		runErr = s.markRunCancelled(ctx, runID, binding.Manifest.Metadata["task_id"], context.Canceled)
 	}
-	return true, err
+	if active.cancel != nil {
+		active.cancel(context.Canceled)
+	}
+	return true, errors.Join(loadErr, bindingErr, runErr)
 }
 
-func (s *Service) Recover(ctx context.Context, runID string) (api.Projection, error) {
-	return s.runner.Recover(ctx, runID)
+func (s *Service) Recover(ctx context.Context, runID string) (agentruntime.Projection, error) {
+	work, err := s.store.Begin(ctx)
+	if err != nil {
+		return agentruntime.Projection{}, err
+	}
+	defer work.Rollback(context.Background())
+	run, err := work.Runs().LoadRun(ctx, runID)
+	if err != nil {
+		return agentruntime.Projection{}, err
+	}
+	tasks, err := work.Tasks().ListTasks(ctx, runID)
+	if err != nil {
+		return agentruntime.Projection{}, err
+	}
+	messages, err := work.UserMessages().ListMessages(ctx, runID)
+	if err != nil {
+		return agentruntime.Projection{}, err
+	}
+	if err := work.Commit(ctx); err != nil {
+		return agentruntime.Projection{}, err
+	}
+	byID := make(map[string]agentruntime.Task, len(tasks))
+	for _, task := range tasks {
+		byID[task.ID] = task
+	}
+	return agentruntime.Projection{Run: run, Tasks: byID, Messages: messages}, nil
 }
 
 func (s *Service) Checkpoint(ctx context.Context) error {
@@ -1192,6 +1981,61 @@ func toolCallRequestsNetwork(arguments json.RawMessage) bool {
 }
 
 func (s *Service) Close(ctx context.Context) error {
+	if ctx == nil {
+		return fmt.Errorf("close agent service: nil context")
+	}
+	if s == nil {
+		return nil
+	}
+	s.lifecycleMu.Lock()
+	if s.closed {
+		done := s.closeDone
+		s.lifecycleMu.Unlock()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-done:
+			s.lifecycleMu.Lock()
+			err := s.closeErr
+			s.lifecycleMu.Unlock()
+			return err
+		}
+	}
+	s.closed = true
+	s.lifecycleMu.Unlock()
+
+	err := s.shutdown(ctx)
+	s.lifecycleMu.Lock()
+	s.closeErr = err
+	close(s.closeDone)
+	s.lifecycleMu.Unlock()
+	return err
+}
+
+func (s *Service) shutdown(ctx context.Context) error {
+	s.cancel()
+	s.singleRunMu.Lock()
+	activeRuns := make([]activeRun, 0, len(s.singleRuns))
+	for _, active := range s.singleRuns {
+		activeRuns = append(activeRuns, active)
+	}
+	s.singleRunMu.Unlock()
+	for _, active := range activeRuns {
+		if active.cancel != nil {
+			active.cancel(durable.ErrClosed)
+		}
+	}
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-done:
+	}
+	durableErr := s.durable.Close(ctx)
 	var jobsErr error
 	if s.jobs != nil {
 		jobsErr = s.jobs.shutdown(ctx)
@@ -1211,25 +2055,23 @@ func (s *Service) Close(ctx context.Context) error {
 	for _, closeExternal := range externalClosers {
 		externalErr = errors.Join(externalErr, closeExternal(ctx))
 	}
-	s.cancel()
-	done := make(chan struct{})
+	shellDone := make(chan struct{})
 	go func() {
-		s.wg.Wait()
 		if s.shellRuntime != nil {
 			s.shellRuntime.wg.Wait()
 		}
-		close(done)
+		close(shellDone)
 	}()
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
-	case <-done:
+		return errors.Join(ctx.Err(), durableErr, jobsErr, lspErr, externalErr)
+	case <-shellDone:
 	}
 	var storeErr error
-	if closer, ok := s.store.(api.ProviderCloser); ok {
+	if closer, ok := s.store.(agentruntime.ProviderCloser); ok {
 		storeErr = closer.Close(ctx)
 	}
-	return errors.Join(jobsErr, lspErr, externalErr, storeErr)
+	return errors.Join(durableErr, jobsErr, lspErr, externalErr, storeErr)
 }
 
 // ActiveShellExecutions returns a race-safe point-in-time status view.
@@ -1258,19 +2100,16 @@ func (s *Service) UpdateShellMaxWallClock(wall time.Duration) {
 	s.shellRuntime.updateMaxWallClock(wall)
 }
 
-func scopeForCall(definition tool.Definition, call tool.Call) invocationScope {
+func scopeForCall(policy agentruntime.ToolPolicy, call tool.Call) invocationScope {
 	target := normalizedTarget(call.Arguments)
 	if target == "" {
 		target = "workspace"
 	}
-	risk := definition.RiskLevel
-	if risk == "" {
-		risk = definition.Security.RiskLevel
-	}
+	risk := policy.RiskLevel
 	if risk == "" {
 		risk = "medium"
 	}
-	if definition.Name == ToolShell {
+	if call.Name == ToolShell {
 		risk = ClassifyShellRisk(shellCallCommand(call.Arguments), toolCallRequestsNetwork(call.Arguments))
 	}
 	digest := sha256.Sum256([]byte(call.Name + "\x00" + target + "\x00" + risk))

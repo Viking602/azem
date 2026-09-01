@@ -291,6 +291,9 @@ func (s *Service) Scan(ctx context.Context, scanID string) (Projection, error) {
 	} else if err != nil {
 		return Projection{}, err
 	}
+	if scan.Status.Terminal() {
+		progress.WorkersRunning = 0
+	}
 	workers, err := s.store.Workers(ctx, scanID)
 	if err != nil {
 		return Projection{}, err

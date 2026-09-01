@@ -16,6 +16,12 @@ import (
 const CurrentVersion = 1
 
 var mcpServerNamePattern = regexp.MustCompile(`^[a-z0-9_-]+$`)
+var uiLanguagePattern = regexp.MustCompile(`^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})*$`)
+
+// ValidUILanguage validates a translation-pack identifier, not a fixed language list.
+func ValidUILanguage(value string) bool {
+	return len(value) <= 64 && uiLanguagePattern.MatchString(value)
+}
 
 const (
 	maxConfiguredSubagentRoles         = 64
@@ -746,8 +752,8 @@ func (c *Config) Validate() error {
 	if c.Defaults.AgentMode != "single" && c.Defaults.AgentMode != "team" {
 		return fmt.Errorf("defaults.agent_mode must be single or team")
 	}
-	if c.Defaults.Language != "en" && c.Defaults.Language != "zh-CN" {
-		return fmt.Errorf("defaults.language must be en or zh-CN")
+	if !ValidUILanguage(c.Defaults.Language) {
+		return fmt.Errorf("defaults.language must be a valid translation-pack identifier")
 	}
 	if c.Defaults.ApprovalMode != "prompt" && c.Defaults.ApprovalMode != "auto_review" && c.Defaults.ApprovalMode != "yolo" {
 		return fmt.Errorf("defaults.approval_mode must be prompt, auto_review, or yolo")

@@ -4,8 +4,8 @@ package app
 // contract. Every ActionKind and EventKind constant must appear exactly once
 // in the matching All*Kinds list; an AST regression test enforces
 // completeness, the desktop bridge asserts its allowlist against
-// AllActionKinds, and cmd/gen-contracts renders both lists into
-// frontend/src/contracts.ts so Go and TypeScript can never drift apart.
+// AllActionKinds, and cmd/gen-contracts renders both lists into the native
+// Rust IPC contract so Go and GPUI can never drift apart.
 
 // AllActionKinds returns every action kind the runtime accepts.
 func AllActionKinds() []ActionKind {
@@ -21,6 +21,7 @@ func AllActionKinds() []ActionKind {
 		ActionPinSession,
 		ActionArchiveSession,
 		ActionArchiveInactiveSessions,
+		ActionRemoveProject,
 		ActionMarkSessionUnread,
 		ActionCompact,
 		ActionResolveApproval,

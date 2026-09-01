@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"resty.dev/v3"
 
@@ -18,6 +17,7 @@ import (
 
 	"github.com/Viking602/azem/internal/auth"
 	"github.com/Viking602/azem/internal/auth/grok"
+	providerretry "github.com/Viking602/azem/internal/provider"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 )
 
@@ -55,13 +55,15 @@ func TestDriverReportsRateLimitRetriesThroughGenericObserver(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	driver.retryDelay = func(int) time.Duration { return 0 }
 	var progress []hyprovider.RetryProgress
-	driver.SetRetryObserver(func(retry hyprovider.RetryProgress) error {
-		progress = append(progress, retry)
-		return nil
+	retrying := providerretry.WithRetry(driver, providerretry.RetryConfig{
+		MaxRetries: hyprovider.DefaultMaxStreamRetries,
+		Observer: func(retry hyprovider.RetryProgress) error {
+			progress = append(progress, retry)
+			return nil
+		},
 	})
-	stream, err := driver.Stream(context.Background(), hyprovider.Request{
+	stream, err := retrying.Stream(context.Background(), hyprovider.Request{
 		Model: "grok-test", Messages: []message.Message{message.NewText(message.RoleUser, "hello")},
 	})
 	if err != nil {

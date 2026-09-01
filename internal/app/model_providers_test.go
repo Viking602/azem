@@ -19,6 +19,24 @@ import (
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 )
 
+func TestSubscriptionModelProjectionPreservesFastCapability(t *testing.T) {
+	models := []catalogsvc.Model{
+		{ID: "priority-model", ServiceTiers: []catalogsvc.ServiceTier{{ID: "priority"}}, SupportsTools: true},
+		{ID: "speed-tier-model", AdditionalSpeedTiers: []string{"fast"}},
+		{ID: "standard-model", ServiceTiers: []catalogsvc.ServiceTier{{ID: "default"}}},
+		{ID: "gpt-without-fast"},
+	}
+	projected := subscriptionModelsFromCatalog(models)
+	for index, model := range projected {
+		if got, want := slices.Contains(model.Capabilities, "fast"), models[index].SupportsServiceTier("priority"); got != want {
+			t.Errorf("model %s: fast capability = %v, want %v", model.ID, got, want)
+		}
+	}
+	if !slices.Contains(projected[0].Capabilities, "tools") {
+		t.Fatal("Fast projection dropped existing capabilities")
+	}
+}
+
 func TestModelProviderCatalogMergesConfigAndCredentialState(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, ":memory:")

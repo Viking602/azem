@@ -36,6 +36,130 @@ func (*lifecycleDispatcher) ImportAttachmentBytes(_, _, _ string, _ []byte) (des
 	return desktop.Attachment{}, nil
 }
 
+type navigationDispatcher struct {
+	lifecycleDispatcher
+	started chan struct{}
+	release chan struct{}
+}
+
+func (dispatcher *navigationDispatcher) Dispatch(method Method, payload json.RawMessage) (any, error) {
+	if method == MethodPullRequestDashboard {
+		dispatcher.started <- struct{}{}
+		<-dispatcher.release
+		return map[string]bool{"loaded": true}, nil
+	}
+	return dispatcher.lifecycleDispatcher.Dispatch(method, payload)
+}
+
+func TestSessionNavigationDoesNotWaitForPullRequestDashboard(t *testing.T) {
+	directory, err := os.MkdirTemp("/tmp", "azem-ipc-navigation-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	workspaceID := "navigation-test"
+	address := DefaultAddress(directory, workspaceID)
+	listener, err := Listen(address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := GenerateToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenPath := filepath.Join(directory, "token")
+	if err := WriteTokenFile(tokenPath, token); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher := &navigationDispatcher{started: make(chan struct{}, 2), release: make(chan struct{})}
+	release := sync.OnceFunc(func() { close(dispatcher.release) })
+	defer release()
+	server, err := NewServer(ServerOptions{
+		Listener: listener, Token: token, WorkspaceID: workspaceID,
+		Hub: NewEventHub(1<<20, 1<<20), Dispatcher: dispatcher,
+		TransferDir: filepath.Join(directory, "transfers"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer server.Close()
+	go func() { _ = server.Serve(ctx) }()
+	client, _, err := Connect(ctx, Endpoint{
+		Protocol: ProtocolVersion, WorkspaceID: workspaceID, Address: address, TokenFile: tokenPath,
+	}, "navigation-client", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.connection.Close()
+	// Use the multiplexed wire contract used by GPUI, not the serial Go CLI helper.
+	request := NewEnvelope(FrameRequest)
+	request.ID, request.Method, request.Payload = "dashboard", MethodPullRequestDashboard, mustJSON(map[string]string{})
+	if err := client.codec.WriteEnvelope(request); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-dispatcher.started:
+	case <-time.After(time.Second):
+		t.Fatal("dashboard did not start")
+	}
+	request.ID = "dashboard-next"
+	if err := client.codec.WriteEnvelope(request); err != nil {
+		t.Fatal(err)
+	}
+	request.ID = "dashboard-busy"
+	if err := client.codec.WriteEnvelope(request); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.connection.SetDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	busy, err := client.codec.ReadFrame()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if busy.Envelope == nil || busy.Envelope.ID != "dashboard-busy" || busy.Envelope.Error == nil || busy.Envelope.Error.Code != "request_busy" {
+		t.Fatalf("dashboard backpressure response = %#v", busy.Envelope)
+	}
+	started := time.Now()
+	request.ID, request.Method = "resume", MethodResumeSession
+	request.Payload = mustJSON(map[string]string{"sessionId": "existing-session"})
+	if err := client.connection.SetDeadline(time.Now().Add(250 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.codec.WriteEnvelope(request); err != nil {
+		t.Fatal(err)
+	}
+	frame, err := client.codec.ReadFrame()
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatalf("session navigation blocked by background dashboard for %s: %v", elapsed, err)
+	}
+	if frame.Envelope == nil || frame.Envelope.Kind != FrameResponse || frame.Envelope.ID != "resume" || frame.Envelope.Error != nil {
+		t.Fatalf("navigation response = %#v", frame.Envelope)
+	}
+	t.Logf("session response while dashboard remains blocked: %s", elapsed)
+	select {
+	case <-dispatcher.started:
+		t.Fatal("dashboard queries must stay serial to prevent stale results overtaking new ones")
+	default:
+	}
+	release()
+	if err := client.connection.SetDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"dashboard", "dashboard-next"} {
+		frame, err := client.codec.ReadFrame()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if frame.Envelope == nil || frame.Envelope.ID != id || frame.Envelope.Error != nil {
+			t.Fatalf("ordered dashboard response for %s = %#v", id, frame.Envelope)
+		}
+	}
+}
+
 func TestClientDetachLeavesDaemonAvailableForReconnect(t *testing.T) {
 	directory, err := os.MkdirTemp("/tmp", "azem-ipc-server-")
 	if err != nil {

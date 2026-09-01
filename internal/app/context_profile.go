@@ -46,7 +46,7 @@ func contextProfileFromRequest(request hyprovider.Request) ContextProfile {
 	}
 	for _, definition := range request.Tools {
 		category := ContextCategoryBuiltinTools
-		if strings.HasPrefix(definition.Origin, "mcp:") || strings.HasPrefix(definition.Name, "mcp__") {
+		if strings.HasPrefix(definition.Name, "mcp__") {
 			category = ContextCategoryMCP
 		}
 		profile.Contributions = appendTokenContribution(profile.Contributions, category, definition.Name, estimateToolTokens(definition))
@@ -219,8 +219,6 @@ func skillRuntimeToolDefinitions(active, available []hyskill.Skill) []tool.Defin
 				Required:             []string{"name"},
 				AdditionalProperties: &additional,
 			},
-			EffectType: tool.EffectReadOnly,
-			Idempotent: true,
 		})
 	}
 	if hasResources {
@@ -236,8 +234,6 @@ func skillRuntimeToolDefinitions(active, available []hyskill.Skill) []tool.Defin
 				Required:             []string{"skill", "path"},
 				AdditionalProperties: &additional,
 			},
-			EffectType: tool.EffectReadOnly,
-			Idempotent: true,
 		})
 	}
 	return definitions
@@ -454,24 +450,12 @@ func estimateToolTokens(definition message.ToolDefinition) int {
 	for _, value := range []string{
 		definition.Name,
 		definition.Description,
-		definition.Origin,
-		definition.RiskLevel,
-		string(definition.EffectType),
-		definition.Security.RiskLevel,
+		string(definition.Concurrency),
+		definition.ConcurrencyGroup,
 	} {
 		estimate.addString(value)
 	}
-	estimate.addStrings(definition.Tags)
-	estimate.addStrings(definition.RequiredPermissions)
-	estimate.addStrings(definition.Security.RequiredPermissions)
-	estimate.addStrings(definition.PolicyTags)
-	for key, value := range definition.Metadata {
-		if estimate.bytes >= maxDefinitionEstimateBytes {
-			break
-		}
-		estimate.addString(key)
-		estimate.addString(value)
-	}
+	estimate.addBytes(24)
 	estimate.addSchema(definition.InputSchema, 0)
 	return estimateByteTokens(estimate.bytes)
 }

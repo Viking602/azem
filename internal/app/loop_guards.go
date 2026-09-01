@@ -11,6 +11,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/session"
 	hyagent "github.com/Viking602/venat/agent"
@@ -23,20 +24,21 @@ const loopGuardArtifactKind = session.InternalArtifactKindPrefix + "loop-guard-v
 
 type modelLoopGuard struct {
 	cfg             config.LoopGuardConfig
-	control         *hyagent.ControlQueue
+	control         *turnControlQueue
 	store           *session.Service
 	sessionID       string
 	runID           string
 	thinking        string
 	text            string
 	thinkingTrips   int
+	queued          bool
 	lastToolHash    string
 	lastToolName    string
 	toolRepeatCount int
 	exemptTools     map[string]bool
 }
 
-func newModelLoopGuard(cfg config.LoopGuardConfig, control *hyagent.ControlQueue, store *session.Service, sessionID, runID string) *modelLoopGuard {
+func newModelLoopGuard(cfg config.LoopGuardConfig, control *turnControlQueue, store *session.Service, sessionID, runID string) *modelLoopGuard {
 	exempt := make(map[string]bool, len(cfg.ToolCallExemptTools))
 	for _, name := range cfg.ToolCallExemptTools {
 		exempt[strings.ToLower(strings.TrimSpace(name))] = true
@@ -49,13 +51,16 @@ func (guard *modelLoopGuard) TransformContext(_ context.Context, messages []mess
 }
 
 func (guard *modelLoopGuard) BeforeModelCall(context.Context, *hyprovider.Request) error {
-	guard.thinking, guard.text = "", ""
+	guard.thinking, guard.text, guard.queued = "", "", false
 	return nil
 }
 func (*modelLoopGuard) BeforeToolCall(context.Context, *tool.Call) error  { return nil }
 func (*modelLoopGuard) AfterToolCall(context.Context, *tool.Result) error { return nil }
 
 func (guard *modelLoopGuard) OnEvent(ctx context.Context, event hyprovider.Event) error {
+	if guard.queued {
+		return nil
+	}
 	switch event.Kind {
 	case hyprovider.EventThinkingDelta:
 		if !guard.cfg.ThinkingEnabled {
@@ -117,17 +122,18 @@ func (guard *modelLoopGuard) interrupt(ctx context.Context, kind, guidance strin
 		return err
 	}
 	value := message.NewText(message.RoleSystem, "[Host loop guard: "+kind+"]\n"+guidance)
-	value.Visibility = message.VisibilityPrivate
+	agentruntime.SetMessageVisibility(&value, agentruntime.MessageVisibilityPrivate)
 	if guard.store != nil {
 		payload, _ := json.Marshal(map[string]any{"version": 1, "kind": kind, "attempt": guard.thinkingTrips, "controlId": id})
 		if _, err := guard.store.PutArtifact(ctx, guard.sessionID, guard.runID, loopGuardArtifactKind, payload, ""); err != nil {
 			return err
 		}
 	}
-	if err := guard.control.Enqueue(hyagent.ControlMessage{ID: id, Kind: hyagent.ControlSteer, Message: value}); err != nil {
+	if err := guard.control.Enqueue(turnControlMessage{ID: id, Kind: turnControlSteer, Message: value}); err != nil {
 		return err
 	}
-	return &hyagent.StreamRuleInterruptError{Reason: kind, KeepPartial: false}
+	guard.queued = true
+	return nil
 }
 
 func appendLoopBuffer(current, delta string) string {
@@ -274,8 +280,8 @@ func (guard *unexpectedStopGuard) check(_ context.Context, input hyagent.OutputG
 	}
 	guard.retries++
 	value := message.NewText(message.RoleSystem, "The provider stopped unexpectedly with an empty or mechanically incomplete answer. Continue from the exact unfinished point. Do not restart completed work, and finish the requested result before ending.")
-	value.Visibility = message.VisibilityPrivate
-	return hyagent.RetryOutput(value), nil
+	agentruntime.SetMessageVisibility(&value, agentruntime.MessageVisibilityPrivate)
+	return hyagent.RetryOutputWithPolicy(hyagent.RetryPolicy{IncludeRejectedOutput: true}, value), nil
 }
 
 func isUnexpectedStopCandidate(output message.Message) bool {
