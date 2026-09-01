@@ -14,7 +14,6 @@ import (
 	"time"
 
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
-	"github.com/Viking602/venat/coding"
 	"github.com/Viking602/venat/tool"
 )
 
@@ -53,11 +52,16 @@ func TestShellFDDuplicationRedirectionIsForeground(t *testing.T) {
 	}
 }
 
-func TestShellDefinitionPreservesApprovalAndNetworkPolicy(t *testing.T) {
-	definition := newShellDriver(t.TempDir(), "allow", "prompt").Definition()
-	if definition.Metadata["approval"] != "allow" || definition.Metadata["network"] != "prompt" || definition.Metadata["platform"] != runtime.GOOS {
-		t.Fatalf("shell metadata=%#v", definition.Metadata)
+func TestShellDescriptorPreservesApprovalAndNetworkPolicy(t *testing.T) {
+	descriptor, err := DescribeTool(newShellDriver(t.TempDir(), "allow", "prompt"))
+	if err != nil {
+		t.Fatal(err)
 	}
+	policy := descriptor.PolicyForCall(tool.Call{Name: ToolShell, Arguments: json.RawMessage(`{}`)})
+	if policy.Metadata["approval"] != "allow" || policy.Metadata["network"] != "prompt" || policy.Metadata["platform"] != runtime.GOOS {
+		t.Fatalf("shell metadata=%#v", policy.Metadata)
+	}
+	definition := descriptor.WireDefinition
 	for _, required := range []string{"supervised foreground command", "background operators and known detach primitives are rejected"} {
 		if !strings.Contains(definition.Description, required) {
 			t.Fatalf("shell definition omitted %q: %s", required, definition.Description)
@@ -148,11 +152,11 @@ func TestShellOutputActivityExtendsTimeoutAndStreamsLogs(t *testing.T) {
 	sawProgressLog := false
 	started := time.Now()
 	result, err := driver.Execute(context.Background(), tool.Call{ID: "streaming", Name: ToolShell, Arguments: arguments}, func(update tool.Update) error {
-		if update.Kind == "started" {
+		if update.Kind == tool.UpdateProgress && update.Data["phase"] == "started" {
 			pid, parseErr := strconv.Atoi(update.Data["pid"])
 			startedAlive = parseErr == nil && shellProcessExists(pid)
 		}
-		if update.Kind == "progress" && strings.Contains(update.Data["output"], "tick-") {
+		if update.Kind == tool.UpdateProgress && update.Data["phase"] == "progress" && strings.Contains(update.Data["output"], "tick-") {
 			sawProgressLog = true
 		}
 		return nil
@@ -217,12 +221,20 @@ func TestShellStdinFeedsProcess(t *testing.T) {
 func TestUpdateShellMaxWallClockChangesDefinition(t *testing.T) {
 	shellRuntime := newShellRuntime(context.Background(), ShellOptions{MaxWallClockDuration: 10 * time.Minute})
 	driver := newRuntimeShellDriver(t.TempDir(), "allow", "deny", shellRuntime)
-	if driver.Definition().Metadata["max_wall_clock_seconds"] != "600" {
-		t.Fatalf("initial metadata = %#v", driver.Definition().Metadata)
+	descriptor, err := DescribeTool(driver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy := descriptor.PolicyForCall(tool.Call{Name: ToolShell, Arguments: json.RawMessage(`{}`)}); policy.Metadata["max_wall_clock_seconds"] != "600" {
+		t.Fatalf("initial metadata = %#v", policy.Metadata)
 	}
 	shellRuntime.updateMaxWallClock(20 * time.Minute)
-	if driver.Definition().Metadata["max_wall_clock_seconds"] != "1200" {
-		t.Fatalf("updated metadata = %#v", driver.Definition().Metadata)
+	descriptor, err = DescribeTool(driver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy := descriptor.PolicyForCall(tool.Call{Name: ToolShell, Arguments: json.RawMessage(`{}`)}); policy.Metadata["max_wall_clock_seconds"] != "1200" {
+		t.Fatalf("updated metadata = %#v", policy.Metadata)
 	}
 }
 
@@ -252,8 +264,13 @@ func TestShellHonorsModelRequestedWallClock(t *testing.T) {
 	if !strings.Contains(definition.Description, "1 to 10 seconds") {
 		t.Fatalf("shell definition omitted configured wall-clock ceiling: %s", definition.Description)
 	}
-	if definition.Metadata["max_wall_clock_seconds"] != "10" {
-		t.Fatalf("shell metadata = %#v", definition.Metadata)
+	descriptor, err := DescribeTool(driver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := descriptor.PolicyForCall(tool.Call{Name: ToolShell, Arguments: arguments})
+	if policy.Metadata["max_wall_clock_seconds"] != "10" {
+		t.Fatalf("shell metadata = %#v", policy.Metadata)
 	}
 }
 
@@ -446,14 +463,19 @@ func TestShellSinkFailuresAreSurfaced(t *testing.T) {
 	driver := newShellDriver(t.TempDir(), "allow", "deny")
 	arguments, _ := json.Marshal(shellInput{Command: "sleep 10"})
 	t.Run("started", func(t *testing.T) {
-		result, err := driver.Execute(context.Background(), tool.Call{ID: "sink-start", Name: ToolShell, Arguments: arguments}, func(update tool.Update) error { return fmt.Errorf("started broke") })
+		result, err := driver.Execute(context.Background(), tool.Call{ID: "sink-start", Name: ToolShell, Arguments: arguments}, func(update tool.Update) error {
+			if update.Kind == tool.UpdateProgress && update.Data["phase"] == "started" {
+				return fmt.Errorf("started broke")
+			}
+			return nil
+		})
 		if err != nil || !result.IsError || !strings.Contains(result.Content, "started broke") {
 			t.Fatalf("result=%+v err=%v", result, err)
 		}
 	})
 	t.Run("running", func(t *testing.T) {
 		result, err := driver.Execute(context.Background(), tool.Call{ID: "sink-running", Name: ToolShell, Arguments: arguments}, func(update tool.Update) error {
-			if update.Kind == "progress" {
+			if update.Kind == tool.UpdateProgress && update.Data["phase"] == "progress" {
 				return fmt.Errorf("progress broke")
 			}
 			return nil
@@ -465,7 +487,7 @@ func TestShellSinkFailuresAreSurfaced(t *testing.T) {
 	t.Run("finished", func(t *testing.T) {
 		quick, _ := json.Marshal(shellInput{Command: "printf done"})
 		result, err := driver.Execute(context.Background(), tool.Call{ID: "sink-finish", Name: ToolShell, Arguments: quick}, func(update tool.Update) error {
-			if update.Kind == "finished" {
+			if update.Kind == tool.UpdateProgress && update.Data["phase"] == "finished" {
 				return fmt.Errorf("finished broke")
 			}
 			return nil
@@ -612,12 +634,12 @@ func TestWorkspacePolicyFiltersWritesAndShell(t *testing.T) {
 	for _, definition := range service.ToolDefinitions() {
 		definitions[definition.Name] = true
 	}
-	for _, forbidden := range []string{coding.ToolEditHashline, coding.ToolWriteFile, coding.ToolGofmt, ToolShell} {
+	for _, forbidden := range []string{ToolEditHashline, ToolWriteFile, ToolGofmt, ToolShell} {
 		if definitions[forbidden] {
 			t.Fatalf("workspace policy exposed %q", forbidden)
 		}
 	}
-	if !definitions[coding.ToolReadFile] {
+	if !definitions[ToolReadFile] {
 		t.Fatal("workspace policy removed read_file")
 	}
 	if err := service.Close(ctx); err != nil {
@@ -694,5 +716,31 @@ func TestShellRequiresApprovalAndExecutesAfterDecision(t *testing.T) {
 	}
 	if err := service.Close(ctx); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestShellUpdatesUseV016ProgressContract(t *testing.T) {
+	driver := newShellDriver(t.TempDir(), "allow", "deny")
+	arguments, err := json.Marshal(shellInput{Command: "printf done"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var updates []tool.Update
+	results, err := tool.NewBus(driver).ExecuteBatch(context.Background(), []tool.Call{{
+		ID: "update-contract", Name: ToolShell, Arguments: arguments,
+	}}, tool.ModeSequential, tool.ExecuteOptions{Sink: func(update tool.Update) error {
+		updates = append(updates, update)
+		return nil
+	}})
+	if err != nil || len(results) != 1 || results[0].IsError {
+		t.Fatalf("shell execution = %#v, %v", results, err)
+	}
+	if len(updates) < 2 || updates[0].Data["phase"] != "started" || updates[len(updates)-1].Data["phase"] != "finished" {
+		t.Fatalf("shell update phases = %#v", updates)
+	}
+	for _, update := range updates {
+		if update.Kind != tool.UpdateProgress || len(update.Parts) != 0 {
+			t.Fatalf("invalid v0.16 update = %#v", update)
+		}
 	}
 }

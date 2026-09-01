@@ -10,8 +10,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/Viking602/venat/api"
-	"github.com/Viking602/venat/multiagent"
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/venat/provider"
 
 	"github.com/Viking602/azem/internal/config"
@@ -24,20 +23,20 @@ func TestCodingSchedulerReplaysOneRevisionDeterministically(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	byName := make(map[string]multiagent.AgentClass, len(classes))
+	byName := make(map[string]agentruntime.TeamAgentClass, len(classes))
 	for _, class := range classes {
 		byName[class.Name] = class
 	}
-	retryPolicy := api.RetryPolicy{MaxAttempts: 3}
-	claim := api.ResourceClaimSpec{Key: "workspace", Mode: api.ResourceClaimExclusive}
+	retryPolicy := agentruntime.RetryPolicy{MaxAttempts: 3}
+	claim := agentruntime.ResourceClaimSpec{Key: "workspace", Mode: agentruntime.ResourceClaimExclusive}
 	scheduler := CodingScheduler{
 		Prompt: "fix it", Classes: byName, RetryPolicy: retryPolicy,
-		ResourceClaims: []api.ResourceClaimSpec{claim},
+		ResourceClaims: []agentruntime.ResourceClaimSpec{claim},
 	}
-	state := multiagent.TeamState{RunID: "run-team"}
+	state := agentruntime.TeamState{RunID: "run-team"}
 
 	planner := nextDispatch(t, scheduler, state, PlannerClass)
-	if err := multiagent.ValidateDispatch(planner); err != nil {
+	if err := agentruntime.ValidateTeamDispatch(planner); err != nil {
 		t.Fatalf("planner dispatch invalid: %v", err)
 	}
 	if len(planner.Task.ResourceClaims) != 0 {
@@ -49,7 +48,7 @@ func TestCodingSchedulerReplaysOneRevisionDeterministically(t *testing.T) {
 	if planner.Task.RetryPolicy != retryPolicy {
 		t.Fatalf("planner retry policy = %#v, want %#v", planner.Task.RetryPolicy, retryPolicy)
 	}
-	if !byName[PlannerClass].LoopPolicy.UnlimitedIterations || byName[PlannerClass].LoopPolicy.MaxWallClock != 0 {
+	if !byName[PlannerClass].LoopPolicy.UnlimitedIterations {
 		t.Fatalf("planner loop policy = %#v, want unbounded", byName[PlannerClass].LoopPolicy)
 	}
 	replayed := nextDispatch(t, scheduler, state, PlannerClass)
@@ -61,18 +60,18 @@ func TestCodingSchedulerReplaysOneRevisionDeterministically(t *testing.T) {
 	})
 
 	implementer := nextDispatch(t, scheduler, state, ImplementerClass)
-	if !reflect.DeepEqual(implementer.Task.ResourceClaims, []api.ResourceClaimSpec{claim}) {
+	if !reflect.DeepEqual(implementer.Task.ResourceClaims, []agentruntime.ResourceClaimSpec{claim}) {
 		t.Fatalf("implementer resource claims = %#v", implementer.Task.ResourceClaims)
 	}
 	state = finishDispatch(state, implementer, map[string]any{"summary": "first", "evidence": []any{"test"}})
 	reviewer := nextDispatch(t, scheduler, state, ReviewerClass)
-	if !reflect.DeepEqual(reviewer.Task.ResourceClaims, []api.ResourceClaimSpec{claim}) {
+	if !reflect.DeepEqual(reviewer.Task.ResourceClaims, []agentruntime.ResourceClaimSpec{claim}) {
 		t.Fatalf("reviewer resource claims = %#v", reviewer.Task.ResourceClaims)
 	}
 	state = finishDispatch(state, reviewer, map[string]any{"verdict": "revise", "findings": []any{"bug"}, "evidence": []any{"failure"}})
 
 	revision := nextDispatch(t, scheduler, state, ImplementerClass)
-	if !reflect.DeepEqual(revision.Task.ResourceClaims, []api.ResourceClaimSpec{claim}) {
+	if !reflect.DeepEqual(revision.Task.ResourceClaims, []agentruntime.ResourceClaimSpec{claim}) {
 		t.Fatalf("revision resource claims = %#v", revision.Task.ResourceClaims)
 	}
 	if revision.Task.ID != "run-team-implementer-attempt-2" {
@@ -80,7 +79,7 @@ func TestCodingSchedulerReplaysOneRevisionDeterministically(t *testing.T) {
 	}
 	state = finishDispatch(state, revision, map[string]any{"summary": "fixed", "evidence": []any{"pass"}})
 	secondReview := nextDispatch(t, scheduler, state, ReviewerClass)
-	if !reflect.DeepEqual(secondReview.Task.ResourceClaims, []api.ResourceClaimSpec{claim}) {
+	if !reflect.DeepEqual(secondReview.Task.ResourceClaims, []agentruntime.ResourceClaimSpec{claim}) {
 		t.Fatalf("second review resource claims = %#v", secondReview.Task.ResourceClaims)
 	}
 	if secondReview.Task.ID != "run-team-reviewer-attempt-2" {
@@ -104,12 +103,12 @@ func TestCodingSchedulerStopsRevisionLoopAtReporter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	byName := map[string]multiagent.AgentClass{}
+	byName := map[string]agentruntime.TeamAgentClass{}
 	for _, class := range classes {
 		byName[class.Name] = class
 	}
 	scheduler := CodingScheduler{Prompt: "fix", Classes: byName}
-	state := multiagent.TeamState{RunID: "run"}
+	state := agentruntime.TeamState{RunID: "run"}
 	sequence := []struct {
 		class  string
 		report map[string]any
@@ -138,7 +137,7 @@ func TestCodingTeamRolePermissions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	byName := map[string]multiagent.AgentClass{}
+	byName := map[string]agentruntime.TeamAgentClass{}
 	for _, class := range classes {
 		byName[class.Name] = class
 	}
@@ -153,7 +152,7 @@ func TestCodingTeamRolePermissions(t *testing.T) {
 	if !containsString(byName[ImplementerClass].Tools, ToolShell) || !containsString(byName[ReviewerClass].Tools, ToolShell) {
 		t.Fatalf("execution roles did not receive %s", ToolShell)
 	}
-	if !containsString(byName[ImplementerClass].Tools, "coding.edit_hashline") || !containsString(byName[ImplementerClass].Tools, "coding.replace") || !containsString(byName[ImplementerClass].Tools, "coding.write_file") || !containsString(byName[ImplementerClass].Tools, "coding.delete_file") || !containsString(byName[ImplementerClass].Tools, "coding.go_test") || !containsString(byName[ImplementerClass].Tools, ToolGlob) {
+	if !containsString(byName[ImplementerClass].Tools, ToolEditHashline) || !containsString(byName[ImplementerClass].Tools, ToolReplace) || !containsString(byName[ImplementerClass].Tools, ToolWriteFile) || !containsString(byName[ImplementerClass].Tools, ToolDeleteFile) || !containsString(byName[ImplementerClass].Tools, ToolGoTest) || !containsString(byName[ImplementerClass].Tools, ToolGlob) {
 		t.Fatalf("implementer tools = %v", byName[ImplementerClass].Tools)
 	}
 	if !containsString(byName[ReviewerClass].Tools, "coding.go_test") {
@@ -166,7 +165,7 @@ func TestCodingTeamRolePromptContracts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	byName := make(map[string]multiagent.AgentClass, len(classes))
+	byName := make(map[string]agentruntime.TeamAgentClass, len(classes))
 	for _, class := range classes {
 		byName[class.Name] = class
 	}
@@ -256,7 +255,7 @@ func TestCodingTeamRolePromptContracts(t *testing.T) {
 			}
 		}
 
-		dispatches, err := scheduler.dispatch(multiagent.TeamState{RunID: "prompt-contract"}, name, nil, map[string]any{"request": "change safely"})
+		dispatches, err := scheduler.dispatch(agentruntime.TeamState{RunID: "prompt-contract"}, name, nil, map[string]any{"request": "change safely"})
 		if err != nil || len(dispatches) != 1 {
 			t.Fatalf("%s dispatches=%#v error=%v", name, dispatches, err)
 		}
@@ -270,7 +269,7 @@ func TestCodingTeamRolePromptContracts(t *testing.T) {
 	}
 }
 
-func TestTeamRunnerPersistsAndResumesCodingTeam(t *testing.T) {
+func TestTeamOrchestrationPersistsAndResumesCodingTeam(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "team.db"))
 	if err != nil {
@@ -292,7 +291,7 @@ func TestTeamRunnerPersistsAndResumesCodingTeam(t *testing.T) {
 		t.Fatalf("team result = %#v", execution.Result)
 	}
 	for _, instance := range execution.Result.State.Instances {
-		if instance.State != multiagent.InstanceStateFinished {
+		if instance.State != agentruntime.TeamInstanceFinished {
 			t.Fatalf("instance = %#v", instance)
 		}
 	}
@@ -304,11 +303,11 @@ func TestTeamRunnerPersistsAndResumesCodingTeam(t *testing.T) {
 	if resumed.Result.Ticks != execution.Result.Ticks || len(resumed.Result.State.Instances) != 4 {
 		t.Fatalf("resumed result = %#v", resumed.Result)
 	}
-	uow, err := service.runner.Begin(ctx)
+	uow, err := service.store.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	handoffs, err := uow.Handoffs().ListHandoffs(ctx, api.HandoffSelector{RunID: execution.RunID})
+	handoffs, err := uow.Handoffs().ListHandoffs(ctx, agentruntime.HandoffSelector{RunID: execution.RunID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -408,7 +407,7 @@ func (roleDriver) Stream(_ context.Context, request provider.Request) (provider.
 	}), nil
 }
 
-func nextDispatch(t *testing.T, scheduler CodingScheduler, state multiagent.TeamState, className string) multiagent.Dispatch {
+func nextDispatch(t *testing.T, scheduler CodingScheduler, state agentruntime.TeamState, className string) agentruntime.TeamDispatch {
 	t.Helper()
 	dispatches, err := scheduler.Next(context.Background(), state)
 	if err != nil {
@@ -420,15 +419,15 @@ func nextDispatch(t *testing.T, scheduler CodingScheduler, state multiagent.Team
 	return dispatches[0]
 }
 
-func finishDispatch(state multiagent.TeamState, dispatch multiagent.Dispatch, structured map[string]any) multiagent.TeamState {
-	report := api.TypedReport{Status: api.ReportStatusSuccess, Structured: structured}
+func finishDispatch(state agentruntime.TeamState, dispatch agentruntime.TeamDispatch, structured map[string]any) agentruntime.TeamState {
+	report := agentruntime.TypedReport{Status: agentruntime.ReportStatusSuccess, Structured: structured}
 	task := dispatch.Task
-	task.Status = api.TaskStatusCompleted
+	task.Status = agentruntime.TaskStatusCompleted
 	task.Result = &report
 	state.Tasks = append(state.Tasks, task)
-	state.Instances = append(state.Instances, multiagent.AgentInstance{
+	state.Instances = append(state.Instances, agentruntime.TeamInstance{
 		ID: dispatch.To, ClassName: dispatch.ClassName, RunID: state.RunID,
-		TaskID: dispatch.Task.ID, State: multiagent.InstanceStateFinished,
+		TaskID: dispatch.Task.ID, State: agentruntime.TeamInstanceFinished,
 	})
 	state.Tick++
 	return state

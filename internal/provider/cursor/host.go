@@ -17,7 +17,25 @@ type TodoSnapshot struct {
 	Merged bool               `json:"merged"`
 }
 
-type TodoSync func(context.Context, TodoSnapshot, string, string) HostResult
+type (
+	TodoSync           func(context.Context, TodoSnapshot, string, string) HostResult
+	execHostContextKey struct{}
+)
+
+// WithExecHost binds Azem's request-scoped native Cursor host without placing
+// process objects in provider.Request or provider wire data.
+func WithExecHost(ctx context.Context, host ExecHost) context.Context {
+	return context.WithValue(ctx, execHostContextKey{}, host)
+}
+
+// ExecHostFromContext returns the request-scoped native Cursor host, if any.
+func ExecHostFromContext(ctx context.Context) ExecHost {
+	if ctx == nil {
+		return nil
+	}
+	host, _ := ctx.Value(execHostContextKey{}).(ExecHost)
+	return host
+}
 
 // ExecHost runs a mapped Azem tool while the Cursor Run stream stays open.
 type ExecHost interface {

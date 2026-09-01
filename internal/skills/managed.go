@@ -12,6 +12,7 @@ import (
 	"sync"
 	"unicode"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/venat/tool"
 	"gopkg.in/yaml.v3"
 )
@@ -240,7 +241,13 @@ func (*managedSkillDriver) Definition() tool.Definition {
 			"description": {Type: "string", Description: "one-line trigger description; required for create/update"},
 			"body":        {Type: "string", Description: "Markdown body without frontmatter; required for create/update"},
 		}},
-		EffectType: tool.EffectWrite, RiskLevel: "medium", RequiresApproval: true,
+		Concurrency: tool.ConcurrencyParallel,
+	}
+}
+
+func (*managedSkillDriver) ToolPolicy() agentruntime.ToolPolicy {
+	return agentruntime.ToolPolicy{
+		Effect: agentruntime.ToolEffectWrite, RiskLevel: "medium", RequiresApproval: true,
 		PolicyTags: []string{"autolearn", "managed-skill"}, Concurrency: tool.ConcurrencyParallel,
 	}
 }

@@ -11,9 +11,10 @@ import (
 	"github.com/Viking602/azem/internal/provider/responses"
 	"github.com/Viking602/azem/internal/session"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
+	hyagent "github.com/Viking602/venat/agent"
 	"github.com/Viking602/venat/message"
 	hyprovider "github.com/Viking602/venat/provider"
-	"github.com/Viking602/venat/stream"
+	"github.com/Viking602/venat/tool"
 )
 
 type phase4MeteringDriver struct{ calls int }
@@ -31,6 +32,25 @@ func (d *phase4MeteringDriver) Stream(_ context.Context, _ hyprovider.Request) (
 	}}), nil
 }
 
+type preEmissionRetryMeteringDriver struct{ calls int }
+
+type preEmissionRetryError struct{}
+
+func (preEmissionRetryError) Error() string   { return "pre-emission failure" }
+func (preEmissionRetryError) Retryable() bool { return true }
+
+func (*preEmissionRetryMeteringDriver) Metadata() hyprovider.Metadata {
+	return hyprovider.Metadata{Name: "physical-retry"}
+}
+
+func (driver *preEmissionRetryMeteringDriver) Stream(_ context.Context, _ hyprovider.Request) (hyprovider.Stream, error) {
+	driver.calls++
+	if driver.calls == 1 {
+		return nil, preEmissionRetryError{}
+	}
+	return hyprovider.NewSliceStream([]hyprovider.Event{{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete}}), nil
+}
+
 type cursorContextMeteringDriver struct{}
 
 func (*cursorContextMeteringDriver) Metadata() hyprovider.Metadata { return hyprovider.Metadata{} }
@@ -45,7 +65,7 @@ func TestProviderStreamSinkWithFactsDoesNotEmitLegacyAdditiveUsage(t *testing.T)
 	host := NewService(context.Background(), config.Default())
 	host.emit(context.Background(), Event{Kind: EventContextUsage, SessionID: "s", RunID: "r", Data: map[string]string{"factSnapshot": "true"}})
 	sink := host.providerStreamSinkWithFacts("s", "r", "p", "m", "high", "responses", true)
-	if err := sink.Emit(context.Background(), stream.Frame{Kind: stream.FrameDone, Usage: hyprovider.Usage{InputTokens: 99, CachedInputTokens: 88, OutputTokens: 7}}); err != nil {
+	if err := sink.Emit(context.Background(), hyagent.Frame{Kind: hyagent.FrameDone, Usage: hyprovider.Usage{InputTokens: 99, CachedInputTokens: 88, OutputTokens: 7}}); err != nil {
 		t.Fatal(err)
 	}
 	event, err := host.NextEvent(context.Background())
@@ -73,10 +93,10 @@ func TestProviderStreamSinkPersistsUnphasedToolTurnTextAsCommentary(t *testing.T
 	host := NewService(ctx, config.Default())
 	host.sessions = sessions
 	sink := host.providerStreamSink("s", "r", "deepseek", "deepseek-v4-flash", "high", "llmux:deepseek")
-	if err = sink.Emit(ctx, stream.Frame{Kind: stream.FrameText, Text: "先检查代码。"}); err != nil {
+	if err = sink.Emit(ctx, hyagent.Frame{Kind: hyagent.FrameText, Text: "先检查代码。"}); err != nil {
 		t.Fatal(err)
 	}
-	if err = sink.Emit(ctx, stream.Frame{Kind: stream.FrameDone, StopReason: hyprovider.StopReasonToolUse}); err != nil {
+	if err = sink.Emit(ctx, hyagent.Frame{Kind: hyagent.FrameDone, StopReason: hyprovider.StopReasonToolUse}); err != nil {
 		t.Fatal(err)
 	}
 	projection, err := sessions.LoadProjection(ctx, "s")
@@ -109,15 +129,15 @@ func TestProviderStreamSinkSynthesizesOneCommentaryBeforeEachToolBatch(t *testin
 		{ID: "read", Name: "coding.read_file", Arguments: []byte(`{"path":"README.md"}`)},
 		{ID: "search", Name: "coding.search", Arguments: []byte(`{"query":"main"}`)},
 	} {
-		if err = sink.Emit(ctx, stream.Frame{Kind: stream.FrameToolCall, ToolCall: &call}); err != nil {
+		if err = sink.Emit(ctx, hyagent.Frame{Kind: hyagent.FrameToolCall, ToolCall: &call}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err = sink.Emit(ctx, stream.Frame{Kind: stream.FrameDone, StopReason: hyprovider.StopReasonToolUse}); err != nil {
+	if err = sink.Emit(ctx, hyagent.Frame{Kind: hyagent.FrameDone, StopReason: hyprovider.StopReasonToolUse}); err != nil {
 		t.Fatal(err)
 	}
 	third := message.ToolCall{ID: "test", Name: "coding.go_test", Arguments: []byte(`{"packages":["./internal/app"]}`)}
-	if err = sink.Emit(ctx, stream.Frame{Kind: stream.FrameToolCall, ToolCall: &third}); err != nil {
+	if err = sink.Emit(ctx, hyagent.Frame{Kind: hyagent.FrameToolCall, ToolCall: &third}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -159,7 +179,7 @@ func TestProviderStreamSinkSynthesizesOneCommentaryBeforeEachToolBatch(t *testin
 func TestProviderStreamSinkMarksUnphasedTextAsPendingFinalAnswer(t *testing.T) {
 	host := NewService(context.Background(), config.Default())
 	sink := host.providerStreamSink("s", "r", "deepseek", "deepseek-v4-flash", "high", "llmux:deepseek")
-	if err := sink.Emit(context.Background(), stream.Frame{Kind: stream.FrameText, Text: "最终正文"}); err != nil {
+	if err := sink.Emit(context.Background(), hyagent.Frame{Kind: hyagent.FrameText, Text: "最终正文"}); err != nil {
 		t.Fatal(err)
 	}
 	event, err := host.NextEvent(context.Background())
@@ -171,7 +191,7 @@ func TestProviderStreamSinkMarksUnphasedTextAsPendingFinalAnswer(t *testing.T) {
 	}
 
 	explicit := host.providerStreamSink("s", "explicit", "chatgpt", "gpt", "high", "responses")
-	if err := explicit.Emit(context.Background(), stream.Frame{Kind: stream.FrameText, Text: "明确正文", TextPhase: hyprovider.TextPhaseFinalAnswer}); err != nil {
+	if err := explicit.Emit(context.Background(), hyagent.Frame{Kind: hyagent.FrameText, Text: "明确正文", TextPhase: hyprovider.TextPhaseFinalAnswer}); err != nil {
 		t.Fatal(err)
 	}
 	event, err = host.NextEvent(context.Background())
@@ -436,6 +456,49 @@ func TestMeteredProviderDriverDoesNotInferMissingCacheFieldAsZero(t *testing.T) 
 	}
 }
 
+func TestProviderRetryPersistsEachPhysicalRequestFact(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "physical-retry.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	svc := session.NewService(store.DB(), store.Blobs())
+	if _, err := svc.Ensure(ctx, session.Session{ID: "s"}); err != nil {
+		t.Fatal(err)
+	}
+	physical := &preEmissionRetryMeteringDriver{}
+	metered := &meteredProviderDriver{
+		inner: physical, store: svc, sessionID: "s", runID: "r", kind: "main",
+		provider: "provider", model: "model", transport: "physical-retry",
+	}
+	policy := config.Default().Retry
+	policy.Enabled = true
+	policy.MaxRetries = 1
+	policy.BaseDelayDuration = 0
+	driver := retryProviderDriver(ctx, nil, "s", "r", "provider", policy, metered)
+	stream, err := driver.Stream(ctx, hyprovider.Request{Model: "model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	if event, recvErr := stream.Recv(); recvErr != nil || event.Kind != hyprovider.EventDone {
+		t.Fatalf("event=%#v error=%v", event, recvErr)
+	}
+	var total, failed, completed int
+	if err := store.DB().QueryRowContext(ctx, `
+		SELECT COUNT(*),
+		       SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END),
+		       SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END)
+		FROM provider_requests
+		WHERE run_id = ?`, "r").Scan(&total, &failed, &completed); err != nil {
+		t.Fatal(err)
+	}
+	if physical.calls != 2 || total != 2 || failed != 1 || completed != 1 {
+		t.Fatalf("physical calls=%d ledger total=%d failed=%d completed=%d", physical.calls, total, failed, completed)
+	}
+}
+
 func TestMeteredProviderRetryPreservesFirstTerminalFact(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "terminal-retry.db"))
@@ -471,5 +534,39 @@ func TestMeteredProviderRetryPreservesFirstTerminalFact(t *testing.T) {
 	}
 	if status != "completed" || input != 12 || cached != 5 {
 		t.Fatalf("terminal fact status=%s input=%d cached=%d", status, input, cached)
+	}
+}
+
+func TestProviderStreamSinkProjectsToolCallDeltasAndUpdates(t *testing.T) {
+	ctx := context.Background()
+	host := NewService(ctx, config.Default())
+	sink := host.providerStreamSink("session", "run", "provider", "model", "high", "test")
+	index := 2
+	if err := sink.Emit(ctx, hyagent.Frame{Kind: hyagent.FrameToolCallDelta, ToolCallDelta: &hyprovider.ToolCallDelta{
+		Index: &index, ID: "call-1", Name: "coding.read_file", ArgumentsDelta: `{"path":`,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	delta, err := host.NextEvent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if delta.Kind != EventToolUpdate || delta.ToolCallID != "call-1" || delta.State != "arguments" ||
+		delta.Data["index"] != "2" || delta.Data["argumentsDelta"] != `{"path":` {
+		t.Fatalf("tool call delta event=%+v", delta)
+	}
+	if err := sink.Emit(ctx, hyagent.Frame{Kind: hyagent.FrameToolUpdate, ToolUpdate: &tool.Update{
+		Kind: tool.UpdateProgress, ToolCallID: "call-1", OperationID: "turn:0:tool:0",
+		Sequence: 3, Message: "running", Data: map[string]string{"phase": "read"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	update, err := host.NextEvent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if update.Kind != EventToolUpdate || update.ToolCallID != "call-1" || update.State != "running" ||
+		update.Data["operationId"] != "turn:0:tool:0" || update.Data["sequence"] != "3" || update.Data["phase"] != "read" {
+		t.Fatalf("tool update event=%+v", update)
 	}
 }

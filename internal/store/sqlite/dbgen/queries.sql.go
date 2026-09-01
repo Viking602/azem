@@ -815,22 +815,6 @@ func (q *Queries) GetAdmissionReservationDataForRun(ctx context.Context, arg Get
 	return data, err
 }
 
-const getAgentDefinitionSnapshotData = `-- name: GetAgentDefinitionSnapshotData :one
-SELECT data FROM agent_definition_snapshots WHERE definition_id=? AND version=?
-`
-
-type GetAgentDefinitionSnapshotDataParams struct {
-	DefinitionID string `db:"definition_id"`
-	Version      string `db:"version"`
-}
-
-func (q *Queries) GetAgentDefinitionSnapshotData(ctx context.Context, arg GetAgentDefinitionSnapshotDataParams) ([]byte, error) {
-	row := q.db.QueryRowContext(ctx, getAgentDefinitionSnapshotData, arg.DefinitionID, arg.Version)
-	var data []byte
-	err := row.Scan(&data)
-	return data, err
-}
-
 const getCacheEpoch = `-- name: GetCacheEpoch :one
 SELECT cache_epoch FROM session_projections WHERE session_id=?
 `
@@ -1509,26 +1493,6 @@ func (q *Queries) InsertAdmissionReservation(ctx context.Context, arg InsertAdmi
 	)
 }
 
-const insertAgentDefinitionSnapshot = `-- name: InsertAgentDefinitionSnapshot :execresult
-INSERT OR IGNORE INTO agent_definition_snapshots(definition_id,version,created_at,data) VALUES(?,?,?,?)
-`
-
-type InsertAgentDefinitionSnapshotParams struct {
-	DefinitionID string `db:"definition_id"`
-	Version      string `db:"version"`
-	CreatedAt    int64  `db:"created_at"`
-	Data         []byte `db:"data"`
-}
-
-func (q *Queries) InsertAgentDefinitionSnapshot(ctx context.Context, arg InsertAgentDefinitionSnapshotParams) (sql.Result, error) {
-	return q.db.ExecContext(ctx, insertAgentDefinitionSnapshot,
-		arg.DefinitionID,
-		arg.Version,
-		arg.CreatedAt,
-		arg.Data,
-	)
-}
-
 const insertCatalogModel = `-- name: InsertCatalogModel :exec
 INSERT INTO model_catalog(provider_id,account_id,model_id,etag,fetched_at,expires_at,data) VALUES(?,?,?,?,?,?,?)
 `
@@ -2166,33 +2130,6 @@ SELECT data FROM admission_reservations WHERE agent_id=? ORDER BY created_at,id
 
 func (q *Queries) ListAdmissionReservationDataByAgent(ctx context.Context, agentID string) ([][]byte, error) {
 	rows, err := q.db.QueryContext(ctx, listAdmissionReservationDataByAgent, agentID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items [][]byte
-	for rows.Next() {
-		var data []byte
-		if err := rows.Scan(&data); err != nil {
-			return nil, err
-		}
-		items = append(items, data)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const listAgentDefinitionSnapshotData = `-- name: ListAgentDefinitionSnapshotData :many
-SELECT data FROM agent_definition_snapshots ORDER BY created_at,definition_id,version
-`
-
-func (q *Queries) ListAgentDefinitionSnapshotData(ctx context.Context) ([][]byte, error) {
-	rows, err := q.db.QueryContext(ctx, listAgentDefinitionSnapshotData)
 	if err != nil {
 		return nil, err
 	}

@@ -9,7 +9,6 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/Viking602/venat/coding"
 	"github.com/Viking602/venat/tool"
 )
 
@@ -54,7 +53,7 @@ func TestWriteUsesExtensionBrokerOnlyAfterPermissionFailure(t *testing.T) {
 	ref.set(broker)
 	driver := newOMPWriteDriver(workspace, nil, nil, ref)
 	arguments, _ := json.Marshal(map[string]any{"path": "locked/brokered.txt", "content": "brokered"})
-	result, err := driver.Execute(context.Background(), tool.Call{ID: "write", Name: coding.ToolWriteFile, Arguments: arguments}, nil)
+	result, err := driver.Execute(context.Background(), tool.Call{ID: "write", Name: ToolWriteFile, Arguments: arguments}, nil)
 	expectedDestination, resolveErr := brokerDestination(workspace, "locked/brokered.txt", true)
 	if resolveErr != nil {
 		t.Fatal(resolveErr)
@@ -64,7 +63,7 @@ func TestWriteUsesExtensionBrokerOnlyAfterPermissionFailure(t *testing.T) {
 	}
 
 	arguments, _ = json.Marshal(map[string]any{"path": "locked", "content": "not a directory replacement"})
-	result, err = driver.Execute(context.Background(), tool.Call{ID: "directory", Name: coding.ToolWriteFile, Arguments: arguments}, nil)
+	result, err = driver.Execute(context.Background(), tool.Call{ID: "directory", Name: ToolWriteFile, Arguments: arguments}, nil)
 	if err != nil || !result.IsError || len(broker.writes) != 1 {
 		t.Fatalf("non-permission failure reached broker: result=%#v error=%v calls=%#v", result, err, broker.writes)
 	}

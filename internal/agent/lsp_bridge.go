@@ -223,7 +223,11 @@ func (runtime *lspBridgeRuntime) ensureStarted() error {
 
 func (runtime *lspBridgeRuntime) readResponses(command *exec.Cmd, stdout, stderr io.Reader) {
 	errorOutput := &astCappedBuffer{limit: maxASTBridgeErrorBytes}
-	go func() { _, _ = io.Copy(errorOutput, stderr) }()
+	stderrDone := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(errorOutput, stderr)
+		close(stderrDone)
+	}()
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 64<<10), maxLSPBridgeMessageBytes)
 	for scanner.Scan() {
@@ -240,6 +244,7 @@ func (runtime *lspBridgeRuntime) readResponses(command *exec.Cmd, stdout, stderr
 		}
 	}
 	waitErr := command.Wait()
+	<-stderrDone
 	message := "LSP bridge stopped"
 	if scanner.Err() != nil {
 		message += ": " + scanner.Err().Error()
@@ -368,7 +373,7 @@ func (runtime *lspBridgeRuntime) resolveAssets() error {
 				script = candidate
 			}
 		}
-		packageRoot := filepath.Join(root, "frontend", "node_modules", "@oh-my-pi", "pi-coding-agent", "src", "lsp")
+		packageRoot := filepath.Join(root, "runtime-js", "node_modules", "@oh-my-pi", "pi-coding-agent", "src", "lsp")
 		if toolModule == "" {
 			candidate := filepath.Join(packageRoot, "tool.ts")
 			if regularFile(candidate) {
@@ -381,7 +386,7 @@ func (runtime *lspBridgeRuntime) resolveAssets() error {
 				clientModule = candidate
 			}
 		}
-		packageSource := filepath.Join(root, "frontend", "node_modules", "@oh-my-pi", "pi-coding-agent", "src")
+		packageSource := filepath.Join(root, "runtime-js", "node_modules", "@oh-my-pi", "pi-coding-agent", "src")
 		if debugModule == "" {
 			candidate := filepath.Join(packageSource, "tools", "debug.ts")
 			if regularFile(candidate) {
@@ -569,7 +574,7 @@ func (runtime *lspBridgeRuntime) resolveAssets() error {
 		}
 	}
 	if !regularFile(script) || !regularFile(toolModule) || !regularFile(clientModule) || !regularFile(debugModule) || !regularFile(dapModule) || !regularFile(evalModule) || !regularFile(evalJSModule) || !regularFile(evalPyModule) || !regularFile(browserModule) || !regularFile(browserTabsModule) || !regularFile(computerModule) || !regularFile(webSearchModule) || !regularFile(githubModule) || !regularFile(sshModule) || !regularFile(internalURLModule) || !regularFile(sshConnectionsModule) || !regularFile(hubModule) || !regularFile(launchClientModule) || !regularFile(launchBrokerModule) || !regularFile(terminalWorkerModule) || !regularFile(imageGenModule) || !regularFile(ttsModule) {
-		return errors.New("OMP runtime assets are missing; run frontend dependency installation")
+		return errors.New("OMP runtime assets are missing; run `bun install --cwd runtime-js`")
 	}
 	runtime.runtime, runtime.script, runtime.toolModule, runtime.clientModule = runtimePath, script, toolModule, clientModule
 	runtime.debugModule, runtime.dapModule = debugModule, dapModule

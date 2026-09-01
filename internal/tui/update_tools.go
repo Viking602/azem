@@ -18,7 +18,7 @@ func isFileChangeTool(name string) bool {
 
 // summarizeFileChange renders the shared toolview projection into the TUI's
 // inline diff form. All parsing semantics live in internal/toolview so the
-// desktop frontend and the TUI can never diverge.
+// desktop renderer and the TUI can never diverge.
 func summarizeFileChange(name, arguments, structured, output string) (string, string, bool) {
 	summary, ok := toolview.CompletedFileChanges(name, arguments, structured, output)
 	if !ok {

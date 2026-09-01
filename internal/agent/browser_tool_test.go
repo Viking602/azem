@@ -17,7 +17,7 @@ func TestBrowserOpenRunInteractAndClosePersistentTab(t *testing.T) {
 		_, _ = response.Write([]byte(`<!doctype html><html><body><button id="change" onclick="document.querySelector('#status').textContent='changed'">Change</button><p id="status">ready</p></body></html>`))
 	}))
 	defer server.Close()
-	ctx := tool.WithCaller(context.Background(), tool.CallerInfo{SessionID: "browser-session"})
+	ctx := WithInvocation(context.Background(), Invocation{SessionID: "browser-session"})
 	bridge := newLSPBridgeRuntime()
 	t.Cleanup(func() { _ = bridge.Close(context.Background()) })
 	driver := newBrowserDriver(t.TempDir(), bridge, "allow")
@@ -29,7 +29,7 @@ func TestBrowserOpenRunInteractAndClosePersistentTab(t *testing.T) {
 	if !strings.Contains(observed.Content, "Change") {
 		t.Fatalf("observe = %s", observed.Content)
 	}
-	interacted := executeBrowser(t, ctx, driver, map[string]any{"action": "run", "name": "fixture", "code": "await tab.click('#change'); return await tab.evaluate(() => document.querySelector('#status').textContent);", "timeout": 30})
+	interacted := executeBrowser(t, ctx, driver, map[string]any{"action": "run", "name": "fixture", "code": "await tab.click('text/Change'); return await tab.evaluate(() => document.querySelector('#status').textContent);", "timeout": 30})
 	if !strings.Contains(interacted.Content, "changed") {
 		t.Fatalf("interaction = %s", interacted.Content)
 	}

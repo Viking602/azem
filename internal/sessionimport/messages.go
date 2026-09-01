@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/azem/internal/session"
 	"github.com/Viking602/venat/message"
 )
@@ -77,7 +78,7 @@ func importedBlock(modelMessage message.Message, attachments []session.Attachmen
 		block.Content = "Tool call: " + strings.Join(names, ", ")
 	}
 	if needsImportedMessage(modelMessage) {
-		encoded, err := json.Marshal(modelMessage)
+		encoded, err := json.Marshal(agentruntime.PersistMessage(modelMessage))
 		if err != nil {
 			return session.Block{}, err
 		}

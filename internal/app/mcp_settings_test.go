@@ -10,8 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Viking602/venat/transport/mcpcontract"
-
 	"github.com/Viking602/azem/internal/config"
 	mcpruntime "github.com/Viking602/azem/internal/mcp"
 	"github.com/Viking602/azem/internal/plugins"
@@ -30,7 +28,7 @@ func TestMCPSettingsActionsPersistAndReconfigureLiveManager(t *testing.T) {
 		"demo": {Enabled: false, Transport: "stdio", Command: "demo", ConnectTimeout: "1s", CallTimeout: "1s", MaxConcurrency: 1, Approval: "always"},
 	}
 	manager := mcpruntime.NewManager(cfg.MCP.Servers, "test", nil, mcpruntime.Options{
-		Dial: func(context.Context, string, config.MCPServerConfig, map[string]string, http.Header) (mcpcontract.Client, error) {
+		Dial: func(context.Context, string, config.MCPServerConfig, map[string]string, http.Header) (mcpruntime.Client, error) {
 			return &appFakeMCPClient{}, nil
 		},
 		Sleep: func(context.Context, time.Duration) error { return nil },

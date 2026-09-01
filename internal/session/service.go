@@ -18,6 +18,8 @@ import (
 	"github.com/Viking602/venat/message"
 )
 
+var ErrSessionNotFound = errors.New("session not found")
+
 type Session struct {
 	ID         string    `json:"id"`
 	Workspace  string    `json:"workspace"`
@@ -82,7 +84,6 @@ func ModelCheckpointHash(messages []message.Message) string {
 		if current.Kind != message.KindCompactionSummary && current.Metadata["azem.context.execution_checkpoint"] == "" {
 			continue
 		}
-		current.CreatedAt = time.Time{}
 		checkpoint = append(checkpoint, current)
 	}
 	if len(checkpoint) == 0 {
@@ -594,13 +595,25 @@ func (s *Service) Ensure(ctx context.Context, value Session) (Session, error) {
 func (s *Service) LoadSession(ctx context.Context, id string) (Session, error) {
 	row, err := dbgen.New(s.db).GetSession(ctx, id)
 	if errors.Is(err, sql.ErrNoRows) {
-		return Session{}, fmt.Errorf("session %q not found", id)
+		return Session{}, fmt.Errorf("%w: %q", ErrSessionNotFound, id)
 	}
 	if err != nil {
 		return Session{}, fmt.Errorf("load session: %w", err)
 	}
 	value := sessionFromDB(row)
 	return value, nil
+}
+
+func (s *Service) IsArchived(ctx context.Context, id string) (bool, error) {
+	var archived bool
+	err := s.db.QueryRowContext(ctx, `SELECT archived FROM session_ui_state WHERE session_id=?`, id).Scan(&archived)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read session archive state: %w", err)
+	}
+	return archived, nil
 }
 
 func (s *Service) UpdatePreferences(ctx context.Context, id, providerID, modelID, reasoning, agentMode string) error {
@@ -674,8 +687,10 @@ func (s *Service) SetUIState(ctx context.Context, id, field string, enabled bool
 	if enabled {
 		value = 1
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO session_ui_state(session_id,`+column+`) VALUES(?,?)
-		ON CONFLICT(session_id) DO UPDATE SET `+column+`=excluded.`+column, id, value)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO session_ui_state(session_id,`+column+`) SELECT ?,?
+		WHERE ?=1 OR EXISTS(SELECT 1 FROM session_ui_state WHERE session_id=?)
+		ON CONFLICT(session_id) DO UPDATE SET `+column+`=excluded.`+column+`
+		WHERE session_ui_state.`+column+`<>excluded.`+column, id, value, value, id)
 	if err != nil {
 		return fmt.Errorf("update session %s: %w", field, err)
 	}
@@ -1305,11 +1320,7 @@ func (s *Service) SaveRunCheckpoint(ctx context.Context, sessionID string, check
 }
 
 func normalizeMessageTimes(messages []message.Message) []message.Message {
-	result := append([]message.Message(nil), messages...)
-	for index := range result {
-		result[index].CreatedAt = time.Time{}
-	}
-	return result
+	return append([]message.Message(nil), messages...)
 }
 
 func (s *Service) UpsertAgentBlock(ctx context.Context, sessionID, agentID string, block Block) (err error) {

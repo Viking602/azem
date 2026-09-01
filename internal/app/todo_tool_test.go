@@ -243,7 +243,7 @@ func TestTodoConcurrentMutationsCannotSkipCurrentItem(t *testing.T) {
 		{ID: "done-current", Name: "todo", Arguments: arguments("done", "current")},
 		{ID: "done-next", Name: "todo", Arguments: arguments("done", "next")},
 		{ID: "start-later", Name: "todo", Arguments: arguments("start", "later")},
-	}, tool.ModeParallel, nil)
+	}, tool.ModeParallel, tool.ExecuteOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

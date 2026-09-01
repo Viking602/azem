@@ -8,10 +8,10 @@ import (
 	"time"
 
 	agentservice "github.com/Viking602/azem/internal/agent"
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/azem/internal/securityscan"
-	"github.com/Viking602/venat/api"
-	"github.com/Viking602/venat/stream"
-	hyworker "github.com/Viking602/venat/worker"
+	hyagent "github.com/Viking602/venat/agent"
+	"github.com/Viking602/venat/tool"
 )
 
 type securityExecutor struct {
@@ -39,7 +39,7 @@ func (e *securityExecutor) Execute(ctx context.Context, request securityscan.Exe
 			allowed[name] = true
 		}
 	}
-	budget := api.TaskBudget{
+	budget := agentruntime.TaskBudget{
 		MaxTokens: request.Budget.MaxTokens, MaxToolCalls: request.Budget.MaxToolCalls,
 		MaxWallClock: time.Duration(request.Budget.MaxWallClockNS),
 	}
@@ -88,21 +88,34 @@ func (e *securityExecutor) Execute(ctx context.Context, request securityscan.Exe
 		return securityscan.ExecutionResult{}, err
 	}
 	result := securityscan.ExecutionResult{RunID: run.RunID}
-	sink := stream.SinkFunc(func(context.Context, stream.Frame) error { return nil })
-	outcome, runErr := executeMainRunUntilAvailable(ctx, func() (hyworker.ExecutionOutcome, error) {
+	sink := hyagent.SinkFunc(func(context.Context, hyagent.Frame) error { return nil })
+	outcome, runErr := executeMainRunUntilAvailable(ctx, func() (agentservice.ExecutionOutcome, error) {
 		return e.coding.ExecuteRun(agentservice.DelegatedApprovalContext(ctx), run, engine, sink)
 	})
 	result.FinalText = outcome.Result.Text
 	result.InputTokens = int64(outcome.Result.Usage.InputTokens)
 	result.CachedInputTokens = int64(outcome.Result.Usage.CachedInputTokens)
 	result.OutputTokens = int64(outcome.Result.Usage.OutputTokens)
-	if outcome.State == hyworker.ExecutionSuspended && runErr == nil {
+	if outcome.State == agentservice.ExecutionSuspended && runErr == nil {
 		runErr = fmt.Errorf("security scan run suspended before completion")
 	}
 	if outcome.Result.Failure != nil && runErr == nil {
 		runErr = fmt.Errorf("security scan model failure: %w", outcome.Result.Failure)
 	}
-	return result, runErr
+	return result, securityExecutionError(runErr)
+}
+
+func securityExecutionError(err error) error {
+	var batch *tool.BatchExecutionError
+	if err == nil || !errors.As(err, &batch) {
+		return err
+	}
+	details := make([]error, 0, len(batch.Failures)+1)
+	details = append(details, err)
+	for _, failure := range batch.Failures {
+		details = append(details, failure)
+	}
+	return errors.Join(details...)
 }
 
 func (e *securityExecutor) FinalizeInterruptedRun(ctx context.Context, runID string, accepted bool) error {
@@ -125,6 +138,9 @@ func (e *securityExecutor) FinalizeInterruptedRun(ctx context.Context, runID str
 func (e *securityExecutor) Cancel(ctx context.Context, runID string) error {
 	if e == nil || e.coding == nil || runID == "" {
 		return nil
+	}
+	if e.runtime != nil {
+		e.runtime.CancelParentSubagentsAcrossSessions(runID)
 	}
 	tracked, err := e.coding.CancelTrackedRun(ctx, runID)
 	if err != nil {

@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/Viking602/venat/api"
+	"github.com/Viking602/azem/internal/agentruntime"
 )
 
 type invocationScope struct {
@@ -25,15 +25,15 @@ func NewApprovalPolicy() *ApprovalPolicy {
 	return &ApprovalPolicy{sessionGrants: make(map[string]struct{})}
 }
 
-func (p *ApprovalPolicy) Authorize(ctx context.Context, request api.PolicyRequest) (api.PolicyDecision, error) {
+func (p *ApprovalPolicy) Authorize(ctx context.Context, request agentruntime.PolicyRequest) (agentruntime.PolicyDecision, error) {
 	if !sideEffect(request) {
-		return api.PolicyDecision{Effect: api.PolicyEffectAllow}, nil
+		return agentruntime.PolicyDecision{Effect: agentruntime.PolicyEffectAllow}, nil
 	}
 	scope, _ := ctx.Value(invocationScopeKey{}).(invocationScope)
 	if scope.Authorized || p.sessionGranted(scope.Fingerprint) {
-		return api.PolicyDecision{Effect: api.PolicyEffectAllow}, nil
+		return agentruntime.PolicyDecision{Effect: agentruntime.PolicyEffectAllow}, nil
 	}
-	return api.PolicyDecision{Effect: api.PolicyEffectDeny, Reason: "side effect requires an Azem approval"}, nil
+	return agentruntime.PolicyDecision{Effect: agentruntime.PolicyEffectDeny, Reason: "side effect requires an Azem approval"}, nil
 }
 
 func (p *ApprovalPolicy) GrantSession(fingerprint string) {
@@ -64,11 +64,11 @@ func DelegatedApprovalContext(ctx context.Context) context.Context {
 	return withAuthorizedInvocation(ctx, invocationScope{})
 }
 
-func sideEffect(request api.PolicyRequest) bool {
+func sideEffect(request agentruntime.PolicyRequest) bool {
 	if request.Tool != nil {
-		return request.Tool.RequiresActionTask || request.Tool.EffectType == api.ToolEffectWrite || request.Tool.EffectType == api.ToolEffectExternalSideEffect
+		return request.Tool.RequiresActionTask || request.Tool.EffectType == agentruntime.ToolEffectWrite || request.Tool.EffectType == agentruntime.ToolEffectExternalSideEffect
 	}
-	return request.Operation == api.PolicyOperationAction
+	return request.Operation == agentruntime.PolicyOperationAction
 }
 
-var _ api.PolicyEngine = (*ApprovalPolicy)(nil)
+var _ agentruntime.PolicyEngine = (*ApprovalPolicy)(nil)

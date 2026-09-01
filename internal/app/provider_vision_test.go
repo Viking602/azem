@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Viking602/venat/api"
+	hyagent "github.com/Viking602/venat/agent"
 
 	"github.com/Viking602/azem/internal/auth"
 	"github.com/Viking602/azem/internal/config"
@@ -57,14 +57,14 @@ func TestTurnContextUsesPrivateVisionEvidenceInsteadOfDirectImages(t *testing.T)
 		visionContext: request.visionContext,
 		images:        effectiveTurnImages(request),
 	}
-	messages, err := manager.Build(context.Background(), api.Task{Goal: "fix the screenshot issue"})
+	messages, err := manager.Build(context.Background(), hyagent.Request{Prompt: "fix the screenshot issue"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(messages) != 3 {
 		t.Fatalf("messages=%#v", messages)
 	}
-	if messages[1].Visibility != "private" || !strings.Contains(messages[1].Text, visionEvidenceLabel) || !strings.Contains(messages[1].Text, "Button text: Deploy") {
+	if !isPrivateMessage(messages[1]) || !strings.Contains(messages[1].Text, visionEvidenceLabel) || !strings.Contains(messages[1].Text, "Button text: Deploy") {
 		t.Fatalf("vision evidence message=%#v", messages[1])
 	}
 	if attachments := AttachmentsFromMessage(messages[2]); len(attachments) != 0 {

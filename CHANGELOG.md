@@ -1,18 +1,94 @@
 # Changelog
 
 ## Unreleased
+- Kept GPUI as a single-window application. Selecting a project or conversation
+  in another workspace now reconnects the existing renderer to that
+  workspace's daemon instead of spawning another Azem UI; the previous daemon
+  continues active background work.
+
+- Added an optional native GPUI desktop client built with `make gpui`. It uses
+  virtualized transcript rendering, system light/dark appearance, AccessKit
+  semantics, IME input, ANSI-aware terminal output, binary attachment
+  streaming, and native surfaces for conversations, run controls, workspace
+  review, pull requests, security, extensions/settings, usage, and terminals.
+
+- Reworked the GPUI presentation to mirror the complete React desktop instead
+  of showing a generic shell: integrated macOS traffic lights/titlebar,
+  conversation/workspace sidebar, single-line PR/project/session rows, empty
+  and active composers, models.dev provider logos, foldable
+  thinking/tool/diff trails, structured file-edit and PR views, and the
+  floating Environment panel with Plan, history, recap, sources, files,
+  services, editor, and terminal access. Settings is now a rounded native modal
+  with the complete provider/model catalog, quota state, enable controls,
+  capability metadata, independently scrollable provider/model inventories,
+  and compact model cards. Mouse-down explicitly focuses native text inputs;
+  stale IME ranges are clamped safely after a field is cleared or refocused.
+
+- Reworked native tool activity to the compact reference-style tree: category
+  counts in the fold header, active-by-default flat rows on a quiet vertical
+  rail, a live processing clock, automatic folding when prose resumes, visible
+  thinking before the first tool, and inline subagent rows instead of bordered
+  pills.
+
+- Added 「从 Azem 中移除」 to the native project context menu. It hides only the
+  schema-28 catalog entry, retains workspace files and every session owner, and
+  stays hidden across restart. Explicitly opening the path restores it.
+  Removing the active project reuses the current window to open another visible
+  project.
+
+- Fixed a subagent shutdown race where an older unlocked `queued`/`running`
+  save could overwrite a newer cancellation, while cancellation persistence
+  reused an already-cancelled runtime context. Per-child state writes are now
+  serialized, cancellation uses an independent bounded context, and terminal
+  state remains the final write.
+  Schema 28 repairs non-terminal child rows stranded by older binaries by
+  marking them interrupted before recovery.
+
+- Reduced cold GPUI readiness from the reproduced 5.419 seconds to
+  1.196-1.606 seconds by returning durable reconnect state before optional
+  provider/Skill/plugin/MCP/PR catalogs and emitting cache-backed provider
+  inventory before remote subscription refresh.
+
+- Added one workspace-scoped `azem-daemon` and a versioned authenticated local
+  IPC protocol shared with the existing desktop Bridge. Closing or restarting
+  GPUI no longer terminates active runs: the daemon retains the Go runtime,
+  SQLite state, subagents, tools, and PTYs, then restores a durable snapshot and
+  bounded event/terminal replay on reconnect. Snapshot ordering now prevents
+  replayed transcript duplication, keeps pending approvals/questions and child
+  activity available after replay eviction, preserves the selected session
+  across reconnect, and ignores replayed `open_project` commands so they cannot
+  recursively spawn renderers. Unix sockets and state files are owner-only;
+  Windows named pipes use owner/System ACLs; attachments are chunked and
+  SHA-256 verified. No database schema, runtime configuration default,
+  executable prompt, static provider prefix, or provider message order changed.
+
 - Completed the frozen OMP v18.0.3 behavioral-parity program at commit
   `160ed439ac0df594347e7d7018b813a7ffdb5e81`. The executable parity manifest
   now records all 71 in-scope coding-agent and operator capabilities as
   `complete` or `stronger`; public-library API compatibility and OMP visual
   identity remain outside that frozen scope.
 
-- Upgraded the shared runtimes to Venat v0.15.4 and llmux v0.3.1. Provider
-  streams now preserve commentary/final phases, terminal state, stop reason,
-  reported usage/cache flags, sources/files/warnings, modalities, and
-  compatibility descriptors. Venat adds validated tool arguments, duplicate
-  registration rejection, per-tool concurrency, durable turn control,
-  replay-safe Skill authorization, and unified subagent scheduling.
+- Upgraded Venat from v0.15.4 to v0.16.1 with a clean execution cutover:
+  each main, Team-role, Subagent, and automation dispatch now binds one
+  immutable execution manifest to the service-lifetime durable runtime.
+  Schema 27 persists execution leases/checkpoints/results, versioned
+  model/tool attempts, idempotency receipts, and application bindings. Startup
+  now acquires the process recovery fence before SQLite relocation/open and
+  constructs durable runtime state only after legacy crash preparation.
+  Pending/suspended/terminal/unknown v1 states recover exactly; non-terminal
+  v0.15 rows without a binding become `reconcile_required` and are never
+  replayed speculatively. Parallel approval resume targets the exact operation.
+  Schema 27 execution state has no v0.15 representation. After v1 state is
+  written, rollback to a pre-v0.16 binary requires restoring the complete
+  pre-upgrade backup and discards post-backup work; lowering `user_version` or
+  translating checkpoints in place is unsupported.
+  This migration changes no executable prompt, static provider prefix, provider
+  message order, or per-turn injected context, so it does not start a provider
+  cache epoch.
+
+- Upgraded llmux to v0.3.1. Provider streams preserve commentary/final phases,
+  terminal state, stop reason, reported usage/cache flags,
+  sources/files/warnings, modalities, and compatibility descriptors.
 
 - Added OMP-compatible read/write/Hashline/glob/grep/AST/LSP/DAP/eval/browser/
   computer/web/GitHub/SSH/process/media/memory tools. Eval supports persistent
@@ -49,8 +125,10 @@
 
 - SQLite schema 24 adds session graphs/branches/labels; schema 25 adds
   auth-broker tokens, disable/block state, and usage observations; schema 26
-  adds idempotent signed-webhook delivery receipts. Runtime migrations and the
-  SQLC schema remain synchronized, preserve user data, and reject unknown future
+  adds idempotent signed-webhook delivery receipts; schema 27 adds Venat
+  v0.16.1 execution durability and immutable Azem bindings; schema 28 adds
+  reversible project-catalog visibility. Runtime migrations and the SQLC
+  schema remain synchronized, preserve user data, and reject unknown future
   versions.
 
 - These changes intentionally expand the static tool/instruction prefix and

@@ -75,6 +75,7 @@ type BaselineOptions struct {
 	InstructionFingerprint string
 	TaskPrompt             string
 	Tools                  []message.ToolDefinition
+	ToolOrigins            map[string]string
 	DependencyFiles        []string
 	Validators             []ValidatorCommand
 }
@@ -101,7 +102,7 @@ func CaptureBaseline(ctx context.Context, options BaselineOptions) (BaselineIden
 	if err != nil {
 		return BaselineIdentityV1{}, fmt.Errorf("eval: hash repository state: %w", err)
 	}
-	tools, toolCatalogHash, err := toolIdentities(options.Tools)
+	tools, toolCatalogHash, err := toolIdentities(options.Tools, options.ToolOrigins)
 	if err != nil {
 		return BaselineIdentityV1{}, err
 	}
@@ -136,12 +137,9 @@ func CaptureBaseline(ctx context.Context, options BaselineOptions) (BaselineIden
 	return identity, nil
 }
 
-func toolIdentities(definitions []message.ToolDefinition) ([]ToolIdentityV1, string, error) {
+func toolIdentities(definitions []message.ToolDefinition, origins map[string]string) ([]ToolIdentityV1, string, error) {
 	sorted := append([]message.ToolDefinition(nil), definitions...)
 	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].Name == sorted[j].Name {
-			return sorted[i].Origin < sorted[j].Origin
-		}
 		return sorted[i].Name < sorted[j].Name
 	})
 	identities := make([]ToolIdentityV1, 0, len(sorted))
@@ -158,7 +156,7 @@ func toolIdentities(definitions []message.ToolDefinition) ([]ToolIdentityV1, str
 			return nil, "", fmt.Errorf("eval: encode tool %s: %w", definition.Name, err)
 		}
 		digest := sumHex(encoded)
-		identities = append(identities, ToolIdentityV1{Name: definition.Name, Origin: definition.Origin, DefinitionSHA256: digest})
+		identities = append(identities, ToolIdentityV1{Name: definition.Name, Origin: origins[definition.Name], DefinitionSHA256: digest})
 		catalog.WriteString(definition.Name)
 		catalog.WriteByte(0)
 		catalog.WriteString(digest)
@@ -169,7 +167,7 @@ func toolIdentities(definitions []message.ToolDefinition) ([]ToolIdentityV1, str
 
 func dependencyIdentities(root string, requested []string) ([]DependencyIdentityV1, string, error) {
 	if len(requested) == 0 {
-		requested = []string{"go.mod", "go.sum", "frontend/package.json", "frontend/bun.lock", "frontend/bun.lockb"}
+		requested = []string{"go.mod", "go.sum", "runtime-js/package.json", "runtime-js/bun.lock"}
 	}
 	paths := append([]string(nil), requested...)
 	sort.Strings(paths)
@@ -236,6 +234,7 @@ func commandOutput(ctx context.Context, directory, name string, args ...string) 
 	payload, err := commandBytes(ctx, directory, name, args...)
 	return string(payload), err
 }
+
 func commandBytes(ctx context.Context, directory, name string, args ...string) ([]byte, error) {
 	command := exec.CommandContext(ctx, name, args...)
 	command.Dir = directory
@@ -345,6 +344,7 @@ func dirtyWorktreeHash(root string, status []byte) (string, error) {
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
+
 func firstNonempty(values ...string) string {
 	for _, value := range values {
 		if strings.TrimSpace(value) != "" {

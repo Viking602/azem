@@ -13,19 +13,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Viking602/azem/internal/agentruntime"
+	"github.com/Viking602/azem/internal/provider/responses"
 	sdk "github.com/Viking602/llmux"
 	"github.com/Viking602/llmux/provider/anthropic"
 	"github.com/Viking602/llmux/provider/openai/compat"
 	"github.com/Viking602/venat/message"
 	hyprovider "github.com/Viking602/venat/provider"
 )
-
-type llmuxTestRequestHost struct{ root string }
-
-func (host llmuxTestRequestHost) AttachmentRoot() string { return host.root }
-func (llmuxTestRequestHost) ExecuteNativeTool(context.Context, message.ToolCall) (message.ToolResult, error) {
-	return message.ToolResult{}, nil
-}
 
 type sliceStream struct {
 	parts []sdk.Part
@@ -57,6 +52,14 @@ func TestProfilesAndStreamMapping(t *testing.T) {
 		}
 		foundOpenAI = foundOpenAI || profile.ID == "openai"
 		foundOpenRouter = foundOpenRouter || profile.ID == "openrouter"
+		if profile.ID == "openrouter" {
+			if _, err := New(Config{
+				ProviderID: profile.ID, Backend: profile.Backend, BaseURL: profile.BaseURL,
+				APIKey: "test", Models: []string{"stealth/ox-alpha"},
+			}); err != nil {
+				t.Fatalf("openrouter profile %+v cannot create a language driver: %v", profile, err)
+			}
+		}
 	}
 	if !foundOpenAI || !foundOpenRouter {
 		t.Fatalf("missing expected profiles: openai=%v openrouter=%v", foundOpenAI, foundOpenRouter)
@@ -182,7 +185,7 @@ func TestAnthropicCompatibleProviderUsesMessagesProtocol(t *testing.T) {
 
 func TestAnthropicConversionKeepsLatePrivateSystemContextInMessageTail(t *testing.T) {
 	lateSystem := message.NewText(message.RoleSystem, "dynamic trusted context")
-	lateSystem.Visibility = message.VisibilityPrivate
+	agentruntime.SetMessageVisibility(&lateSystem, agentruntime.MessageVisibilityPrivate)
 	converted, _, err := convertRequest(hyprovider.Request{
 		Model: "deepseek-v4-flash",
 		Messages: []message.Message{
@@ -259,15 +262,14 @@ func TestTextOnlyModelOmitsHistoricalImages(t *testing.T) {
 	historical.Metadata = map[string]string{
 		"azem.attachments": `[{"id":"img1","name":"shot.png","mime":"image/png","path":` + jsonString(path) + `}]`,
 	}
-	converted, _, err := convertRequest(hyprovider.Request{
+	converted, _, err := convertRequestContext(responses.WithAttachmentRoot(context.Background(), dir), hyprovider.Request{
 		Model: "deepseek-v4-flash",
 		Messages: []message.Message{
 			historical,
 			message.NewText(message.RoleAssistant, "I saw it."),
 			message.NewText(message.RoleUser, "continue without the image"),
 		},
-		NativeToolHost: llmuxTestRequestHost{root: dir},
-		ExtraBody:      map[string]any{disableImageInputExtraKey: true},
+		ExtraBody: map[string]any{disableImageInputExtraKey: true},
 	}, "", "opencode-go")
 	if err != nil {
 		t.Fatal(err)
@@ -291,11 +293,10 @@ func TestTextOnlyModelRejectsCurrentImageLocally(t *testing.T) {
 	current.Metadata = map[string]string{
 		"azem.attachments": `[{"id":"img1","name":"shot.png","mime":"image/png","path":` + jsonString(path) + `}]`,
 	}
-	_, _, err := convertRequest(hyprovider.Request{
-		Model:          "deepseek-v4-flash",
-		Messages:       []message.Message{current},
-		NativeToolHost: llmuxTestRequestHost{root: dir},
-		ExtraBody:      map[string]any{disableImageInputExtraKey: true},
+	_, _, err := convertRequestContext(responses.WithAttachmentRoot(context.Background(), dir), hyprovider.Request{
+		Model:     "deepseek-v4-flash",
+		Messages:  []message.Message{current},
+		ExtraBody: map[string]any{disableImageInputExtraKey: true},
 	}, "", "opencode-go")
 	if err == nil || !strings.Contains(err.Error(), "does not support image input") {
 		t.Fatalf("convertRequest error = %v, want local image capability rejection", err)

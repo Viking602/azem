@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Viking602/venat/api"
+	"github.com/Viking602/azem/internal/agentruntime"
 )
 
 func TestWorkspaceWriteClaimCanonicalizesRealAndSymlinkAliases(t *testing.T) {
@@ -27,7 +27,7 @@ func TestWorkspaceWriteClaimCanonicalizesRealAndSymlinkAliases(t *testing.T) {
 	if realClaim != aliasClaim {
 		t.Fatalf("real claim=%#v, symlink claim=%#v", realClaim, aliasClaim)
 	}
-	if realClaim.Mode != api.ResourceClaimExclusive || !strings.HasPrefix(realClaim.Key, workspaceWriteClaimPrefix) {
+	if realClaim.Mode != agentruntime.ResourceClaimExclusive || !strings.HasPrefix(realClaim.Key, workspaceWriteClaimPrefix) {
 		t.Fatalf("workspace claim=%#v", realClaim)
 	}
 }

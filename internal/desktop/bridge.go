@@ -115,6 +115,21 @@ type PullRequestDetail struct {
 	PullRequest githubpr.PullRequest  `json:"pullRequest"`
 	Monitor     githubpr.MonitorState `json:"monitor"`
 }
+type ReconnectSnapshot struct {
+	Base            Snapshot                           `json:"base"`
+	Session         *Event                             `json:"session,omitempty"`
+	Tree            *session.SessionTree               `json:"tree,omitempty"`
+	Skills          SkillCatalogSnapshot               `json:"skills"`
+	Hooks           *azemapp.HookCatalogSnapshot       `json:"hooks"`
+	Marketplace     *azemapp.MarketplaceCatalogPayload `json:"marketplace"`
+	PullRequests    *githubpr.Dashboard                `json:"pullRequests,omitempty"`
+	Terminals       []TerminalSession                  `json:"terminals"`
+	ActiveSessionID string                             `json:"activeSessionId,omitempty"`
+	Sessions        []session.Session                  `json:"sessions"`
+	Projects        []session.Project                  `json:"projects"`
+	ActiveRunID     string                             `json:"activeRunId,omitempty"`
+	PendingControls []Event                            `json:"pendingControls,omitempty"`
+}
 
 type Event struct {
 	Sequence           uint64                             `json:"sequence"`
@@ -167,9 +182,11 @@ type Bridge struct {
 	sessionID    string
 	openProject  func(string, string, int64) error
 	emit         EventEmitter
+	rawTerminal  func(TerminalEvent, []byte)
 	ctx          context.Context
 	cancel       context.CancelFunc
-	start        sync.Once
+	startOnce    sync.Once
+	primeOnce    sync.Once
 	sequence     atomic.Uint64
 	terminalSeq  atomic.Uint64
 	pullRequests *githubpr.Client
@@ -190,6 +207,13 @@ func NewBridge(parent context.Context, boot azemapp.BootstrapResult, emit EventE
 	return bridge
 }
 
+// SetRawTerminalSink installs a binary-safe terminal output consumer.
+func (b *Bridge) SetRawTerminalSink(sink func(TerminalEvent, []byte)) {
+	if b != nil {
+		b.rawTerminal = sink
+	}
+}
+
 func pullRequestMonitorStatePath(stateDir, workspace string) string {
 	stateDir = strings.TrimSpace(stateDir)
 	if stateDir == "" {
@@ -205,15 +229,35 @@ func pullRequestMonitorStatePath(stateDir, workspace string) string {
 	return filepath.Join(stateDir, fmt.Sprintf("pr-monitors-%x.json", digest[:16]))
 }
 
-func (b *Bridge) Initialise() Snapshot {
-	b.start.Do(func() {
+// StartRuntime starts lossless event projection and PR monitoring without
+// eagerly building optional catalogs. The daemon uses this so its endpoint can
+// serve the durable reconnect snapshot before heavier settings data is loaded.
+func (b *Bridge) StartRuntime() {
+	if b == nil {
+		return
+	}
+	b.startOnce.Do(func() {
 		go b.pump()
-		go b.prime()
-		b.prMonitor.Start()
+		if b.prMonitor != nil {
+			b.prMonitor.Start()
+		}
 	})
+}
+
+func (b *Bridge) Initialise() Snapshot {
+	b.StartRuntime()
+	b.primeOnce.Do(func() { go b.prime() })
+	return b.baseSnapshot()
+}
+
+func (b *Bridge) baseSnapshot() Snapshot {
 	branchContext, cancel := context.WithTimeout(b.ctx, 250*time.Millisecond)
 	currentBranch := currentGitBranch(branchContext, b.workspace)
 	cancel()
+	var monitors []githubpr.MonitorState
+	if b.prMonitor != nil {
+		monitors = b.prMonitor.States()
+	}
 	return Snapshot{
 		Workspace: b.workspace, CurrentBranch: currentBranch, SessionID: b.sessionID,
 		Provider: b.cfg.Defaults.Provider, Model: b.cfg.Defaults.Model,
@@ -228,7 +272,7 @@ func (b *Bridge) Initialise() Snapshot {
 		SubagentIdleSeconds:      int(b.cfg.Agents.Subagents.IdleDuration.Seconds()),
 		ChatGPTFastMode:          b.cfg.Providers.ChatGPT.FastMode,
 		Sequence:                 b.sequence.Load(),
-		PullRequestMonitors:      b.prMonitor.States(),
+		PullRequestMonitors:      monitors,
 	}
 }
 
@@ -269,6 +313,56 @@ func (b *Bridge) UsageReport(scope string) (session.UsageReport, error) {
 	return b.runtime.UsageReport(ctx, scope)
 }
 
+func (b *Bridge) ReconnectSnapshot(sessionID string) (ReconnectSnapshot, error) {
+	if b.runtime == nil || b.runtime.Sessions() == nil {
+		return ReconnectSnapshot{}, fmt.Errorf("runtime is unavailable")
+	}
+	b.StartRuntime()
+	base := b.baseSnapshot()
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		sessionID = base.SessionID
+	}
+	ctx, cancel := context.WithTimeout(b.ctx, 5*time.Second)
+	defer cancel()
+	snapshot := ReconnectSnapshot{Base: base, Terminals: b.ListTerminals()}
+	snapshot.ActiveSessionID, snapshot.ActiveRunID = b.runtime.ActiveRun()
+	var err error
+	snapshot.Sessions, err = b.runtime.Sessions().List(ctx, 100)
+	if err != nil {
+		return ReconnectSnapshot{}, fmt.Errorf("list reconnect sessions: %w", err)
+	}
+	snapshot.Projects, err = b.runtime.Sessions().Projects(ctx)
+	if err != nil {
+		return ReconnectSnapshot{}, fmt.Errorf("list reconnect projects: %w", err)
+	}
+	projection, err := b.runtime.SessionProjection(ctx, sessionID)
+	if err == nil {
+		sessionEvent := eventDTO(projection)
+		snapshot.Session = &sessionEvent
+		if tree, treeErr := b.runtime.Sessions().LoadSessionTree(ctx, sessionID); treeErr == nil {
+			snapshot.Tree = &tree
+		}
+	} else if sessionID != base.SessionID || !errors.Is(err, session.ErrSessionNotFound) {
+		return ReconnectSnapshot{}, err
+	}
+	for _, control := range b.runtime.PendingControlEvents(sessionID) {
+		snapshot.PendingControls = append(snapshot.PendingControls, eventDTO(control))
+	}
+	// Optional catalogs are deliberately excluded from the first reconnect
+	// response. Dispatcher starts RefreshProjection after this durable snapshot
+	// is complete, so providers, Skills, Hooks, plugins, marketplace data, MCP,
+	// and pull requests arrive asynchronously without delaying first paint.
+	return snapshot, nil
+}
+
+// RefreshProjection re-emits non-durable catalogs after a renderer reconnects.
+func (b *Bridge) RefreshProjection() {
+	if b != nil {
+		go b.prime()
+	}
+}
+
 func currentGitBranch(ctx context.Context, workspace string) string {
 	workspace = strings.TrimSpace(workspace)
 	if workspace == "" {
@@ -297,6 +391,11 @@ func (b *Bridge) ImportAttachment(sessionID, name, mimeType, encoded string) (At
 	if err != nil {
 		return Attachment{}, fmt.Errorf("decode attachment: %w", err)
 	}
+	return b.ImportAttachmentBytes(sessionID, name, mimeType, data)
+}
+
+// ImportAttachmentBytes imports a validated image without base64 transport.
+func (b *Bridge) ImportAttachmentBytes(sessionID, name, mimeType string, data []byte) (Attachment, error) {
 	item, err := b.runtime.ImportImageBytes(sessionID, name, mimeType, data)
 	if err != nil {
 		return Attachment{}, err
@@ -542,12 +641,27 @@ func (b *Bridge) Close() {
 func (b *Bridge) prime() {
 	actions := []azemapp.Action{
 		{Kind: azemapp.ActionListSessions},
-		{Kind: azemapp.ActionListGitBranches},
+		// Provider and route catalogs are cache/local-store reads. Emit them
+		// before ActionListModels, which may refresh a remote subscription and
+		// must never hold the Settings modal in its loading state.
+		{Kind: azemapp.ActionListModelProviders, SessionID: b.sessionID},
 		{Kind: azemapp.ActionListModelRoutes},
+		{Kind: azemapp.ActionListGitBranches},
+		{Kind: azemapp.ActionListModels, SessionID: b.sessionID},
 		{Kind: azemapp.ActionListAgentTypes, SessionID: b.sessionID},
+		{Kind: azemapp.ActionListPersonas, SessionID: b.sessionID},
 		{Kind: azemapp.ActionListSkills, SessionID: b.sessionID},
 		{Kind: azemapp.ActionListPlugins, SessionID: b.sessionID},
 		{Kind: azemapp.ActionListHooks, SessionID: b.sessionID},
+		{Kind: azemapp.ActionMarketplaceList, SessionID: b.sessionID},
+		{Kind: azemapp.ActionListCustomCommands, SessionID: b.sessionID},
+		{Kind: azemapp.ActionListThemes, SessionID: b.sessionID},
+		{Kind: azemapp.ActionRefreshMCP, SessionID: b.sessionID},
+		{Kind: azemapp.ActionListBackground, SessionID: b.sessionID},
+		{Kind: azemapp.ActionListMemories, SessionID: b.sessionID},
+		{Kind: azemapp.ActionShowRecap, SessionID: b.sessionID},
+		{Kind: azemapp.ActionGetSecurityConfig, SessionID: b.sessionID},
+		{Kind: azemapp.ActionListSecurityScans, SessionID: b.sessionID},
 	}
 	for _, action := range actions {
 		if err := b.runtime.ExecuteAction(b.ctx, action); err != nil && !errors.Is(err, context.Canceled) {
@@ -600,7 +714,7 @@ func allowedAction(kind azemapp.ActionKind) bool {
 	switch kind {
 	case azemapp.ActionLogin, azemapp.ActionLogout,
 		azemapp.ActionNewSession, azemapp.ActionListSessions, azemapp.ActionListUsage, azemapp.ActionResumeSession, azemapp.ActionRefreshSession,
-		azemapp.ActionRenameSession, azemapp.ActionPinSession, azemapp.ActionArchiveSession, azemapp.ActionArchiveInactiveSessions, azemapp.ActionMarkSessionUnread,
+		azemapp.ActionRenameSession, azemapp.ActionPinSession, azemapp.ActionArchiveSession, azemapp.ActionArchiveInactiveSessions, azemapp.ActionRemoveProject, azemapp.ActionMarkSessionUnread,
 		azemapp.ActionCompact, azemapp.ActionResolveApproval, azemapp.ActionResolveUserInput, azemapp.ActionResolvePlan, azemapp.ActionSetApprovalMode,
 		azemapp.ActionSetLanguage, azemapp.ActionSetQueueMode, azemapp.ActionReconcileAttempt,
 		azemapp.ActionInspectAgent, azemapp.ActionListAgentTypes, azemapp.ActionListPersonas,

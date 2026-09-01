@@ -3,14 +3,12 @@ package app
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"strings"
 	"testing"
 
 	"github.com/Viking602/azem/internal/config"
 	hyagent "github.com/Viking602/venat/agent"
-	"github.com/Viking602/venat/hook"
 	"github.com/Viking602/venat/message"
 	hyprovider "github.com/Viking602/venat/provider"
 )
@@ -18,32 +16,31 @@ import (
 func TestThinkingLoopGuardInterruptsAndContinues(t *testing.T) {
 	repeated := strings.Repeat("concrete repeated reasoning segment with enough technical words to represent a stalled model loop and no actual progress. ", 8)
 	repeated += repeated
-	control := hyagent.NewControlQueue()
+	control := newTurnControlQueue()
 	guard := newModelLoopGuard(config.LoopGuardConfig{
 		ThinkingEnabled: true, AssistantTextEnabled: true, ToolCallEnabled: true, ToolCallThreshold: 5,
 	}, control, nil, "session", "run")
-	engine := hyagent.Engine{
+	engine := bindTurnControl(hyagent.Engine{
 		Provider: &compactionTestDriver{streams: [][]hyprovider.Event{
-			{{Kind: hyprovider.EventThinkingDelta, Thinking: repeated}},
+			{{Kind: hyprovider.EventThinkingDelta, Thinking: repeated}, {Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete}},
 			{{Kind: hyprovider.EventTextDelta, Text: "corrected answer"}, {Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete}},
 		}},
-		Hooks:   hook.NewChain(guard),
-		Control: control,
+		Model:      "model",
+		LoopPolicy: hyagent.LoopPolicy{MaxIterations: 3},
+	}, control)
+	engine.Hooks = engine.Hooks.Prepend(guard)
+	result := engine.Run(context.Background(), hyagent.Request{Prompt: "solve"}, hyagent.OutputPolicy{})
+	if result.Failure != nil {
+		t.Fatal(result.Failure)
 	}
-	output, err := engine.RunMessages(context.Background(), hyagent.LoopInput{
-		Model: "model", Messages: []message.Message{message.NewText(message.RoleUser, "solve")}, MaxIterations: 3, Control: control,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	encoded, _ := json.Marshal(output.Messages)
-	if strings.Contains(string(encoded), "stalled model loop") || !strings.Contains(string(encoded), "Host loop guard: thinking-loop") || !strings.Contains(string(encoded), "corrected answer") {
+	encoded, _ := json.Marshal(result.Messages)
+	if !strings.Contains(string(encoded), "stalled model loop") || !strings.Contains(string(encoded), "Host loop guard: thinking-loop") || !strings.Contains(string(encoded), "corrected answer") {
 		t.Fatalf("thinking-loop recovery = %s", encoded)
 	}
 }
 
 func TestToolCallLoopGuardCanonicalizesAndExemptsPolling(t *testing.T) {
-	control := hyagent.NewControlQueue()
+	control := newTurnControlQueue()
 	guard := newModelLoopGuard(config.LoopGuardConfig{
 		ToolCallEnabled: true, ToolCallThreshold: 3, ToolCallExemptTools: []string{"hub"},
 	}, control, nil, "session", "run")
@@ -57,14 +54,11 @@ func TestToolCallLoopGuardCanonicalizesAndExemptsPolling(t *testing.T) {
 		if index < 2 && err != nil {
 			t.Fatalf("tool loop tripped early at %d: %v", index, err)
 		}
-		if index == 2 {
-			var interrupted *hyagent.StreamRuleInterruptError
-			if !errors.As(err, &interrupted) {
-				t.Fatalf("tool loop did not interrupt: %v", err)
-			}
+		if index == 2 && err != nil {
+			t.Fatalf("tool loop queue failed: %v", err)
 		}
 	}
-	controls, err := control.Drain(context.Background(), hyagent.TurnBoundaryBeforeModel)
+	controls, err := control.Drain(context.Background(), turnControlBeforeModel)
 	if err != nil || len(controls) != 1 || !strings.Contains(controls[0].Message.Text, "identical coding.read_file call") {
 		t.Fatalf("tool loop control = %#v, %v", controls, err)
 	}

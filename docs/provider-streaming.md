@@ -1,11 +1,12 @@
 # Provider Streaming
 
-Last verified: 2026-08-24
+Last verified: 2026-08-30
 
-Azem normalizes every provider into Venat's `provider.Driver` contract. The
-application runtime owns provider/model selection, retries, usage persistence,
-tool execution, and UI events; transport packages own wire requests and stream
-parsing.
+Azem normalizes every provider into Venat v0.16.1's `provider.Driver`
+contract. The application runtime owns provider/account/model selection,
+pre-stream retry, approval policy, usage persistence, tools, and UI events;
+transport packages own wire requests and parsing. A direct `agent.Engine`
+consumes the stream, while `durable.Runtime` settles provider/tool effects.
 
 ## Transports
 
@@ -174,25 +175,32 @@ Only `run_id`, `session_id`, and `agent_id` metadata cross the provider
 boundary. Credentials are injected when the driver is constructed and are not
 placed in message metadata or events.
 
-## Stream mapping
+## Stream and durable-effect mapping
 
 ```text
 llmux response metadata -> provider request ID
-llmux text delta        -> unphased text delta, classified when the turn ends or starts a tool
-llmux reasoning delta   -> thinking delta
-llmux tool call         -> Venat structured tool call
+llmux text delta        -> agent text frame; Azem settles commentary/final phase
+llmux reasoning delta   -> agent thinking frame
+llmux tool call         -> structured agent tool call with stable operation ID
 llmux finish            -> usage + stop reason + provider state
-llmux error             -> typed Venat provider error
+llmux error             -> typed provider error
 ```
 
-Tool-call finishes take precedence over a generic stop reason. Usage retains
-input, cached input, cache write, reasoning, output, and total token fields when
-the upstream protocol reports them. DeepSeek's Anthropic-compatible usage
-reports uncached input and cache-read input as separate counters; the adapter
-normalizes them into Azem's inclusive input total and treats a reported zero as
-a real zero-percent hit rather than an unsupported metric. Encrypted or opaque
-provider continuation state is returned to the runtime without exposing it as
-visible text.
+Before opening a provider stream, Venat durable persists the continuation and a
+versioned model attempt. Before each tool, it persists the model-complete
+continuation; Azem's `BeforeToolCall` approval hook may suspend at that safe
+boundary before the tool attempt starts. The durable interceptor then settles
+model/tool success or failure. A lost response becomes an `unknown` attempt on
+the next claim and requires explicit reconciliation—retry never guesses.
+
+The `agent.Sink` is transient and may replay frames after recovery. Azem
+deduplicates session blocks, tool timeline rows, usage, and terminal output by
+execution/operation identity. Tool-call finishes take precedence over a
+generic stop reason. Usage retains input, cached input, cache write, reasoning,
+output, and total token fields when the upstream protocol reports them.
+DeepSeek's separate uncached/cache-read counters become inclusive input, and a
+reported zero remains a real zero rather than unsupported telemetry. Opaque
+provider continuation state remains private.
 
 Some OpenAI Responses-compatible streams expose one logical tool call first
 with a provisional `item_id` such as `fc_tmp_*`, then with the final
@@ -264,18 +272,17 @@ timeline hierarchy without pretending the wire protocol supplied a phase.
 
 ## Retry ownership
 
-llmux's internal retry policy is set to one attempt. Azem uses Venat's
-`OpenRetryingStream` and run retry policy as the single retry owner. This keeps
-retry observation, delay caps, cancellation, and the rule against replay after
-visible output consistent across transports.
+llmux's internal retry policy is one attempt. Azem's
+`retryProviderDriver` is the only pre-stream transport retry owner for main,
+Team-role, Subagent, automation, vision, recap, and title requests. It retries
+only before visible output/effect settlement, preserves delay/cancellation
+events, and never substitutes for durable unknown-attempt reconciliation.
 
 Authentication, permission, invalid request, not found, rate limit, server,
-and stream errors map to Venat's typed error categories. Cancellation and
-deadlines from the run's caller terminate as aborted runs rather than retryable
-provider failures. A response-header timeout or transport cancellation while
-the caller context is still healthy is a retryable stream-open failure; this
-distinction prevents one transient 30-second connection stall from terminating
-a long-running main or subagent run.
+and stream errors retain typed provider categories. Caller cancellation and
+deadlines abort rather than retry. A response-header timeout or transport
+cancellation while the caller remains healthy may retry only at the
+pre-stream boundary.
 
 Context archiving does not open a provider stream and therefore has no retry,
 inactivity-watchdog, or model-usage path. Automatic, manual, rebuild, main,
@@ -292,15 +299,15 @@ heuristics, and anything unrecognized classifies as `unknown` rather than a
 guess.
 
 The runtime attaches the code to the event payload as `Data["errorCode"]` on
-`run_failed` (main and team runs) and on `provider_retry` waiting events when
-a retry cause is known. Consumers use the code for presentation only — the
-desktop titles the failure block from the code and the block keeps the
-original error text — while Venat remains the single retry owner;
-`errcode.Retryable` is UI guidance, never a runtime retry decision.
+`run_failed` (main and Team runs) and on `provider_retry` waiting events when a
+retry cause is known. Consumers use the code for presentation only—the desktop
+titles the failure block from the code and keeps the original error text.
+`retryProviderDriver` remains the retry decision owner; `errcode.Retryable`
+alone never schedules an attempt.
 
 ## Portable provider contract
 
-Azem pins Venat v0.15.4 and llmux v0.3.1. The shared contract preserves
+Azem pins Venat v0.16.1 and llmux v0.3.1. The shared contract preserves
 commentary/final text phase, terminal state, distinct length/error stop reasons,
 reported usage flags, cache reads/writes, sources, files, warnings, portable
 modality metadata, and provider compatibility descriptors. Tool argument
@@ -308,23 +315,24 @@ objects are duplicate-key checked before approval or execution.
 
 llmux protocol parsers own provisional/canonical tool identity correlation and
 at-most-once finalization. Azem forwards canonical calls and never deduplicates
-across streams or model turns. Venat remains the only retry owner and rejects
-duplicate tool registrations, invalid arguments, or post-terminal frames.
+across streams or model turns. Azem owns pre-stream retries; Venat v0.16
+durable execution rejects duplicate tool registrations/invalid arguments and
+fences each effect attempt.
 
-Cross-repository release verification is:
+Cross-repository release verification uses declared modules:
 
 ```bash
 (cd ../llmux && GOWORK=off go test ./...)
-(cd ../venat && GOWORK=off go test ./...)
+GOWORK=off go test github.com/Viking602/venat/agent github.com/Viking602/venat/message github.com/Viking602/venat/provider/... github.com/Viking602/venat/tool/... github.com/Viking602/venat/skill/... github.com/Viking602/venat/orchestration github.com/Viking602/venat/durable/...
 GOWORK=off go test ./internal/provider/... ./internal/auth/...
 ```
 
 ## Verification
 
-Run the adapter, shared request, app runtime, desktop projection, and frontend
+Run the adapter, shared request, app runtime, desktop projection, and GPUI
 checks before release:
 
 ```bash
 GOWORK=off go test ./internal/provider/llmux ./internal/provider/responses ./internal/app ./internal/desktop
-cd frontend && bun run typecheck && bun run test && bun run build
+make test-gpui
 ```

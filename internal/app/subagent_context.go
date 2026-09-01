@@ -13,8 +13,9 @@ import (
 	"time"
 
 	agentservice "github.com/Viking602/azem/internal/agent"
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/azem/internal/config"
-	"github.com/Viking602/venat/api"
+	hyagent "github.com/Viking602/venat/agent"
 	"github.com/Viking602/venat/message"
 	hyprovider "github.com/Viking602/venat/provider"
 )
@@ -28,19 +29,19 @@ type subagentTurnContext struct {
 	inner          turnContext
 }
 
-func (c subagentTurnContext) Build(ctx context.Context, task api.Task) ([]message.Message, error) {
+func (c subagentTurnContext) Build(ctx context.Context, request hyagent.Request) ([]message.Message, error) {
 	messages := make([]message.Message, 0, len(c.seed)+3)
 	if instructions := strings.TrimSpace(c.instructions); instructions != "" {
 		messages = append(messages, message.NewText(message.RoleSystem, instructions))
 	}
 	if privateContext := strings.TrimSpace(c.privateContext); privateContext != "" {
 		value := message.NewText(message.RoleSystem, "[Trusted SubagentStart hook context]\n"+privateContext)
-		value.Visibility = message.VisibilityPrivate
+		markPrivateMessage(&value)
 		messages = append(messages, value)
 	}
 	if text := runtimeDeadlineContext(ctx, c.inner.deadlineAt); text != "" {
 		value := message.NewText(message.RoleSystem, "[Trusted runtime deadline]\n"+text)
-		value.Visibility = message.VisibilityPrivate
+		markPrivateMessage(&value)
 		messages = append(messages, value)
 	}
 	for _, seeded := range c.seed {
@@ -48,7 +49,7 @@ func (c subagentTurnContext) Build(ctx context.Context, task api.Task) ([]messag
 			messages = append(messages, seeded)
 		}
 	}
-	if goal := strings.TrimSpace(task.Goal); goal != "" {
+	if goal := strings.TrimSpace(request.Prompt); goal != "" {
 		messages = append(messages, message.NewText(message.RoleUser, goal))
 	}
 	return messages, nil
@@ -174,30 +175,31 @@ func transcriptToAgentBlocks(encoded json.RawMessage) ([]AgentTranscriptBlock, e
 	if len(encoded) == 0 {
 		return nil, nil
 	}
-	var messages []message.Message
-	if err := json.Unmarshal(encoded, &messages); err != nil {
+	messages, err := agentruntime.UnmarshalMessages(encoded)
+	if err != nil {
 		return nil, fmt.Errorf("decode subagent transcript: %w", err)
 	}
 	messages = slices.DeleteFunc(messages, internalSubagentTranscriptMessage)
 	blocks := make([]AgentTranscriptBlock, 0, len(messages))
 	callIndex := make(map[string]int)
 	for index, item := range messages {
+		runID := agentruntime.MessageRunID(item)
 		if item.Role == message.RoleSystem {
 			continue
 		}
 		if item.Role == message.RoleUser && strings.TrimSpace(item.Text) != "" {
-			blocks = append(blocks, AgentTranscriptBlock{ID: fmt.Sprintf("msg-%d-user", index), Kind: "user", RunID: item.RunID, Content: item.Text, State: "completed"})
+			blocks = append(blocks, AgentTranscriptBlock{ID: fmt.Sprintf("msg-%d-user", index), Kind: "user", RunID: runID, Content: item.Text, State: "completed"})
 		}
 		if item.Role == message.RoleAssistant {
 			if item.Thinking != "" {
-				blocks = append(blocks, AgentTranscriptBlock{ID: fmt.Sprintf("msg-%d-thinking", index), Kind: "thinking", RunID: item.RunID, Content: item.Thinking, State: "completed"})
+				blocks = append(blocks, AgentTranscriptBlock{ID: fmt.Sprintf("msg-%d-thinking", index), Kind: "thinking", RunID: runID, Content: item.Thinking, State: "completed"})
 			}
 			if item.Text != "" {
-				blocks = append(blocks, AgentTranscriptBlock{ID: fmt.Sprintf("msg-%d-text", index), Kind: subagentTextKind("", len(item.ToolCalls) > 0), RunID: item.RunID, Content: item.Text, State: "completed"})
+				blocks = append(blocks, AgentTranscriptBlock{ID: fmt.Sprintf("msg-%d-text", index), Kind: subagentTextKind("", len(item.ToolCalls) > 0), RunID: runID, Content: item.Text, State: "completed"})
 			}
 			for _, call := range item.ToolCalls {
 				callIndex[call.ID] = len(blocks)
-				blocks = append(blocks, AgentTranscriptBlock{ID: "call-" + call.ID, Kind: "tool", RunID: item.RunID, ToolCallID: call.ID, Title: call.Name, Content: string(call.Arguments), State: "running"})
+				blocks = append(blocks, AgentTranscriptBlock{ID: "call-" + call.ID, Kind: "tool", RunID: runID, ToolCallID: call.ID, Title: call.Name, Content: string(call.Arguments), State: "running"})
 			}
 		}
 		if item.ToolResult != nil {
@@ -211,7 +213,7 @@ func transcriptToAgentBlocks(encoded json.RawMessage) ([]AgentTranscriptBlock, e
 				delete(callIndex, item.ToolResult.ToolCallID)
 			} else {
 				blocks = append(blocks, AgentTranscriptBlock{
-					ID: fmt.Sprintf("result-%d", index), Kind: "tool", RunID: item.RunID,
+					ID: fmt.Sprintf("result-%d", index), Kind: "tool", RunID: runID,
 					ToolCallID: item.ToolResult.ToolCallID, Title: item.ToolResult.Name,
 					Content: item.ToolResult.Content, State: "failed",
 				})
@@ -230,7 +232,7 @@ func transcriptToAgentBlocks(encoded json.RawMessage) ([]AgentTranscriptBlock, e
 // conversation content. Keep them durable for resume/validation while never
 // projecting them into the side chat or seeding them into a resumed subagent.
 func internalSubagentTranscriptMessage(item message.Message) bool {
-	return item.Visibility == message.VisibilityPrivate || item.Kind == message.KindCompactionSummary
+	return isPrivateMessage(item) || item.Kind == message.KindCompactionSummary
 }
 
 const (
@@ -240,7 +242,7 @@ const (
 
 // boundedAgentTranscriptBlock is the desktop projection boundary. Durable
 // transcripts remain complete, while opening a subagent cannot inject a
-// multi-megabyte tool result into one Wails event and the React tree.
+// multi-megabyte tool result into one desktop event and renderer tree.
 func boundedAgentTranscriptBlock(block AgentTranscriptBlock) AgentTranscriptBlock {
 	limit := maxAgentTranscriptTextBytes
 	if block.Kind == "tool" {
@@ -313,10 +315,14 @@ func joinThinkingContent(existing, next string) string {
 	}
 	left := strings.TrimRight(existing, " \t")
 	right := strings.TrimLeft(next, " \t")
-	if strings.HasSuffix(left, "**") && strings.HasPrefix(right, "**") {
+	if thinkingTitleBoundary(left, right) {
 		return left + "\n\n" + right
 	}
 	return existing + next
+}
+
+func thinkingTitleBoundary(existing, next string) bool {
+	return strings.HasSuffix(existing, "**") && strings.HasPrefix(next, "**")
 }
 
 func finishAgentToolBlock(blocks []AgentTranscriptBlock, callID, content string, failed bool) {

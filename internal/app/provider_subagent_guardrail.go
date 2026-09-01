@@ -33,7 +33,7 @@ func pendingBackgroundChildrenGuardrail(list func() []backgroundChildStatus) hya
 		if len(children) == 0 {
 			return hyagent.AllowOutput(), nil
 		}
-		return hyagent.RetryOutput(message.NewText(message.RoleUser, pendingBackgroundChildrenPrompt(children))), nil
+		return hyagent.RetryOutputWithPolicy(hyagent.RetryPolicy{IncludeRejectedOutput: true}, message.NewText(message.RoleUser, pendingBackgroundChildrenPrompt(children))), nil
 	})
 }
 

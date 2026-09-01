@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	hyagent "github.com/Viking602/venat/agent"
 	"github.com/Viking602/venat/message"
 	"github.com/Viking602/venat/tool"
@@ -50,7 +51,7 @@ type providerHost interface {
 	BindProviderEngine(engine hyagent.Engine) hyagent.Engine
 	SpawnProviderTurn(ctx context.Context, request TurnRequest, run *agentservice.Run, engine hyagent.Engine)
 	SpawnResumedProviderTeam(ctx context.Context, request TurnRequest, runID, recapGoal string, resolution teamProviderResolution)
-	TurnControl(runID string) *hyagent.ControlQueue
+	TurnControl(runID string) *turnControlQueue
 	EnqueuePeerControl(sessionID, runID, from, body, replyTo string) error
 	RegisterPlanYoloHandoff(runID, sessionID, planID, title string, target config.ModelRouteConfig) error
 
@@ -60,7 +61,7 @@ type providerHost interface {
 
 	// Approvals and interactive input.
 	AwaitApproval(ctx context.Context, sessionID, agentID, agentType string, run *agentservice.Run, call tool.Call, pending agentservice.PendingApproval) (approvalResolution, error)
-	AwaitTeamApproval(ctx context.Context, sessionID, runID, goal string, call tool.Call, definition tool.Definition) (approvalResolution, error)
+	AwaitTeamApproval(ctx context.Context, sessionID, runID, goal string, call tool.Call, policy agentruntime.ToolPolicy) (approvalResolution, error)
 	ClearAutoReviewTracker(runID string)
 	RegisterUserInput(requestID string, live *liveUserInput) bool
 	FinishUserInput(live *liveUserInput)
@@ -164,13 +165,13 @@ func (s *Service) SpawnResumedProviderTeam(ctx context.Context, request TurnRequ
 	go s.runResumedProviderTeam(ctx, request, runID, recapGoal, resolution)
 }
 
-func (s *Service) TurnControl(runID string) *hyagent.ControlQueue {
+func (s *Service) TurnControl(runID string) *turnControlQueue {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if control := s.turnControls[runID]; control != nil {
 		return control
 	}
-	control := hyagent.NewControlQueue()
+	control := newTurnControlQueue()
 	s.turnControls[runID] = control
 	return control
 }
@@ -195,8 +196,8 @@ func (s *Service) EnqueuePeerControl(sessionID, runID, from, body, replyTo strin
 	}
 	text += "\n\n" + body
 	value := message.NewText(message.RoleUser, text)
-	value.Visibility = message.VisibilityPrivate
-	return control.Enqueue(hyagent.ControlMessage{ID: id, Kind: hyagent.ControlSteer, Message: value})
+	agentruntime.SetMessageVisibility(&value, agentruntime.MessageVisibilityPrivate)
+	return control.Enqueue(turnControlMessage{ID: id, Kind: turnControlSteer, Message: value})
 }
 
 func (s *Service) ApprovedPlanContext(ctx context.Context, sessionID, planID string) (string, error) {
@@ -211,8 +212,8 @@ func (s *Service) AwaitApproval(ctx context.Context, sessionID, agentID, agentTy
 	return s.awaitApproval(ctx, sessionID, agentID, agentType, run, call, pending)
 }
 
-func (s *Service) AwaitTeamApproval(ctx context.Context, sessionID, runID, goal string, call tool.Call, definition tool.Definition) (approvalResolution, error) {
-	return s.awaitTeamApproval(ctx, sessionID, runID, goal, call, definition)
+func (s *Service) AwaitTeamApproval(ctx context.Context, sessionID, runID, goal string, call tool.Call, policy agentruntime.ToolPolicy) (approvalResolution, error) {
+	return s.awaitTeamApproval(ctx, sessionID, runID, goal, call, policy)
 }
 
 // RegisterUserInput records a live interactive question. It returns false on

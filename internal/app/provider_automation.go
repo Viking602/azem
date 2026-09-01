@@ -5,15 +5,16 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"strings"
-	"time"
 
 	agentservice "github.com/Viking602/azem/internal/agent"
+	"github.com/Viking602/azem/internal/agentruntime"
+	cursordriver "github.com/Viking602/azem/internal/provider/cursor"
 	"github.com/Viking602/azem/internal/session"
 	hyagent "github.com/Viking602/venat/agent"
-	"github.com/Viking602/venat/api"
 	hyprovider "github.com/Viking602/venat/provider"
 	"github.com/Viking602/venat/tool"
 )
@@ -22,6 +23,17 @@ type automationObservedDriver struct {
 	tool.Driver
 	observePath func(string)
 	observeTool func(string)
+}
+
+func (d *automationObservedDriver) PolicyForCall(call tool.Call) agentruntime.ToolPolicy {
+	descriptor, err := agentservice.DescribeTool(d.Driver)
+	if err != nil {
+		return agentruntime.ToolPolicy{
+			Effect: agentruntime.ToolEffectExternalSideEffect, RequiresApproval: true,
+			RequiresActionTask: true, RiskLevel: "high",
+		}
+	}
+	return descriptor.PolicyForCall(call)
 }
 
 func (d *automationObservedDriver) Execute(ctx context.Context, call tool.Call, sink tool.UpdateSink) (tool.Result, error) {
@@ -48,6 +60,9 @@ func (r *ProviderRuntime) startAutomation(ctx context.Context, request TurnReque
 	if automation == nil || strings.TrimSpace(automation.Kind) == "" || strings.TrimSpace(automation.Version) == "" || strings.TrimSpace(automation.WorkspaceRoot) == "" || strings.TrimSpace(automation.Instructions) == "" {
 		return nil, hyagent.Engine{}, fmt.Errorf("automation runtime profile is incomplete")
 	}
+	if err := r.ensureAutomationSession(ctx, request, automation.Kind); err != nil {
+		return nil, hyagent.Engine{}, err
+	}
 	account, modelID, contextWindow, driver, err := r.resolveDriver(ctx, request.Provider, request.Model, request.Reasoning)
 	if err != nil {
 		return nil, hyagent.Engine{}, err
@@ -65,20 +80,17 @@ func (r *ProviderRuntime) startAutomation(ctx context.Context, request TurnReque
 	metadata["automation_version"] = automation.Version
 	executionPolicy := agentservice.RunExecutionPolicy{
 		AgentVersion: automation.Version,
-		Governance: api.GovernancePolicy{Budget: api.Budget{
+		Governance: agentruntime.GovernancePolicy{Budget: agentruntime.Budget{
 			MaxTokens: automation.Budget.MaxTokens, MaxToolCalls: automation.Budget.MaxToolCalls,
 			MaxRuntime: automation.Budget.MaxWallClock,
 		}},
 		Budget: &automation.Budget,
 	}
-	if r.cfg.Retry.Enabled {
-		executionPolicy.RetryPolicy = api.RetryPolicy{MaxAttempts: r.cfg.Retry.MaxRetries + 1, Backoff: r.cfg.Retry.BaseDelayDuration, MaxBackoff: r.cfg.Retry.MaxDelayDuration}
-	}
 	run, err := r.coding.StartRunWithMetadata(ctx, request.Prompt, metadata, executionPolicy)
 	if err != nil {
 		return nil, hyagent.Engine{}, err
 	}
-	durable, err := r.coding.Runner().Run(ctx, run.RunID)
+	durable, err := r.coding.LoadRun(ctx, run.RunID)
 	if err != nil {
 		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, err.Error(), err)
 		return nil, hyagent.Engine{}, err
@@ -89,7 +101,7 @@ func (r *ProviderRuntime) startAutomation(ctx context.Context, request TurnReque
 	for key, value := range metadata {
 		durable.Metadata[key] = value
 	}
-	if err := r.coding.Runner().SaveRun(ctx, durable); err != nil {
+	if err := r.coding.SaveRun(ctx, durable); err != nil {
 		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, err.Error(), err)
 		return nil, hyagent.Engine{}, err
 	}
@@ -101,10 +113,33 @@ func (r *ProviderRuntime) startAutomation(ctx context.Context, request TurnReque
 	return builtRun, engine, nil
 }
 
+func (r *ProviderRuntime) ensureAutomationSession(ctx context.Context, request TurnRequest, title string) error {
+	r.mu.RLock()
+	host := r.host
+	r.mu.RUnlock()
+	if host == nil || host.Sessions() == nil {
+		return nil
+	}
+	sessions := host.Sessions()
+	if _, err := sessions.LoadSession(ctx, request.SessionID); err == nil {
+		return nil
+	} else if !errors.Is(err, session.ErrSessionNotFound) {
+		return fmt.Errorf("load automation session: %w", err)
+	}
+	if _, err := sessions.Ensure(ctx, session.Session{
+		ID: request.SessionID, Title: title, ProviderID: request.Provider, ModelID: request.Model,
+		Reasoning: request.Reasoning, AgentMode: "single",
+	}); err != nil {
+		return fmt.Errorf("create automation session: %w", err)
+	}
+	if err := sessions.SetArchived(ctx, request.SessionID, true); err != nil {
+		return fmt.Errorf("archive automation session: %w", err)
+	}
+	return nil
+}
+
 func (r *ProviderRuntime) buildAutomationRun(ctx context.Context, request TurnRequest, run *agentservice.Run, accountID, modelID string, contextWindow int, driver hyprovider.Driver) (*agentservice.Run, hyagent.Engine, error) {
 	automation := request.automation
-	usageBudget := &providerUsageBudget{maxTokens: automation.Budget.MaxTokens}
-	driver = &budgetedProviderDriver{inner: driver, budget: usageBudget}
 	budgetConfig, err := calculateContextBudget(modelID, contextWindow, 0, r.cfg.Agents.Context)
 	if err != nil {
 		return nil, hyagent.Engine{}, err
@@ -114,6 +149,9 @@ func (r *ProviderRuntime) buildAutomationRun(ctx context.Context, request TurnRe
 	r.mu.RUnlock()
 	if subagentInitErr != nil {
 		return nil, hyagent.Engine{}, subagentInitErr
+	}
+	if host == nil {
+		return nil, hyagent.Engine{}, fmt.Errorf("automation host coordinator is unavailable")
 	}
 	workspaceDrivers, err := r.coding.WorkspaceDrivers(ctx, automation.WorkspaceRoot)
 	if err != nil {
@@ -166,6 +204,7 @@ func (r *ProviderRuntime) buildAutomationRun(ctx context.Context, request TurnRe
 		}
 	}
 	toolNames := toolDriverNames(drivers)
+	wireDefinitions := tool.NewBus(drivers...).Definitions()
 	instructionDigest := sha256.Sum256([]byte(automation.Instructions))
 	instructionFingerprint := hex.EncodeToString(instructionDigest[:])
 	maxOutputTokens := r.modelMaxOutputTokens(request.Provider, modelID)
@@ -175,7 +214,10 @@ func (r *ProviderRuntime) buildAutomationRun(ctx context.Context, request TurnRe
 	}
 	spec := hyagent.Spec{
 		Instructions: automation.Instructions, Model: modelID, Tools: toolNames, MaxTokens: maxOutputTokens,
-		LoopPolicy: hyagent.LoopPolicy{UnlimitedIterations: true, MaxWallClock: automation.Budget.MaxWallClock, ContextTokenTarget: hardContextTarget},
+		LoopPolicy: hyagent.LoopPolicy{
+			UnlimitedIterations: true,
+			ContextTokenTarget:  hardContextTarget,
+		},
 	}
 	request.History = []session.Block{{Kind: "user", RunID: run.RunID, Title: "Security scan", Content: request.Prompt, State: "submitted"}}
 	contextManager := turnContext{
@@ -188,13 +230,20 @@ func (r *ProviderRuntime) buildAutomationRun(ctx context.Context, request TurnRe
 	staticPayload, err := json.Marshal(struct {
 		Kind, Version, Provider, Account, Model, Reasoning, Instructions string
 		Tools                                                            any
-	}{automation.Kind, automation.Version, request.Provider, accountID, modelID, request.Reasoning, instructionFingerprint, tool.NewBus(drivers...).Definitions()})
+	}{automation.Kind, automation.Version, request.Provider, accountID, modelID, request.Reasoning, instructionFingerprint, wireDefinitions})
+	if err != nil {
+		return nil, hyagent.Engine{}, err
+	}
+	toolSchemaPayload, err := json.Marshal(wireDefinitions)
 	if err != nil {
 		return nil, hyagent.Engine{}, err
 	}
 	staticDigest := sha256.Sum256(staticPayload)
 	contextManager.staticIdentity = hex.EncodeToString(staticDigest[:])
-	durable, err := r.coding.Runner().Run(ctx, run.RunID)
+	toolSchemaFingerprint := hashText(string(toolSchemaPayload))
+	toolSetHash := hashText(strings.Join(toolNames, "\x00"))
+	toolProfileHash := hashText(toolSetHash + "\x00" + toolSchemaFingerprint + "\x00" + contextManager.staticIdentity)
+	durable, err := r.coding.LoadRun(ctx, run.RunID)
 	if err != nil {
 		return nil, hyagent.Engine{}, err
 	}
@@ -202,37 +251,52 @@ func (r *ProviderRuntime) buildAutomationRun(ctx context.Context, request TurnRe
 		durable.Metadata = map[string]string{}
 	}
 	durable.Metadata["automation_identity"] = contextManager.staticIdentity
-	if err := r.coding.Runner().SaveRun(ctx, durable); err != nil {
+	if err := r.coding.SaveRun(ctx, durable); err != nil {
 		return nil, hyagent.Engine{}, err
 	}
-	definition := agentDefinitionForSpec(run.HolderID, "Azem Security", "Background security analysis agent", spec,
-		api.GovernancePolicy{Budget: api.Budget{MaxTokens: automation.Budget.MaxTokens, MaxToolCalls: automation.Budget.MaxToolCalls, MaxRuntime: automation.Budget.MaxWallClock}},
-		map[string]string{"role": "security", "provider": request.Provider, "runtime_identity": contextManager.staticIdentity, "automation_kind": automation.Kind})
+	if host != nil && host.Sessions() != nil {
+		driver = &meteredProviderDriver{
+			inner: driver, store: host.Sessions(), host: host, sessionID: request.SessionID,
+			runID: run.RunID, kind: "automation", provider: request.Provider, model: modelID, transport: driver.Metadata().Name,
+			reportInputTokens: contextManager.providerPressure.observeInputTokens,
+		}
+	}
+	driver = retryProviderDriver(ctx, host, request.SessionID, run.RunID, request.Provider, r.cfg.Retry, driver)
 	toolBus := tool.NewBus(drivers...)
-	engine, err := materializeAgentDefinition(ctx, r.coding, definition, spec, hyagent.BuildDeps{
+	engine, err := hyagent.Build(spec, hyagent.BuildDeps{
 		Providers: hyprovider.Single(driver), Skills: r.coding.SkillSnapshot().Registry, Tools: toolBus, ContextManager: contextManager,
 	})
 	if err != nil {
 		return nil, hyagent.Engine{}, err
 	}
+	if err := r.coding.SealExecutionProfile(ctx, run, agentruntime.ExecutableProfile{
+		Provider: request.Provider, AccountID: accountID, RawModel: firstNonempty(request.Model, modelID),
+		Model: modelID, Reasoning: durableReasoningIdentity(request.Reasoning), ActiveSkills: []string{},
+		ToolSetHash: toolSetHash, ToolProfileHash: toolProfileHash, DisableSubagents: request.DisableSubagents,
+		StaticIdentity: contextManager.staticIdentity, WorkspaceAnchor: canonicalWorkspaceAnchor(automation.WorkspaceRoot),
+		PromptFingerprint: instructionFingerprint, ToolSchemaFingerprint: toolSchemaFingerprint,
+	}); err != nil {
+		return nil, hyagent.Engine{}, err
+	}
+	engine.ToolMode = tool.ModeParallel
 	parallelToolCalls := true
 	engine.PromptCacheKey = request.SessionID
 	engine.ParallelToolCalls = &parallelToolCalls
-	engine.NativeToolHost = newAttachmentRequestHost(host)
+	var cursorHost cursordriver.ExecHost
 	if request.Provider == "cursor" {
-		engine.NativeToolHost = newCursorExecHost(host, automation.WorkspaceRoot, request.SessionID, run.RunID, run.RunID, "", toolBus)
+		cursorHost = newCursorExecHost(host, automation.WorkspaceRoot, request.SessionID, run.RunID, run.RunID, "", toolBus)
 	}
+	engine = bindProviderRequestScope(engine, providerAttachmentRoot(host), cursorHost)
 	if host != nil && !request.DisableSubagents {
 		sessionID, parentRunID := request.SessionID, run.RunID
 		engine.OutputGuardrails = append(engine.OutputGuardrails, pendingBackgroundChildrenGuardrail(func() []backgroundChildStatus {
 			return backgroundChildStatuses(host.UnfinishedChildren(sessionID, parentRunID))
 		}))
 	}
+	engine = host.BindProviderEngine(engine)
 	return run, engine, nil
 }
 
 func cloneAutomationMetadata(values map[string]string) map[string]string {
 	return maps.Clone(values)
 }
-
-var _ = time.Second

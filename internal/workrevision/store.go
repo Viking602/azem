@@ -130,19 +130,24 @@ func (s *Store) SaveGuidanceDecision(ctx context.Context, decision GuidanceDecis
 	return s.save(ctx, session.InternalArtifactKindPrefix+"guidance_decision_v1:"+shortID(decision.IntentID), decision.ID, decision)
 }
 
-func (s *Store) requireIntentRun(ctx context.Context, intentID string) error {
+func (s *Store) Intent(ctx context.Context, intentID string) (session.ActionIntentV1, error) {
 	artifact, err := s.sessions.LoadLatestArtifactByKind(ctx, s.sessionID, session.InternalArtifactKindPrefix+"action_intent_v1:"+shortID(intentID))
 	if err != nil {
-		return fmt.Errorf("work revision: resolve intent payload: %w", err)
+		return session.ActionIntentV1{}, fmt.Errorf("work revision: resolve intent payload: %w", err)
 	}
 	var intent session.ActionIntentV1
 	if err := decodeStrict(artifact.Payload, &intent); err != nil {
-		return fmt.Errorf("work revision: decode intent payload: %w", err)
+		return session.ActionIntentV1{}, fmt.Errorf("work revision: decode intent payload: %w", err)
 	}
 	if intent.ID != intentID || intent.SessionID != s.sessionID || intent.RunID != s.runID {
-		return fmt.Errorf("work revision: intent payload is not bound to this session and run")
+		return session.ActionIntentV1{}, fmt.Errorf("work revision: intent payload is not bound to this session and run")
 	}
-	return nil
+	return intent, nil
+}
+
+func (s *Store) requireIntentRun(ctx context.Context, intentID string) error {
+	_, err := s.Intent(ctx, intentID)
+	return err
 }
 
 func (s *Store) SaveVerificationPlan(ctx context.Context, plan session.VerificationPlanV1) error {

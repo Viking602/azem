@@ -39,7 +39,7 @@ func (d *todoDriver) Definition() tool.Definition {
 			"op": {Type: "string", Enum: []string{"init", "view", "start", "done", "append", "cancel", "remove"}}, "expected_revision": {Type: "integer"},
 			"goal": {Type: "string"}, "phases": {Type: "array", Items: &phaseSchema}, "item_id": {Type: "string"}, "phase_id": {Type: "string"}, "content": {Type: "string"},
 		}, AdditionalProperties: &additional,
-	}, EffectType: tool.EffectWrite, RequiresApproval: false, RequiresActionTask: false, RiskLevel: "low", Metadata: map[string]string{"approval": "allow"}, PolicyTags: []string{"session", "todo"}}
+	}}
 }
 
 func (d *todoDriver) Execute(ctx context.Context, call tool.Call, _ tool.UpdateSink) (tool.Result, error) {

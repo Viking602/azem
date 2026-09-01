@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Viking602/venat/api"
+	"github.com/Viking602/azem/internal/agentruntime"
 
 	"github.com/Viking602/azem/internal/auth"
 	"github.com/Viking602/azem/internal/auth/grok"
@@ -47,6 +47,7 @@ const (
 	ActionPinSession               ActionKind = "pin_session"
 	ActionArchiveSession           ActionKind = "archive_session"
 	ActionArchiveInactiveSessions  ActionKind = "archive_inactive_sessions"
+	ActionRemoveProject            ActionKind = "remove_project"
 	ActionMarkSessionUnread        ActionKind = "mark_session_unread"
 	ActionCompact                  ActionKind = "compact"
 	ActionResolveApproval          ActionKind = "resolve_approval"
@@ -155,7 +156,7 @@ type ActionExecutor interface {
 }
 
 type ReconcileResolver interface {
-	ResolveReconcileAttempt(context.Context, string, api.ActionAttemptStatus, string) error
+	ResolveReconcileAttempt(context.Context, string, agentruntime.ActionAttemptStatus, json.RawMessage) error
 }
 
 func (s *Service) AttachReconcileResolver(resolver ReconcileResolver) {
@@ -898,18 +899,20 @@ func (s *Service) personaCatalog() []AgentCatalogEntry {
 	return entries
 }
 
-func reconciledStatus(value string) (api.ActionAttemptStatus, error) {
+func reconciledStatus(value string) (agentruntime.ActionAttemptStatus, error) {
 	switch strings.ToLower(value) {
 	case "succeeded", "success", "completed":
-		return api.ActionAttemptSucceeded, nil
+		return agentruntime.ActionAttemptSucceeded, nil
 	case "failed", "failure":
-		return api.ActionAttemptFailed, nil
+		return agentruntime.ActionAttemptFailed, nil
 	case "cancelled", "canceled":
-		return api.ActionAttemptCancelled, nil
+		return agentruntime.ActionAttemptCancelled, nil
 	case "timeout", "timed_out", "timed out":
-		return api.ActionAttemptTimeout, nil
+		return agentruntime.ActionAttemptTimeout, nil
+	case "retry":
+		return agentruntime.ActionAttemptRetry, nil
 	default:
-		return "", fmt.Errorf("reconcile decision must be succeeded, failed, timed out, or cancelled")
+		return "", fmt.Errorf("reconcile decision must be succeeded, failed, timed out, cancelled, or retry")
 	}
 }
 
@@ -1119,7 +1122,7 @@ func (s *Service) RememberProject(ctx context.Context, workspace string) error {
 	if s.sessions == nil {
 		return fmt.Errorf("session store is unavailable")
 	}
-	if err := s.sessions.TouchProject(ctx, workspace); err != nil {
+	if err := s.sessions.RestoreProject(ctx, workspace); err != nil {
 		return err
 	}
 	return s.emitSessionList(ctx)

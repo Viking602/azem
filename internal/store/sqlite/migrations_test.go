@@ -709,3 +709,62 @@ func assertSchema20SemanticMigration(t *testing.T, ctx context.Context, provider
 		}
 	}
 }
+
+func TestMigrationV28AddsProjectVisibilityAndRepairsIncompleteSubagents(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "project-visibility.db")
+	db, err := sql.Open("sqlite", sqliteDSN(path, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for version := 1; version <= 27; version++ {
+		if _, err := db.ExecContext(ctx, migrations[version-1]); err != nil {
+			t.Fatalf("apply fixture migration %d: %v", version, err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO desktop_projects(workspace,updated_at) VALUES('/workspace',42);
+		INSERT INTO subagent_runs(id,session_id,parent_run_id,subagent_type,state,summary,started_at)
+			VALUES('stale-child','session','parent','review','running','running',42);
+		PRAGMA user_version=27`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	provider, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var visible, updatedAt int64
+	if err := provider.db.QueryRowContext(ctx, `SELECT visible,updated_at FROM desktop_projects WHERE workspace='/workspace'`).Scan(&visible, &updatedAt); err != nil {
+		t.Fatal(err)
+	}
+	if visible != 1 || updatedAt != 42 {
+		t.Fatalf("migrated project visible=%d updated_at=%d", visible, updatedAt)
+	}
+	var state, summary, runError string
+	var finishedAt int64
+	if err := provider.db.QueryRowContext(ctx, `SELECT state,summary,error,finished_at FROM subagent_runs WHERE id='stale-child'`).Scan(
+		&state, &summary, &runError, &finishedAt,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if state != "interrupted" || summary != "interrupted by process restart" ||
+		runError != "interrupted by process restart" || finishedAt == 0 {
+		t.Fatalf("repaired subagent state=%q summary=%q error=%q finished_at=%d", state, summary, runError, finishedAt)
+	}
+	if err := provider.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close(ctx)
+	if err := reopened.db.QueryRowContext(ctx, `SELECT visible FROM desktop_projects WHERE workspace='/workspace'`).Scan(&visible); err != nil {
+		t.Fatal(err)
+	}
+	if visible != 1 {
+		t.Fatalf("reopened project visible=%d", visible)
+	}
+}

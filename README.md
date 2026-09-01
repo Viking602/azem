@@ -20,7 +20,7 @@ Azem is designed for coding work that needs more than a chat window. It combines
 
 | Capability | What it provides |
 |---|---|
-| **Terminal and desktop workflows** | A fast Bubble Tea TUI plus a Wails desktop workspace with frame-paced streaming output, inline approvals and diffs, Agent inspection, recovery, and role-model settings |
+| **Terminal and desktop workflows** | A fast Bubble Tea TUI and native GPUI desktop with virtualized streaming output, inline approvals and diffs, Agent inspection, recovery, and role-model settings |
 | **Governed execution** | Prompt, Auto Review, and YOLO approval modes for file, shell, and external actions |
 | **Durable state** | SQLite-backed sessions, runs, approvals, leases, side-effect reconciliation, and Team resume |
 | **Multiple providers** | ChatGPT through Codex-compatible OAuth, Grok through API or CLI-proxy transport, Cursor through its native agent service, and configurable llmux providers |
@@ -38,6 +38,7 @@ Requirements:
 - Go 1.25.8 or later; the project recommends the Go 1.25.12 toolchain
 - A supported ChatGPT or Grok account or existing credential
 - Git when using subagent worktree isolation
+- Rust 1.97.1 when building the native GPUI desktop client; `gpui/rust-toolchain.toml` selects it automatically
 
 ```bash
 git clone https://github.com/Viking602/azem.git
@@ -45,28 +46,46 @@ cd azem
 make build
 ```
 
-To build the Wails desktop app, install [Bun](https://bun.sh/) and run:
+To build the native GPUI desktop and its workspace daemon on macOS, install
+[Bun](https://bun.sh/) for the AST/LSP runtime packages and run:
 
 ```bash
-make gui
-open dist/Azem.app
+make gpui
+open dist/Azem-GPUI.app
 ```
 
-For Windows, build the native executable with:
+The GPUI window is an IPC client. Each workspace has one authenticated local
+`azem-daemon` process that owns the Go runtime and SQLite stores. Closing or
+restarting the window disconnects only the renderer; active runs continue and
+the next window restores a durable snapshot plus bounded event and terminal
+replay. `make gui` is retained as an alias for `make gpui`.
 
-```powershell
-make gui-windows
-.\dist\windows-amd64\Azem.exe
-```
+Azem keeps one GPUI window. Selecting a conversation in another project
+detaches the renderer from the current workspace daemon and reconnects that
+same window to the conversation's owning daemon; background work in the old
+workspace continues.
 
-Windows requires the WebView2 Runtime and uses PowerShell for agent and
-background commands. PowerShell 7 (`pwsh.exe`) is preferred when installed;
-the built-in Windows PowerShell is the fallback. Bash hooks additionally
-require Git Bash.
+The native client provides an integrated macOS titlebar, conversation/workspace
+sidebar, durable project/session history, centered new-task composer, full
+provider/model picker, virtualized messages, foldable reasoning/tool/diff
+trails, the floating Environment panel, editor/files, changes, structured PR
+views, security, usage, and a rounded native Settings modal. The Settings model
+catalog uses the complete MIT-licensed models.dev provider-logo set, quota
+state, provider/model enable controls, capability metadata, and independently
+scrollable provider and compact model lists.
 
-The desktop app and TUI share the same Go runtime, SQLite sessions, approval policy, model routes, Skills, subagents, and recovery state. The React UI receives a bounded event projection; it does not expose arbitrary shell or filesystem bindings.
+In the native composer, type `/` for commands and enabled Skills or `@` to find files
+in the current project. Arrow keys navigate, Enter or Tab inserts a choice,
+and Escape or clicking outside closes the list without sending the draft.
+Skills use the existing runtime activation contract; file references insert
+project-relative paths, not automatically uploaded file contents.
 
-Desktop global search (`Cmd+K` on macOS or `Ctrl+K` elsewhere) searches application actions, every settings control and configured model/MCP/Skill/plugin name, session titles, and durable user/assistant conversation content across projects. Settings results open and focus the exact control. Conversation-content results return a short SQLite FTS snippet and jump to the durable matching message; cross-project results open the owning project first. Input is debounced, stale responses are discarded, and complete transcripts are never copied into the frontend search index.
+The native desktop and TUI share the same Go runtime, SQLite sessions, approval
+policy, model routes, Skills, subagents, and recovery state. GPUI reaches the
+closed desktop operation set through an owner-only, authenticated local IPC
+protocol; the renderer exposes no arbitrary shell or filesystem binding.
+
+Desktop global search (`Cmd+K` on macOS or `Ctrl+K` elsewhere) searches application actions, every settings control and configured model/MCP/Skill/plugin name, session titles, and durable user/assistant conversation content across projects. Settings results open and focus the exact control. Conversation-content results return a short SQLite FTS snippet and jump to the durable matching message; cross-project results open the owning project first. Input is debounced, stale responses are discarded, and complete transcripts are never copied into the in-memory search index.
 
 On macOS, Azem follows the active system HTTP, HTTPS, and SOCKS proxy settings
 automatically, including the bypass list. This matches the network path used by
@@ -108,7 +127,7 @@ The desktop **Pull Requests** workspace uses the authenticated [GitHub CLI](http
 
 ### 2. Start it in a project
 
-The desktop app keeps a durable catalog of projects and restores the most recently opened project. `--workspace` selects one project for that window without rewriting the user configuration.
+The desktop app keeps a durable catalog of projects and restores the most recently opened project. A project's context menu can remove it from Azem without deleting workspace files or owned conversations; opening the path again restores it. `--workspace` selects the initial project for the single window without rewriting the user configuration.
 
 ```bash
 cd /path/to/your/project
@@ -185,7 +204,7 @@ Azem keeps review context in the conversation instead of hiding it behind raw to
 - **Inline file diffs** turn successful patch edits and newly created files into collapsible transcript blocks. Each block identifies the affected file, reports `+added/-deleted` totals, and colorizes changed lines.
 - **Compact tool activity** summarizes file reads, searches, tests, shell commands, edits, and failures. Large patch bodies and complete file contents stay out of routine status messages.
 - **Subagent visibility** applies the same summaries and file-diff presentation when inspecting child-agent activity.
-- **Context visibility** shows startup occupancy before the first model call, then calibrates the total from provider usage. The segmented meter and `/context` breakdown separate core instructions, Skills, built-in tools, MCP tools, conversation history, and provider framing.
+- **Context visibility** is populated when the current project's first turn is submitted, before the model call, then calibrates the total from provider usage. Startup opens a fresh conversation without reading every project's `AGENTS.md`. The segmented meter and `/context` breakdown separate core instructions, Skills, built-in tools, MCP tools, conversation history, and provider framing; when cache telemetry is reported, the composer popover shows only the cache hit rate.
 - **Deterministic context archiving** keeps the three most recent complete user turns verbatim, archives older complete turns as a durable source artifact, and exposes policy, canonical high-water, reason, segments, and archive metadata in the Inspector. `/compact` and `/rebuild` use the same host kernel.
 
 ## How It Works
@@ -193,7 +212,7 @@ Azem keeps review context in the conversation instead of hiding it behind raw to
 ```mermaid
 flowchart LR
     U[Terminal UI] --> A[Application runtime]
-    D[Wails desktop UI] --> A
+    D[Native GPUI desktop] --> A
     A --> P[ChatGPT / Grok / Cursor subscriptions or llmux providers]
     A --> G[Approval and tool governance]
     G --> T[Files, tests, and shell]
@@ -210,8 +229,9 @@ Each turn is routed through the application runtime, which selects a provider, a
 
 For ChatGPT, Azem retries transient stream-opening and transport failures up to five times when no response output has been emitted. This includes connection resets, temporary network errors, interrupted streams, and selected TLS transport failures. Cancellation, deadlines, invalid requests, and certificate validation errors are not retried. After any output has been emitted, Azem does not replay the request, avoiding duplicate partial responses or tool activity.
 
-llmux transports disable their internal retry loop and use the same Venat retry
-boundary, so Azem has one owner for retry timing and duplicate-output safety.
+llmux transports disable their internal retry loop and use the same Azem
+pre-stream retry boundary. Durable model/tool attempts separately prevent an
+unknown or already-settled effect from being replayed after restart.
 
 ## Usage
 
@@ -663,6 +683,9 @@ Azem's approvals and persistent action boundaries help reduce accidental operati
 - In the TUI, `workspace.root` sets the initial shell directory. Desktop windows
   use the selected project from the SQLite catalog instead. Neither mode is an
   OS sandbox: shell commands can still access paths outside the project.
+- GPUI uses an owner-only local socket or named pipe plus a per-workspace
+  HMAC token. Renderer close is not cancellation authority: the daemon keeps
+  active work until normal completion or an explicit authenticated stop.
 - `allow_write: false` removes built-in write tools but cannot stop an approved shell command from writing files.
 - `allow_network` relies on tools declaring network use and does not enforce OS-level network isolation.
 - `shell_policy: allow` and YOLO mode remove important confirmation points.
@@ -682,13 +705,16 @@ For strict isolation, run Azem inside a container, virtual machine, or restricte
 
 ```text
 cmd/azem/               Terminal application entry point
-cmd/azem-gui/           Wails desktop application entry point
-frontend/               React desktop interface and Wails bindings
+cmd/azem-daemon/        Workspace-scoped runtime daemon for native IPC clients
+gpui/                   Rust GPUI desktop client and shared generated IPC contracts
+runtime-js/             Bun packages used by AST and LSP coding tools
 internal/agent/         Tool governance, persistent runs, and team agents
 internal/app/           Application orchestration, providers, and subagents
 internal/auth/          OAuth, credential import, and credential storage
 internal/config/        Configuration, paths, roles, and personas
-internal/desktop/       Bounded Wails bridge and desktop lifecycle
+internal/desktop/       Bounded desktop operations and workspace services
+internal/daemon/        Workspace daemon composition, endpoint publication, and shutdown
+internal/desktopipc/    Authenticated framed IPC, replay, binary streaming, and dispatch
 internal/desktop/termhost/ Human-only PTY host for the embedded desktop terminal
 internal/githubpr/      GitHub CLI projection, mutations, and PR monitor
 internal/authbroker/    Multi-process credential snapshots, refresh, account pools, and usage
@@ -730,10 +756,11 @@ Run the complete Go suite against declared module dependencies:
 GOWORK=off go test ./...
 ```
 
-Run frontend and desktop checks:
+Run native GPUI protocol, daemon, Rust, and UI-model checks (`make test-gui` is
+an alias for this command):
 
 ```bash
-make test-gui
+make test-gpui
 ```
 
 Run the architecture policy gate:

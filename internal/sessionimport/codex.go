@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/azem/internal/session"
 	"github.com/Viking602/venat/message"
 	_ "modernc.org/sqlite"
@@ -244,7 +245,7 @@ func (importer *Importer) parseCodex(ctx context.Context, info Info, targetSessi
 			if summary != "" {
 				modelMessage := message.NewText(message.RoleUser, "[Imported Codex compaction]\n"+summary)
 				modelMessage.Kind = message.KindCompactionSummary
-				modelMessage.CreatedAt = createdAt
+				agentruntime.SetMessageCreatedAt(&modelMessage, createdAt)
 				block, blockErr := importedBlock(modelMessage, nil, "import:codex:"+info.ID)
 				if blockErr != nil {
 					err = blockErr
@@ -309,7 +310,7 @@ func (importer *Importer) convertCodexResponse(targetID, sourceID string, line i
 	typeName := stringValue(payload["type"])
 	runID := "import:codex:" + sourceID
 	makeEntry := func(modelMessage message.Message, attachments []session.Attachment, suffix string) ([]codexConverted, error) {
-		modelMessage.CreatedAt = createdAt
+		agentruntime.SetMessageCreatedAt(&modelMessage, createdAt)
 		block, err := importedBlock(modelMessage, attachments, runID)
 		if err != nil {
 			return nil, err
@@ -330,7 +331,7 @@ func (importer *Importer) convertCodexResponse(targetID, sourceID string, line i
 				return nil, err
 			}
 			parts = append(parts, inline...)
-			return makeEntry(message.Message{Role: message.RoleUser, Content: parts, Visibility: message.VisibilityShared}, attachments, "user")
+			return makeEntry(message.Message{Role: message.RoleUser, Content: parts}, attachments, "user")
 		}
 		if role == "assistant" {
 			inline, err := inlineImageParts(images)
@@ -338,7 +339,7 @@ func (importer *Importer) convertCodexResponse(targetID, sourceID string, line i
 				return nil, err
 			}
 			parts = append(parts, inline...)
-			value := message.Message{Role: message.RoleAssistant, Content: parts, Visibility: message.VisibilityShared}
+			value := message.Message{Role: message.RoleAssistant, Content: parts}
 			value.Response.Model = model
 			return makeEntry(value, nil, "assistant")
 		}
@@ -352,7 +353,7 @@ func (importer *Importer) convertCodexResponse(targetID, sourceID string, line i
 			}
 		}
 		if len(parts) > 0 {
-			return makeEntry(message.Message{Role: message.RoleAssistant, Content: parts, Visibility: message.VisibilityShared}, nil, "reasoning")
+			return makeEntry(message.Message{Role: message.RoleAssistant, Content: parts}, nil, "reasoning")
 		}
 	case "function_call", "custom_tool_call":
 		callID := firstText(stringValue(payload["call_id"]), stringValue(payload["id"]))
@@ -362,7 +363,7 @@ func (importer *Importer) convertCodexResponse(targetID, sourceID string, line i
 		}
 		toolNames[callID] = name
 		arguments := codexArguments(firstValue(payload["arguments"], payload["input"]))
-		return makeEntry(message.Message{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{{ID: callID, Name: name, Arguments: arguments}}, Visibility: message.VisibilityShared}, nil, "call")
+		return makeEntry(message.Message{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{{ID: callID, Name: name, Arguments: arguments}}}, nil, "call")
 	case "function_call_output", "custom_tool_call_output":
 		return makeEntry(codexToolResult(payload, toolNames, false, createdAt), nil, "result")
 	case "web_search_call", "tool_search_call":
@@ -375,7 +376,7 @@ func (importer *Importer) convertCodexResponse(targetID, sourceID string, line i
 			name = "tool_search"
 		}
 		toolNames[callID] = name
-		return makeEntry(message.Message{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{{ID: callID, Name: name, Arguments: codexArguments(firstValue(payload["action"], payload["arguments"]))}}, Visibility: message.VisibilityShared}, nil, "call")
+		return makeEntry(message.Message{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{{ID: callID, Name: name, Arguments: codexArguments(firstValue(payload["action"], payload["arguments"]))}}}, nil, "call")
 	case "tool_search_output":
 		return makeEntry(codexToolResult(payload, toolNames, stringValue(payload["status"]) == "failed", createdAt), nil, "result")
 	}
@@ -410,7 +411,7 @@ func (importer *Importer) convertCodexEvent(targetID, sourceID string, line int,
 		}
 		value := message.NewText(message.RoleAssistant, text)
 		if typeName == "agent_reasoning" {
-			value = message.Message{Role: message.RoleAssistant, Content: []message.ContentPart{message.ReasoningPart(text, "")}, Visibility: message.VisibilityShared}
+			value = message.Message{Role: message.RoleAssistant, Content: []message.ContentPart{message.ReasoningPart(text, "")}}
 		}
 		value.Response.Model = model
 		return importer.codexEventMessage(targetID, sourceID, line, value, createdAt, used)
@@ -425,7 +426,7 @@ func (importer *Importer) convertCodexEvent(targetID, sourceID string, line int,
 			return nil, nil
 		}
 		toolNames[callID] = name
-		value := message.Message{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{{ID: callID, Name: name, Arguments: codexArguments(payload["arguments"])}}, Visibility: message.VisibilityShared}
+		value := message.Message{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{{ID: callID, Name: name, Arguments: codexArguments(payload["arguments"])}}}
 		return importer.codexEventMessage(targetID, sourceID, line, value, createdAt, used)
 	}
 	if typeName == "dynamic_tool_call_response" || typeName == "web_search_end" {
@@ -440,7 +441,7 @@ func (importer *Importer) convertCodexEvent(targetID, sourceID string, line int,
 		converted := make([]codexConverted, 0, 2)
 		if typeName == "web_search_end" && toolNames[callID] == "" {
 			toolNames[callID] = name
-			call := message.Message{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{{ID: callID, Name: name, Arguments: codexArguments(firstValue(payload["action"], payload["query"]))}}, Visibility: message.VisibilityShared}
+			call := message.Message{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{{ID: callID, Name: name, Arguments: codexArguments(firstValue(payload["action"], payload["query"]))}}}
 			callEntry, err := importer.codexEventMessage(targetID, sourceID, line, call, createdAt, used)
 			if err != nil {
 				return nil, err
@@ -466,7 +467,7 @@ func (importer *Importer) convertCodexEvent(targetID, sourceID string, line int,
 		}
 		name := server + "/" + toolName
 		toolNames[callID] = name
-		call := message.Message{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{{ID: callID, Name: name, Arguments: codexArguments(invocation["arguments"])}}, Visibility: message.VisibilityShared}
+		call := message.Message{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{{ID: callID, Name: name, Arguments: codexArguments(invocation["arguments"])}}}
 		callEntry, err := importer.codexEventMessage(targetID, sourceID, line, call, createdAt, used)
 		if err != nil {
 			return nil, err
@@ -488,7 +489,7 @@ func (importer *Importer) convertCodexEvent(targetID, sourceID string, line int,
 }
 
 func (importer *Importer) codexEventMessage(_ string, sourceID string, line int, value message.Message, createdAt time.Time, used map[string]int) ([]codexConverted, error) {
-	value.CreatedAt = createdAt
+	agentruntime.SetMessageCreatedAt(&value, createdAt)
 	block, err := importedBlock(value, nil, "import:codex:"+sourceID)
 	if err != nil {
 		return nil, err
@@ -543,7 +544,7 @@ func codexToolResult(payload map[string]any, toolNames map[string]string, failed
 	callID := firstText(stringValue(payload["call_id"]), stringValue(payload["id"]))
 	result := message.ToolResult{ToolCallID: callID, Name: firstText(toolNames[callID], "unknown"), Content: stringifyValue(firstValue(payload["output"], payload["tools"])), IsError: failed}
 	value := message.NewToolResult(result)
-	value.CreatedAt = createdAt
+	agentruntime.SetMessageCreatedAt(&value, createdAt)
 	return value
 }
 

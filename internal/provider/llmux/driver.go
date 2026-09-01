@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"time"
 
 	sdk "github.com/Viking602/llmux"
 	"github.com/Viking602/llmux/provider/anthropic"
@@ -42,9 +41,6 @@ type Driver struct {
 	providerID      string
 	models          []string
 	reasoningEffort string
-	retryDelay      func(int) time.Duration
-	maxRetryDelay   time.Duration
-	retryObserver   hyprovider.RetryObserver
 	disableImages   bool
 }
 
@@ -80,17 +76,23 @@ func newProvider(config Config) (sdk.Provider, error) {
 	if backend == "" {
 		backend = config.ProviderID
 	}
-	if _, ok := compat.Lookup(config.ProviderID); ok && (config.Backend == "" || backend == "openai-compatible") {
+	if _, ok := compat.Lookup(config.ProviderID); ok && (config.Backend == "" || backend == "openai-compatible" || backend == "openai-responses" || backend == "open-responses") {
 		return compat.New(config.ProviderID, compat.Config{
 			APIKey: config.APIKey, BaseURL: config.BaseURL, Headers: config.Headers, Client: config.Client, Retry: retry,
 			DefaultMaxOutputTokens: config.MaxOutputTokens,
 		})
 	}
 	switch backend {
-	case "openai", "openai-compatible", "openai-completions", "openai-responses":
+	case "openai", "openai-compatible", "openai-completions":
 		return openai.New(openai.Config{
 			APIKey: config.APIKey, BaseURL: config.BaseURL, Headers: config.Headers, Client: config.Client, Retry: retry,
 			ProviderName: config.ProviderID, AllowEmptyAPIKey: config.AllowEmptyKey, APIKeyHeader: config.APIKeyHeader, APIKeyPrefix: config.APIKeyPrefix,
+		})
+	case "openai-responses", "open-responses":
+		return openai.New(openai.Config{
+			APIKey: config.APIKey, BaseURL: config.BaseURL, Headers: config.Headers, Client: config.Client, Retry: retry,
+			ProviderName: config.ProviderID, AllowEmptyAPIKey: config.AllowEmptyKey, APIKeyHeader: config.APIKeyHeader, APIKeyPrefix: config.APIKeyPrefix,
+			WireAPI: openai.Responses,
 		})
 	case "anthropic":
 		return anthropic.New(anthropic.Config{
@@ -115,15 +117,12 @@ func (d *Driver) Metadata() hyprovider.Metadata {
 	return hyprovider.Metadata{Name: "llmux:" + d.providerID, Models: append([]string(nil), d.models...), Version: "0.2.5"}
 }
 
-func (d *Driver) SetRetryObserver(observer hyprovider.RetryObserver) { d.retryObserver = observer }
-func (d *Driver) SetMaxRetryDelay(delay time.Duration)               { d.maxRetryDelay = delay }
-
 func (d *Driver) Stream(ctx context.Context, request hyprovider.Request) (hyprovider.Stream, error) {
 	if d.disableImages {
 		request.ExtraBody = cloneExtraBody(request.ExtraBody)
 		request.ExtraBody[disableImageInputExtraKey] = true
 	}
-	converted, names, err := convertRequest(request, d.reasoningEffort, d.providerID)
+	converted, names, err := convertRequestContext(ctx, request, d.reasoningEffort, d.providerID)
 	if err != nil {
 		return nil, err
 	}
@@ -134,16 +133,11 @@ func (d *Driver) Stream(ctx context.Context, request hyprovider.Request) (hyprov
 			return nil, mapError(err)
 		}
 	}
-	open := func() (hyprovider.Stream, error) {
-		stream, err := model.Stream(ctx, converted)
-		if err != nil {
-			return nil, mapError(err)
-		}
-		return &streamAdapter{inner: stream, names: names}, nil
+	stream, err := model.Stream(ctx, converted)
+	if err != nil {
+		return nil, mapError(err)
 	}
-	return hyprovider.OpenRetryingStream(ctx, open, hyprovider.StreamRetryOptions{
-		Delay: d.retryDelay, MaxDelay: d.maxRetryDelay, Observer: d.retryObserver,
-	})
+	return &streamAdapter{inner: stream, names: names}, nil
 }
 
 func cloneExtraBody(input map[string]any) map[string]any {
@@ -154,8 +148,4 @@ func cloneExtraBody(input map[string]any) map[string]any {
 	return cloned
 }
 
-var (
-	_ hyprovider.Driver                 = (*Driver)(nil)
-	_ hyprovider.RetryObservable        = (*Driver)(nil)
-	_ hyprovider.RetryDelayConfigurable = (*Driver)(nil)
-)
+var _ hyprovider.Driver = (*Driver)(nil)

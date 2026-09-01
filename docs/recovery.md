@@ -1,6 +1,6 @@
 # Recovery
 
-Last verified: 2026-08-15
+Last verified: 2026-08-31
 
 This guide covers the runtime recovery contract: which process may recover,
 what crash recovery restores, how interrupted work is represented, and which
@@ -17,11 +17,13 @@ bootstrap (`sqlitestore.AcquireRecoveryFence`, called from
 (`internal/store/sqlite/recovery_fence_unix.go`, `flock`-based) has two
 modes:
 
-- The first live process takes the lock exclusively, runs crash recovery,
-  then downgrades to a shared lock (`FinishRecovery`, called through
-  `Service.finishRuntimeRecovery` after recovery completes) and holds it for
-  its whole lifetime.
-- Every later process (a second project window, for example) waits for that
+- The first live process takes the lock exclusively. A dirty or missing marker
+  runs crash recovery before downgrading to a shared lock (`FinishRecovery`,
+  called through `Service.finishRuntimeRecovery`). A clean last shutdown skips
+  the recovery scan, marks the new process dirty, and immediately takes the
+  shared runtime lock. Only the last clean closer may publish the clean marker;
+  a crash therefore always leaves a recovery-required marker.
+- Every later process (a daemon for another project, for example) waits for that
   boundary and holds only a shared lock. `AcquireRecoveryFence` returns
   `shouldRecover == false`, so it never expires leases, interrupts
   Subagents, or quarantines provider requests owned by another live process
@@ -29,56 +31,73 @@ modes:
   recovery, one waiter takes over recovery instead of accepting a partial
   boundary.
 
-Session navigation between projects must not emit `SessionEnd`; background
-work owned by another window keeps running.
+Session navigation between projects must not emit `SessionEnd`; the single
+renderer detaches and background work owned by the previous daemon keeps
+running.
+Closing a GPUI renderer asks an idle workspace daemon to stop; an active run
+keeps the daemon alive. Explicit desktop Stop cancels main plus children.
+`azem daemon stop` refuses an active main run unless `--include-active` is
+supplied. Venat's durable runtime is execution state inside that daemon, not a
+second daemon/session owner.
+
 
 ## Crash recovery sequence
 
-`recovery.Service.Recover` (`internal/recovery/service.go`) runs only when the
-process holds the exclusive fence:
+Recovery runs only under the exclusive process fence:
 
-1. `PrepareRecovery` expires active leases (they belonged to a dead process)
-   and quarantines incomplete action attempts and provider requests so
-   unknown side effects are never replayed blindly.
-2. `SubagentInterrupter.InterruptIncomplete` marks non-terminal subagent
-   projections `interrupted` with the reason `interrupted by process restart`.
-3. A store scan collects every non-terminal run, whether it has durable team
-   state, and its pending approval tokens.
-4. The `beforeResume` hook (installed by `bootstrapAssembly.attachRecovery`)
-   calls `session.InterruptRunningToolRecordsForRun` for each discovered run
-   so the durable tool timeline shows honest `interrupted` states before
-   anything re-executes.
-5. Each run passes through `runner.Recover`; team runs go to
-   `ProviderRuntime.ResumeTeam`, single runs with any status other than
-   `reconcile_required` go to `ProviderRuntime.ResumeRun`.
-6. Pending reconcile attempts are listed into the recovery summary.
+1. `bootstrapAssembly.build` resolves the destination database path without
+   migrating it and acquires the fence before any SQLite relocation/open.
+2. SQLite opens, backs up an existing older schema, and migrates through
+   schema 27.
+3. `PrepareRecovery` runs before `agent.NewService` constructs
+   `durable.Runtime`. It expires dead legacy leases/resource claims and
+   quarantines incomplete legacy action attempts/provider requests.
+4. `recovery.Service.RecoverPrepared` scans non-terminal application runs and
+   pending approvals without repeating preparation. `ClassifyRunRecovery`
+   validates each v1 binding, sealed manifest, profile hash, and persisted
+   execution state.
+5. Non-terminal v0.15 runs without a v1 binding are marked
+   `reconcile_required`. Their durable history remains intact; recovery does
+   not fabricate a continuation or execute an old pending tool.
+6. Incomplete `subagent_runs` become `interrupted`. The `beforeResume` hook
+   marks running tool timeline rows interrupted before any engine is rebuilt.
+7. Parent/Team runs resume first. A pending v1 binding starts, a runnable
+   continuation resumes from its exact checkpoint, a suspended approval stays
+   waiting, a terminal execution replays its recorded result, and an unknown
+   model/tool attempt stays paused for explicit reconciliation. App-owned
+   Subagent recovery then requeues the existing child binding.
+8. Reconcile attempts and pending approvals enter the recovery summary.
+   `Service.emitRecoveryState` publishes the durable projection; only then
+   does `FinishRecovery` downgrade the fence to a shared lifetime lock.
 
-`Service.emitRecoveryState` (`internal/app/app.go`) then publishes one
-`recovery_state` event with state `attention_required` carrying the pending
-approvals, unknown side effects, and counters (expired leases, quarantined
-attempts, interrupted subagents). The UI must show this state; it must not
-convert it to success or start a replacement session.
+The UI must show attention-required state. It must not convert recovery to
+success or start a replacement session.
 
 ## Side-effect reconciliation
 
-A run becomes `reconcile_required` (`agent.Service.RequireRunReconciliation`)
-when it cannot be trusted to continue automatically:
+A run becomes `reconcile_required` when automatic continuation cannot prove
+the exact v1 identity or effect outcome:
 
-- the durable run lost its session ownership metadata,
-- the owning session projection no longer names it as `LastRunID`,
-- the immutable `singleRunManifest` is missing or invalid,
-- the rebuilt execution profile no longer matches the recorded static
-  identity (`errResumeProfileChanged`), or
-- a team run's `workspace_anchor` or provider account binding is missing or
-  points at a different workspace.
+- no v1 binding exists for a non-terminal legacy run,
+- session/run/agent/kind/segment ownership or the sealed manifest is invalid,
+- provider/account/model/reasoning/Skill/tool/workspace/static identity
+  changed,
+- a Team workspace/account binding changed, or
+- a durable claim found an in-flight model/tool attempt whose response may
+  have been lost.
 
-Quarantined action attempts with unknown external outcomes surface as
-"Unknown side effect" notices. `ActionReconcileAttempt`
-(`internal/app/actions_runtime.go`) records the user's decision through
-`ResolveReconcileAttempt`, resumes the run via `ResumeRecoveredRun`, and
-emits `recovery_state` with state `reconciled`. Succeeded attempts also act
-as an anti-replay ledger when a resumed model re-emits a completed
-non-idempotent call.
+Unknown attempts surface execution ID, operation ID, kind, attempt
+number/version, checkpoint sequence, and continuation phase. The user resolves
+that exact record through `ActionReconcileAttempt`; the receipt is idempotent.
+Only then may the durable runtime resume. A succeeded attempt remains
+anti-replay evidence when a model emits a fresh call ID for the same completed
+non-idempotent input.
+
+Approval decisions use a separate exact target. `ActionResolveApproval`
+persists the decision, then calls `ResumeRecoveredRunAtOperation` with the
+approval's durable `ActionID`. App-owned child controllers choose the latest
+durable decision in the current model-complete checkpoint. Neither path falls
+back to an ambiguous operation when parallel tool calls exist.
 
 ## Tool timeline and continuity evidence
 
@@ -136,33 +155,30 @@ parent-only choice still detaches safe children instead of cancelling them
 
 ## Team resume
 
-Team runs persist their scheduler state in the durable team-state store, and
-their run metadata records `team=true`, the `workspace_anchor`, the provider
-account, and the original prompt. `ProviderRuntime.ResumeTeam` validates the
-anchor against the current workspace and requires the account binding; either
-mismatch parks the run in `reconcile_required`. A valid team run reloads the
-session projection and Todo list, then continues from the `TeamRunner`
-checkpoint via `SpawnResumedProviderTeam` without blocking startup.
+Team state remains application-owned. Recovery reloads the persisted
+orchestration state, validates workspace/provider/account identity, and calls
+`orchestration.Drive` one tick at a time. Every unfinished role dispatch
+rebuilds its own direct engine and resumes its independent v1 execution
+binding. There is no `TeamRunner` checkpoint or legacy worker deployment.
 
 ## Suspension
 
-Suspension is a pause, not a failure. When `ExecuteRun` returns
-`hyworker.ExecutionSuspended` (or a team run returns
-`multiagent.ErrExecutionSuspended`), `runProviderTurn` and
-`finishProviderTeam` emit `EventRecoveryState` (`recovery_state`) with state
-`suspended` and the suspension kind/reason, then return without a terminal
-event. `agent.Service.ReleaseRun` uses the same mechanism to durably suspend
-a rebuilt run whose immutable profile cannot safely execute.
+Suspension is a pause, not a failure. `agent.Service.ExecuteRun` reports
+`ExecutionSuspended` for `durable.ErrSuspended` and
+`SuspensionReconciliation` for `durable.ErrReconcileRequired`.
+`runProviderTurn`/Team/Subagent controllers publish recovery state without a
+terminal success/failure event. A waiting approval remains suspended until its
+durable decision names the exact operation to resume.
 
 ## Failure surfaces
 
 | Outcome | Trigger | Surface |
 |---|---|---|
-| `run_failed` | Provider/tool error, exhausted hard budget, empty team answer, event-backlog delivery failure | Terminal `run_failed` event plus a persisted failed assistant/error block |
-| `reconcile_required` | Lost session ownership, invalid manifest, changed execution profile, foreign workspace anchor, unknown side effect | Run stays paused; `attention_required`/reconcile notices until the user decides |
-| Suspended (paused) | `ExecutionSuspended`, profile-mismatch release | `recovery_state` with state `suspended`; run remains resumable |
-| Explicitly terminalized | Recovered run whose restored budget is already exhausted | `terminalizeRecoveredBudget` persists a failed block and completes the run with `hyagent.ErrBudgetExhausted` |
-| Not a failure | Denied workspace resource claim | Wait/retry loop (`executeMainRunUntilAvailable`); never a terminal block |
+| `run_failed` | Provider/tool infrastructure error, exhausted hard budget, empty Team answer, failed terminal projection | Terminal `run_failed` event plus persisted failed assistant/error state |
+| `reconcile_required` | Legacy non-terminal run, invalid/missing binding or manifest, changed identity/workspace, unknown model/tool effect | Run stays paused with exact recovery facts until an explicit decision |
+| Suspended (paused) | Durable approval wait or explicit runtime suspension | `recovery_state` with state `suspended`; no terminal event |
+| Explicitly terminalized | Recovered run whose restored budget is exhausted | Failed block plus `hyagent.ErrBudgetExhausted` |
+| Not a failure | Real transient resource-claim conflict | Wait/retry loop; never a terminal provider block |
 
 UI projection pressure must never become a provider error (UI-002), and
 cancellation is excluded from unread-notification marking (UI-004).
@@ -170,12 +186,11 @@ cancellation is excluded from unread-notification marking (UI-004).
 ## Verification
 
 ```bash
-go test ./internal/store/sqlite ./internal/recovery ./internal/agent ./internal/app ./internal/session
+GOWORK=off go test ./internal/store/sqlite ./internal/recovery ./internal/agent ./internal/app ./internal/session
 ```
 
-Guarded coverage includes runtime-fence ownership and failed-owner takeover
-(`recovery_fence` tests), interrupted tool record persistence, tool
-continuity `verified_unchanged`/`stale` evidence, wait-window detachment and
-restart requeue in `subagent_runtime_test.go`/`subagent_tools` tests,
-asynchronous stop (`TestCancelActiveReturnsBeforeUncooperativeExecutionFinishes`),
-and stale-checkpoint adoption (`TestTurnContextCompact*` in CONTEXT-003).
+Guarded coverage includes recovery-fence ownership/takeover, preparation before
+runtime construction, v1 pending/suspended/terminal/unknown paths, v0.15
+reconciliation without replay, exact approval resume, interrupted tool rows,
+Subagent detach/requeue/cancel, one-tick Team resume, asynchronous explicit
+stop, and stale context-checkpoint adoption.

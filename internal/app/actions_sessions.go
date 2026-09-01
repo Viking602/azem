@@ -34,6 +34,12 @@ var sessionActionHandlers = map[ActionKind]actionHandler{
 	ActionListSessions: func(s *Service, ctx context.Context, action Action) error {
 		return s.emitSessionList(ctx)
 	},
+	ActionRemoveProject: func(s *Service, ctx context.Context, action Action) error {
+		if err := s.sessions.HideProject(ctx, action.Target); err != nil {
+			return err
+		}
+		return s.emitSessionList(ctx)
+	},
 	ActionListUsage: func(s *Service, ctx context.Context, action Action) error {
 		return s.emitUsageReport(ctx, action.Target, "listed")
 	},

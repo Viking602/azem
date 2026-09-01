@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/venat/tool"
 )
 
@@ -30,18 +31,18 @@ func TestGitHubReadOperationsForwardGovernedArguments(t *testing.T) {
 func TestGitHubDynamicApprovalAndValidation(t *testing.T) {
 	driver := newGitHubDriver(t.TempDir(), newLSPBridgeRuntime(), "allow").(*githubDriver)
 	readArgs := json.RawMessage(`{"op":"search_issues","repo":"owner/repo","query":"is:open"}`)
-	read := driver.DefinitionForCall(tool.Call{Name: ToolGitHub, Arguments: readArgs})
-	if read.EffectType != tool.EffectReadOnly || read.RequiresApproval {
+	read := driver.PolicyForCall(tool.Call{Name: ToolGitHub, Arguments: readArgs})
+	if read.Effect != agentruntime.ToolEffectReadOnly || read.RequiresApproval {
 		t.Fatalf("read governance = %#v", read)
 	}
 	writeArgs := json.RawMessage(`{"op":"pr_create","title":"Change","body":"Body"}`)
-	write := driver.DefinitionForCall(tool.Call{Name: ToolGitHub, Arguments: writeArgs})
+	write := driver.PolicyForCall(tool.Call{Name: ToolGitHub, Arguments: writeArgs})
 	readOnly := ReadOnlyGitHubDriver(driver)
 	blocked := callGitHub(context.Background(), readOnly, map[string]any{"op": "pr_create", "title": "Blocked"})
 	if !blocked.IsError || !strings.Contains(blocked.Content, "read-only session") {
 		t.Fatalf("read-only GitHub mutation = %#v", blocked)
 	}
-	if write.EffectType != tool.EffectExternalSideEffect || !write.RequiresApproval || !write.RequiresActionTask {
+	if write.Effect != agentruntime.ToolEffectExternalSideEffect || !write.RequiresApproval || !write.RequiresActionTask {
 		t.Fatalf("write governance = %#v", write)
 	}
 	invalid := callGitHub(context.Background(), driver, map[string]any{"op": "file_read", "repo": "invalid", "path": "../secret"})

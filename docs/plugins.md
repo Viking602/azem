@@ -49,12 +49,13 @@ plugin-packages/
 
 To install directly, copy a complete plugin directory under
 `plugin-packages/local/`. To import from Codex, enable `plugins.import_codex`.
-At desktop startup Azem reads `codex plugin list --json`, copies every reported
-installed package into a staging directory, validates the copied manifest, and
-atomically replaces its previous copy. The copied package records the Codex
-enabled state and source identity. If Codex is unavailable later, the existing
-Azem copy remains discoverable; the running plugin root and every `PLUGIN_ROOT`
-value still point at Azem storage.
+At desktop startup Azem reads Codex's local `config.toml` and plugin package
+directories; it never launches the Codex CLI. Selected packages are copied into
+a staging directory, validated, and atomically replace the previous Azem-owned
+copy. The copied package records the Codex enabled state and source identity.
+If Codex storage is unavailable later, the existing Azem copy remains
+discoverable; the running plugin root and every `PLUGIN_ROOT` value still point
+at Azem storage.
 
 `.mcp.json` may be a direct server map or wrap the map in `mcpServers` or
 `mcp_servers`. Azem recognizes stdio descriptors (`command`, `args`, `cwd`,
@@ -81,12 +82,11 @@ value still point at Azem storage.
 Directly installed plugins are loaded at desktop startup. Codex plugins first
 appear as available choices; selecting one persists its ID in
 `plugins.codex_imports`, then copies the package into Azem and loads its Skills
-and MCP servers immediately. Import prefers the live `codex plugin list`
-source path, then the last listed catalog, then the local Codex cache and
-`.tmp/marketplaces/<marketplace>/plugins/<name>` checkout. A later Codex CLI
-outage must not block copying a package that is already visible in Extensions.
-Removing the selection unloads those capabilities in the current process while
-leaving the dormant copy recoverable.
+and MCP servers immediately. Import prefers the current directory-scan result,
+then the last known catalog, then the local Codex cache and
+`.tmp/marketplaces/<marketplace>/plugins/<name>` checkout. Removing the
+selection unloads those capabilities in the current process while leaving the
+dormant copy recoverable.
 
 ## Marketplace lifecycle
 

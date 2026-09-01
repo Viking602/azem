@@ -45,7 +45,7 @@ func TestCheckpointControllerPersistsRewindsAndRestores(t *testing.T) {
 		{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{{ID: "checkpoint", Name: checkpointToolName}}},
 		message.NewToolResult(message.ToolResult{ToolCallID: "checkpoint", Name: checkpointToolName, Content: created.Content, Structured: created.Structured}),
 	}
-	if _, err := controller.Apply(ctx, base, []tool.Result{created}); err != nil {
+	if _, err := controller.TransformContext(ctx, base); err != nil {
 		t.Fatal(err)
 	}
 	guarded, err := controller.guardrail().Check(ctx, hyagent.OutputGuardrailInput{Output: message.NewText(message.RoleAssistant, "premature")})
@@ -62,13 +62,33 @@ func TestCheckpointControllerPersistsRewindsAndRestores(t *testing.T) {
 		message.NewToolResult(message.ToolResult{ToolCallID: "read", Name: "coding.read_file", Content: "SECRET_INTERMEDIATE_BYTES"}),
 		message.NewToolResult(message.ToolResult{ToolCallID: "rewind", Name: rewindToolName, Content: rewound.Content, Structured: rewound.Structured}),
 	)
-	result, err := controller.Apply(ctx, exploration, []tool.Result{rewound})
+	result, err := controller.TransformContext(ctx, exploration)
 	if err != nil {
 		t.Fatal(err)
 	}
 	encoded, _ := json.Marshal(result)
 	if strings.Contains(string(encoded), "INTERMEDIATE_EXPLORATION") || strings.Contains(string(encoded), "SECRET_INTERMEDIATE_BYTES") || !strings.Contains(string(encoded), report) {
 		t.Fatalf("rewound context = %s", encoded)
+	}
+	postRewind := append(cloneCheckpointMessages(exploration),
+		message.NewText(message.RoleAssistant, "POST_REWIND_TOOL_CONTEXT"),
+		message.NewToolResult(message.ToolResult{ToolCallID: "post-rewind", Name: "coding.read_file", Content: "POST_REWIND_RESULT"}),
+	)
+	continued, err := controller.TransformContext(ctx, postRewind)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ = json.Marshal(continued)
+	if strings.Contains(string(encoded), "SECRET_INTERMEDIATE_BYTES") || !strings.Contains(string(encoded), "POST_REWIND_RESULT") || !strings.Contains(string(encoded), report) {
+		t.Fatalf("continued rewound context = %s", encoded)
+	}
+	finalized, err := finalizedCheckpointMessages(ctx, sessions, "checkpoint", "run", postRewind)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ = json.Marshal(finalized)
+	if strings.Contains(string(encoded), "SECRET_INTERMEDIATE_BYTES") || !strings.Contains(string(encoded), "POST_REWIND_RESULT") || !strings.Contains(string(encoded), report) {
+		t.Fatalf("finalized rewound context = %s", encoded)
 	}
 	allowed, err := controller.guardrail().Check(ctx, hyagent.OutputGuardrailInput{Output: message.NewText(message.RoleAssistant, "final")})
 	if err != nil || allowed.Action != hyagent.OutputGuardrailActionAllow {

@@ -1,0 +1,27 @@
+[workspace]
+members = ["crates/azem-ipc", "crates/azem-gpui"]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.97.1"
+license = "MIT"
+repository = "https://github.com/Viking602/azem"
+
+[workspace.dependencies]
+anyhow = "1.0.100"
+bytes = "1.11.0"
+async-channel = "2.5.0"
+dirs = "5.0.1"
+base64 = "0.22.1"
+hmac = "0.12.1"
+serde = { version = "1.0.228", features = ["derive", "rc"] }
+gpui = { git = "https://github.com/zed-industries/zed.git", rev = "5631830c564afa89b3aba679f45d9c3345f9460f" }
+gpui-platform = { package = "gpui_platform", git = "https://github.com/zed-industries/zed.git", rev = "5631830c564afa89b3aba679f45d9c3345f9460f" }
+unicode-segmentation = "1.13.3"
+serde_json = "1.0.149"
+sha2 = "0.10.9"
+tokio = { version = "1.49.0", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
+uuid = { version = "1.19.0", features = ["serde", "v4"] }

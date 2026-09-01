@@ -15,16 +15,15 @@ import (
 	"time"
 
 	agentservice "github.com/Viking602/azem/internal/agent"
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/hooks"
+	cursordriver "github.com/Viking602/azem/internal/provider/cursor"
 	"github.com/Viking602/azem/internal/session"
 	hyagent "github.com/Viking602/venat/agent"
-	"github.com/Viking602/venat/api"
 	"github.com/Viking602/venat/message"
 	hyprovider "github.com/Viking602/venat/provider"
-	"github.com/Viking602/venat/stream"
 	"github.com/Viking602/venat/tool"
-	hyworker "github.com/Viking602/venat/worker"
 )
 
 const (
@@ -35,6 +34,8 @@ const (
 
 const processRestartInterruption = "interrupted by process restart"
 
+var errSubagentPersistenceSuperseded = errors.New("subagent state persistence superseded")
+
 func durableSubagentAgentID(agentType string) string {
 	agentType = strings.TrimSpace(agentType)
 	if agentType == "" {
@@ -43,7 +44,7 @@ func durableSubagentAgentID(agentType string) string {
 	return "azem-subagent-" + agentType
 }
 
-func subagentResourceClaims(profile effectiveSubagentProfile, workspaceRoot string) ([]api.ResourceClaimSpec, error) {
+func subagentResourceClaims(profile effectiveSubagentProfile, workspaceRoot string) ([]agentruntime.ResourceClaimSpec, error) {
 	// Shared-workspace writers used the same exclusive key as main sessions.
 	// That lock blocked every other session in the project, so writers no
 	// longer take a workspace claim. Isolated worktrees remain unclaimed.
@@ -52,7 +53,7 @@ func subagentResourceClaims(profile effectiveSubagentProfile, workspaceRoot stri
 	return nil, nil
 }
 
-func (r *subagentRuntime) childWorkspaceClaims(ctx context.Context, parent subagentParentRuntime, profile effectiveSubagentProfile) ([]api.ResourceClaimSpec, error) {
+func (r *subagentRuntime) childWorkspaceClaims(ctx context.Context, parent subagentParentRuntime, profile effectiveSubagentProfile) ([]agentruntime.ResourceClaimSpec, error) {
 	claims, err := subagentResourceClaims(profile, parent.WorkspaceRoot)
 	if err != nil || len(claims) == 0 {
 		return claims, err
@@ -84,13 +85,13 @@ func (r *subagentRuntime) childWorkspaceClaims(ctx context.Context, parent subag
 }
 
 func parentTaskHasWorkspaceClaim(ctx context.Context, parent subagentParentRuntime, key string) (bool, error) {
-	tasks, err := parent.Coding.Runner().ListTasks(ctx, parent.ParentRunID)
+	tasks, err := parent.Coding.ListTasks(ctx, parent.ParentRunID)
 	if err != nil {
 		return false, fmt.Errorf("list parent tasks for workspace claim: %w", err)
 	}
 	for _, task := range tasks {
 		for _, claim := range task.ResourceClaims {
-			if claim.Key == key && claim.Mode == api.ResourceClaimExclusive {
+			if claim.Key == key && claim.Mode == agentruntime.ResourceClaimExclusive {
 				return true, nil
 			}
 		}
@@ -99,14 +100,14 @@ func parentTaskHasWorkspaceClaim(ctx context.Context, parent subagentParentRunti
 }
 
 func parentWorkspaceClaimActive(ctx context.Context, parent subagentParentRuntime, key string) (bool, error) {
-	claims, err := parent.Coding.Runner().ListResourceClaims(ctx, api.ResourceClaimSelector{
-		RunIDs: []string{parent.ParentRunID}, Keys: []string{key}, States: []api.ResourceClaimState{api.ResourceClaimActive},
+	claims, err := parent.Coding.ListResourceClaims(ctx, agentruntime.ResourceClaimSelector{
+		RunIDs: []string{parent.ParentRunID}, Keys: []string{key}, States: []agentruntime.ResourceClaimState{agentruntime.ResourceClaimActive},
 	})
 	if err != nil {
 		return false, fmt.Errorf("list parent workspace claims: %w", err)
 	}
 	for _, claim := range claims {
-		if claim.Key == key && claim.Mode == api.ResourceClaimExclusive && claim.RunID == parent.ParentRunID {
+		if claim.Key == key && claim.Mode == agentruntime.ResourceClaimExclusive && claim.RunID == parent.ParentRunID {
 			return true, nil
 		}
 	}
@@ -114,14 +115,14 @@ func parentWorkspaceClaimActive(ctx context.Context, parent subagentParentRuntim
 }
 
 func clearRecoveredSharedWorkspaceClaim(ctx context.Context, parent subagentParentRuntime, runID, key string) error {
-	tasks, err := parent.Coding.Runner().ListTasks(ctx, runID)
+	tasks, err := parent.Coding.ListTasks(ctx, runID)
 	if err != nil {
 		return fmt.Errorf("list recovered child tasks for workspace claim: %w", err)
 	}
 	for _, task := range tasks {
 		hasClaim := false
 		for _, claim := range task.ResourceClaims {
-			if claim.Key == key && claim.Mode == api.ResourceClaimExclusive {
+			if claim.Key == key && claim.Mode == agentruntime.ResourceClaimExclusive {
 				hasClaim = true
 				break
 			}
@@ -129,14 +130,14 @@ func clearRecoveredSharedWorkspaceClaim(ctx context.Context, parent subagentPare
 		if !hasClaim {
 			continue
 		}
-		filtered := make([]api.ResourceClaimSpec, 0, len(task.ResourceClaims))
+		filtered := make([]agentruntime.ResourceClaimSpec, 0, len(task.ResourceClaims))
 		for _, claim := range task.ResourceClaims {
 			if claim.Key != key {
 				filtered = append(filtered, claim)
 			}
 		}
 		task.ResourceClaims = filtered
-		if err := parent.Coding.Runner().SaveTask(ctx, task); err != nil {
+		if err := parent.Coding.SaveTask(ctx, task); err != nil {
 			return fmt.Errorf("save recovered child task without inherited workspace claim: %w", err)
 		}
 		return nil
@@ -172,7 +173,7 @@ type subagentParentRuntime struct {
 	MaxChildren          int
 	ObservePath          func(string)
 	DirectorReadOnly     bool
-	Budget               api.TaskBudget
+	Budget               agentruntime.TaskBudget
 	ObserveTool          func(string)
 }
 
@@ -203,10 +204,11 @@ type activeSubagent struct {
 	parent              subagentParentRuntime
 	outputContract      *structuredSubagentContract
 	name                string
-	control             *hyagent.ControlQueue
+	control             *turnControlQueue
 	ctx                 context.Context
 	cancel              context.CancelFunc
 	done                chan struct{}
+	persistMu           sync.Mutex
 	slot                bool
 	terminalizing       bool
 	terminalized        bool
@@ -321,6 +323,23 @@ func (r *subagentRuntime) enabledForDepth(depth int) bool {
 	return enabled && (maxDepth < 0 || depth < maxDepth)
 }
 
+func (r *subagentRuntime) persistActiveRun(active *activeSubagent, run agentservice.SubagentRun) error {
+	active.persistMu.Lock()
+	defer active.persistMu.Unlock()
+
+	r.mu.Lock()
+	current := r.active[run.ID]
+	superseded := current != active || current.terminalizing || current.terminalized ||
+		current.run.State == agentservice.SubagentCancelling || subagentTerminal(current.run.State)
+	r.mu.Unlock()
+	if superseded {
+		return errSubagentPersistenceSuperseded
+	}
+	saveCtx, saveCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer saveCancel()
+	return r.store.Save(saveCtx, run)
+}
+
 func (r *subagentRuntime) recoverInterrupted(parent subagentParentRuntime) error {
 	runs, err := r.store.List(r.ctx, parent.SessionID)
 	if err != nil {
@@ -368,7 +387,10 @@ func (r *subagentRuntime) recoverInterrupted(parent subagentParentRuntime) error
 			r.hosts[parent.SessionID] = parent.Host
 		}
 		r.mu.Unlock()
-		if err := r.store.Save(r.ctx, run); err != nil {
+		if err := r.persistActiveRun(active, run); err != nil {
+			if errors.Is(err, errSubagentPersistenceSuperseded) {
+				continue
+			}
 			r.mu.Lock()
 			delete(r.active, run.ID)
 			r.mu.Unlock()
@@ -503,13 +525,22 @@ func (r *subagentRuntime) continueInBackground(sessionID, id string, safeOnly bo
 	}
 	detached := cloneSubagentRun(active.run)
 	detached.Background = true
-	if err := r.store.Save(r.ctx, detached); err != nil {
-		snapshot := r.snapshotFromActiveLocked(active)
-		r.mu.Unlock()
-		return snapshot, false, err
+	r.mu.Unlock()
+	if err := r.persistActiveRun(active, detached); err != nil {
+		if errors.Is(err, errSubagentPersistenceSuperseded) {
+			return r.snapshot(id, sessionID), false, nil
+		}
+		return r.snapshot(id, sessionID), false, err
 	}
-	active.run = detached
-	snapshot := r.snapshotFromActiveLocked(active)
+	r.mu.Lock()
+	current := r.active[id]
+	if current != active || current.terminalizing || current.terminalized ||
+		current.run.State == agentservice.SubagentCancelling || subagentTerminal(current.run.State) {
+		r.mu.Unlock()
+		return r.snapshot(id, sessionID), false, nil
+	}
+	current.run = detached
+	snapshot := r.snapshotFromActiveLocked(current)
 	r.signalChangedLocked()
 	r.mu.Unlock()
 	r.emitState(detached, string(detached.State))
@@ -607,7 +638,7 @@ func (r *subagentRuntime) spawn(input subagentSpawnInput, parent subagentParentR
 	if name == "" {
 		name = id
 	}
-	control := hyagent.NewControlQueue()
+	control := newTurnControlQueue()
 	for _, peer := range input.initialPeerMessages {
 		if err := control.Enqueue(hubPeerControlMessage(peer)); err != nil {
 			return agentservice.SubagentRun{}, fmt.Errorf("queue initial peer message: %w", err)
@@ -629,7 +660,10 @@ func (r *subagentRuntime) spawn(input subagentSpawnInput, parent subagentParentR
 	active.run.Summary = "queued"
 	queued := cloneSubagentRun(active.run)
 	r.mu.Unlock()
-	if err := r.store.Save(r.ctx, queued); err != nil {
+	if err := r.persistActiveRun(active, queued); err != nil {
+		if errors.Is(err, errSubagentPersistenceSuperseded) {
+			return r.snapshot(id, parent.SessionID).Run, nil
+		}
 		r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: fmt.Errorf("persist queued subagent: %w", err)})
 		return r.snapshot(id, parent.SessionID).Run, nil
 	}
@@ -735,6 +769,10 @@ func (r *subagentRuntime) resolveProfile(input subagentSpawnInput, parent subage
 	if input.CWD != "" && isolation == "worktree" {
 		return effectiveSubagentProfile{}, fmt.Errorf("cwd and isolation=worktree are mutually exclusive")
 	}
+	accountID := ""
+	if provider == parent.ProviderID {
+		accountID = parent.AccountID
+	}
 	instructions := strings.TrimSpace(persona.Instructions)
 	if roleInstructions := strings.TrimSpace(role.Instructions); roleInstructions != "" {
 		if instructions != "" {
@@ -746,7 +784,7 @@ func (r *subagentRuntime) resolveProfile(input subagentSpawnInput, parent subage
 		Type: input.SubagentType, Persona: role.Persona,
 		Instructions: instructions,
 		Inputs:       append([]config.SubagentContractItem(nil), persona.Inputs...), Outputs: append([]config.SubagentContractItem(nil), persona.Outputs...),
-		Provider: provider, Model: model, Reasoning: firstNonempty(input.Reasoning, role.Reasoning, persona.Reasoning, parent.Reasoning), CapabilityMode: capability,
+		Provider: provider, AccountID: accountID, Model: model, Reasoning: firstNonempty(input.Reasoning, role.Reasoning, persona.Reasoning, parent.Reasoning), CapabilityMode: capability,
 		RequestedIsolation: isolation, Isolation: "none", CWD: cwd, Tools: append([]string(nil), role.Tools...),
 	}, nil
 }
@@ -854,8 +892,8 @@ func sanitizedResumeSeed(encoded json.RawMessage) ([]message.Message, error) {
 	if len(encoded) == 0 {
 		return nil, fmt.Errorf("transcript is empty")
 	}
-	var transcript []message.Message
-	if err := json.Unmarshal(encoded, &transcript); err != nil {
+	transcript, err := agentruntime.UnmarshalMessages(encoded)
+	if err != nil {
 		return nil, fmt.Errorf("decode transcript: %w", err)
 	}
 	transcript = slices.DeleteFunc(transcript, internalSubagentTranscriptMessage)
@@ -1021,14 +1059,13 @@ func (r *subagentRuntime) execute(id string) {
 	contextBudget := ContextBudget{Trigger: contextTarget, KeepRecent: parent.ContextConfig.KeepRecentTokens}
 	childContextWindow := 0
 	childDriver := parent.Driver
-	childBudget := api.TaskBudget{
+	childBudget := agentruntime.TaskBudget{
 		MaxTokens: int64(r.cfg.Budget.MaxTokens), MaxWallClock: r.cfg.Budget.MaxWallClockDuration,
 		MaxToolCalls: r.cfg.Budget.MaxToolCalls, MaxSteps: r.cfg.Budget.MaxTurns,
 	}
 	if parent.ForceReadOnly {
 		childBudget = parent.Budget
 	}
-	usageBudget := &providerUsageBudget{maxTokens: childBudget.MaxTokens}
 	if parent.ResolveAccountDriver != nil {
 		resolvedAccount, resolvedModel, contextWindow, resolvedDriver, resolveErr := parent.ResolveAccountDriver(ctx, profile.Provider, profile.Model, profile.Reasoning, profile.AccountID)
 		if resolveErr != nil {
@@ -1068,7 +1105,7 @@ func (r *subagentRuntime) execute(id string) {
 	executionPolicy := agentservice.RunExecutionPolicy{
 		AgentID:      durableSubagentAgentID(profile.Type),
 		AgentVersion: "runtime",
-		Governance: api.GovernancePolicy{Budget: api.Budget{
+		Governance: agentruntime.GovernancePolicy{Budget: agentruntime.Budget{
 			MaxTokens: childBudget.MaxTokens, MaxRuntime: childBudget.MaxWallClock,
 			MaxToolCalls: childBudget.MaxToolCalls,
 		}},
@@ -1100,13 +1137,6 @@ func (r *subagentRuntime) execute(id string) {
 			}
 		}
 	}
-	if parent.Host != nil && parent.Host.RetryConfig().Enabled {
-		executionPolicy.RetryPolicy = api.RetryPolicy{
-			MaxAttempts: parent.Host.RetryConfig().MaxRetries + 1,
-			Backoff:     parent.Host.RetryConfig().BaseDelayDuration,
-			MaxBackoff:  parent.Host.RetryConfig().MaxDelayDuration,
-		}
-	}
 	if durableRunID == "" {
 		childRun, err = parent.Coding.StartRunWithMetadata(ctx, prompt, nil, executionPolicy)
 		if err != nil {
@@ -1124,12 +1154,10 @@ func (r *subagentRuntime) execute(id string) {
 			return
 		}
 	}
-	observeProviderRetries(ctx, parent.Host, parent.SessionID, childRun.RunID, profile.Provider, childDriver)
 	nestedParentDriver := childDriver
 	childDriver = &advisoryBudgetDriver{
 		inner: childDriver, limit: r.cfg.Budget.SoftRequests, enabled: r.cfg.Budget.SoftRequestNotice,
 	}
-	childDriver = &budgetedProviderDriver{inner: childDriver, budget: usageBudget}
 	workspaceDrivers, err := parent.Coding.WorkspaceDrivers(ctx, profile.CWD)
 	if err != nil {
 		_ = parent.Coding.CompleteRun(context.WithoutCancel(ctx), childRun, "", err)
@@ -1159,9 +1187,7 @@ func (r *subagentRuntime) execute(id string) {
 			sessionID: parent.SessionID, agentID: id, agentType: profile.Type, parentToolCallID: parentToolCallID,
 			streamRunID: childRun.RunID, update: func(update tool.Update) { r.handleToolUpdate(id, update) },
 		}
-		if parent.DisableHooks {
-			governed = append(governed, governedDriver)
-		} else {
+		if !parent.DisableHooks {
 			metadata := hooks.Metadata{
 				SessionID: parent.SessionID, RunID: childRun.RunID, AgentID: id, AgentType: profile.Type,
 				ParentRunID: parent.ParentRunID, ParentToolCallID: parentToolCallID, CWD: profile.CWD,
@@ -1170,8 +1196,9 @@ func (r *subagentRuntime) execute(id string) {
 			if parent.Host != nil {
 				dispatcher = parent.Host.HookDispatcher()
 			}
-			governed = append(governed, hooks.WrapDriver(dispatcher, metadata, governedDriver))
+			governedDriver.driver = hooks.WrapDriver(dispatcher, metadata, observed)
 		}
+		governed = append(governed, governedDriver)
 		toolNames = append(toolNames, definition.Name)
 	}
 	nestedDrivers, err := r.Drivers(subagentParentRuntime{
@@ -1206,7 +1233,8 @@ func (r *subagentRuntime) execute(id string) {
 		if parent.Host != nil {
 			dispatcher = parent.Host.HookDispatcher()
 		}
-		governed = append(governed, hooks.WrapDriver(dispatcher, metadata, governedDriver))
+		governedDriver.driver = hooks.WrapDriver(dispatcher, metadata, driver)
+		governed = append(governed, governedDriver)
 		toolNames = append(toolNames, definition.Name)
 	}
 	if !parent.DisableHooks && parent.Host != nil && parent.Host.Sessions() != nil {
@@ -1249,7 +1277,6 @@ func (r *subagentRuntime) execute(id string) {
 		LoopPolicy: hyagent.LoopPolicy{
 			MaxIterations:       r.cfg.Budget.MaxTurns,
 			UnlimitedIterations: r.cfg.Budget.MaxTurns == 0,
-			MaxWallClock:        r.cfg.Budget.MaxWallClockDuration,
 			ContextTokenTarget:  contextTarget,
 		},
 		ExtraBody: extraBody,
@@ -1264,6 +1291,9 @@ func (r *subagentRuntime) execute(id string) {
 				reportInputTokens: providerPressure.observeInputTokens,
 			}
 		}
+	}
+	if parent.Host != nil {
+		childDriver = retryProviderDriver(ctx, parent.Host, parent.SessionID, childRun.RunID, profile.Provider, parent.Host.RetryConfig(), childDriver)
 	}
 	contextManager := subagentTurnContext{
 		instructions: instructions, privateContext: active.privateContext, seed: profile.Seed,
@@ -1285,17 +1315,45 @@ func (r *subagentRuntime) execute(id string) {
 	if parent.Host != nil {
 		contextManager.inner.compactHooks = parent.Host.AutoCompactHooks(hooks.Metadata{SessionID: parent.SessionID, RunID: childRun.RunID, AgentID: id, AgentType: profile.Type, ParentRunID: parent.ParentRunID, ParentToolCallID: parentToolCallID, CWD: profile.CWD})
 	}
-	definitionID := childRun.HolderID
-	if definitionID == "azem-main" {
-		definitionID = durableSubagentAgentID(profile.Type)
-	}
-	definition := agentDefinitionForSpec(
-		definitionID, "Azem "+profile.Type, "Durable "+profile.Type+" subagent",
-		spec, executionPolicy.Governance,
-		map[string]string{"role": profile.Type, "provider": profile.Provider},
-	)
 	childBus := tool.NewBus(governed...)
-	engine, err := materializeAgentDefinition(ctx, parent.Coding, definition, spec, hyagent.BuildDeps{
+	wireDefinitions := childBus.Definitions()
+	skillProfiles, profileErr := immutableSkillProfiles(skillSnapshot.Registry, mergeSkillNames(activeSkills, availableSkills))
+	if profileErr != nil {
+		_ = parent.Coding.CompleteRun(context.WithoutCancel(ctx), childRun, "", profileErr)
+		r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: profileErr})
+		return
+	}
+	instructionFingerprint := hashText(instructions)
+	var outputSchema json.RawMessage
+	if active.outputContract != nil {
+		outputSchema = append(json.RawMessage(nil), active.outputContract.raw...)
+	}
+	staticPayload, profileErr := json.Marshal(struct {
+		Profile, Skills, Tools, RuntimeConfig, ContextConfig, Driver any
+		ResolvedModel, Instructions                                  string
+		OutputSchema                                                 json.RawMessage
+		Wire                                                         int
+	}{
+		profile, skillProfiles, wireDefinitions, r.cfg, parent.ContextConfig, childDriver.Metadata(),
+		childModel, instructionFingerprint, outputSchema, session.CurrentWireVersion,
+	})
+	if profileErr != nil {
+		_ = parent.Coding.CompleteRun(context.WithoutCancel(ctx), childRun, "", profileErr)
+		r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: profileErr})
+		return
+	}
+	staticIdentity := hashText(string(staticPayload))
+	contextManager.inner.staticIdentity = staticIdentity
+	toolSchemaPayload, profileErr := json.Marshal(wireDefinitions)
+	if profileErr != nil {
+		_ = parent.Coding.CompleteRun(context.WithoutCancel(ctx), childRun, "", profileErr)
+		r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: profileErr})
+		return
+	}
+	toolSchemaFingerprint := hashText(string(toolSchemaPayload))
+	toolSetHash := hashText(strings.Join(toolNames, "\x00"))
+	toolProfileHash := hashText(toolSetHash + "\x00" + toolSchemaFingerprint + "\x00" + staticIdentity)
+	engine, err := hyagent.Build(spec, hyagent.BuildDeps{
 		Skills:    skillSnapshot.Registry,
 		Providers: hyprovider.Single(childDriver), Tools: childBus, ContextManager: contextManager,
 	})
@@ -1304,17 +1362,33 @@ func (r *subagentRuntime) execute(id string) {
 		r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: fmt.Errorf("build child engine: %w", err)})
 		return
 	}
+	if parent.Host != nil {
+		engine = parent.Host.BindProviderEngine(engine)
+	}
+	if profileErr := parent.Coding.SealExecutionProfile(ctx, childRun, agentruntime.ExecutableProfile{
+		Provider: profile.Provider, AccountID: profile.AccountID, RawModel: profile.Model,
+		Model: childModel, Reasoning: durableReasoningIdentity(profile.Reasoning), ActiveSkills: append([]string{}, activeSkills...),
+		ToolSetHash: toolSetHash, ToolProfileHash: toolProfileHash, PlanMode: parent.PlanMode,
+		StaticIdentity: staticIdentity, WorkspaceAnchor: canonicalWorkspaceAnchor(profile.CWD),
+		PromptFingerprint: instructionFingerprint, ToolSchemaFingerprint: toolSchemaFingerprint,
+	}); profileErr != nil {
+		_ = parent.Coding.CompleteRun(context.WithoutCancel(ctx), childRun, "", profileErr)
+		r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: profileErr})
+		return
+	}
+	engine.ToolMode = tool.ModeParallel
 	parallelToolCalls := true
 	engine.PromptCacheKey = childRun.RunID
 	engine.ParallelToolCalls = &parallelToolCalls
-	engine.NativeToolHost = newAttachmentRequestHost(parent.Host)
+	var cursorHost cursordriver.ExecHost
 	if profile.Provider == "cursor" {
-		engine.NativeToolHost = newCursorExecHost(
+		cursorHost = newCursorExecHost(
 			parent.Host, profile.CWD, parent.SessionID, childRun.RunID, parent.ParentRunID, id, childBus,
 		)
 	}
+	engine = bindProviderRequestScope(engine, providerAttachmentRoot(parent.Host), cursorHost)
 	engine.Hooks = engine.Hooks.Prepend(editRecoveryHook{run: childRun})
-	engine.Control = active.control
+	engine = bindTurnControl(engine, active.control)
 	if guardrail := structuredSubagentGuardrail(active.outputContract); guardrail != nil {
 		engine.OutputGuardrails = append(engine.OutputGuardrails, guardrail)
 	}
@@ -1369,25 +1443,34 @@ func (r *subagentRuntime) execute(id string) {
 	active.lastVisibleAt = time.Now()
 	running := cloneSubagentRun(active.run)
 	r.mu.Unlock()
-	if err := r.store.Save(r.ctx, running); err != nil {
+	if err := r.persistActiveRun(active, running); err != nil {
+		if errors.Is(err, errSubagentPersistenceSuperseded) {
+			_ = parent.Coding.CompleteRun(context.WithoutCancel(ctx), childRun, "", context.Canceled)
+			return
+		}
 		active.cancel()
 		_ = parent.Coding.CompleteRun(context.WithoutCancel(ctx), childRun, "", err)
 		r.terminalize(id, terminalRequest{state: agentservice.SubagentFailed, err: fmt.Errorf("persist running subagent: %w", err)})
 		return
 	}
 	r.mu.Lock()
-	if active = r.active[id]; active != nil && !active.terminalizing {
+	active = r.active[id]
+	current := active != nil && !active.terminalizing && !active.terminalized &&
+		active.run.State != agentservice.SubagentCancelling && !subagentTerminal(active.run.State)
+	if current {
 		active.run = running
 		r.signalChangedLocked()
 	}
 	r.mu.Unlock()
-	r.emitState(running, "running")
+	if current {
+		r.emitState(running, "running")
+	}
 
 	restartingAttempt := false
 	guardRetryPending := false
 	turnUsedTool := false
-	sink := stream.SinkFunc(func(frameCtx context.Context, frame stream.Frame) error {
-		if (restartingAttempt || guardRetryPending) && frame.Kind != stream.FrameError {
+	sink := hyagent.SinkFunc(func(frameCtx context.Context, frame hyagent.Frame) error {
+		if (restartingAttempt || guardRetryPending) && frame.Kind != hyagent.FrameError {
 			r.mu.Lock()
 			if current := r.active[id]; current != nil && !current.terminalizing {
 				current.blocks = discardAgentAttemptBlocks(current.blocks, childRun.RunID)
@@ -1407,12 +1490,12 @@ func (r *subagentRuntime) execute(id string) {
 			guardRetryPending = false
 		}
 		switch frame.Kind {
-		case stream.FrameToolCall:
+		case hyagent.FrameToolCall:
 			turnUsedTool = true
-		case stream.FrameDone:
+		case hyagent.FrameDone:
 			guardRetryPending = !turnUsedTool
 			turnUsedTool = false
-		case stream.FrameError:
+		case hyagent.FrameError:
 			restartingAttempt = true
 			guardRetryPending = false
 			turnUsedTool = false
@@ -1423,6 +1506,7 @@ func (r *subagentRuntime) execute(id string) {
 	})
 	var result hyagent.Result
 	workerStarted := false
+	coordinatorCancelled := false
 	var runErr error
 executionLoop:
 	for {
@@ -1431,10 +1515,16 @@ executionLoop:
 			workerStarted = true
 		}
 		result, runErr = outcome.Result, executeErr
-		var unavailable *hyworker.TaskExecutionUnavailableError
+		if outcome.State == agentservice.ExecutionFailed && outcome.Failure != nil {
+			runErr = errors.Join(runErr, outcome.Failure)
+		}
+		if outcome.State == agentservice.ExecutionCancelled {
+			coordinatorCancelled = true
+		}
+		var unavailable *agentservice.TaskExecutionUnavailableError
 		if errors.As(executeErr, &unavailable) {
 			summary := "waiting for durable execution lease"
-			if unavailable.ResourceClaims.Reason == api.ResourceClaimDeniedConflict {
+			if unavailable.ResourceClaims.Reason == agentruntime.ResourceClaimDeniedConflict {
 				summary = "waiting for shared workspace"
 			}
 			if err := r.persistActiveState(id, summary); err != nil {
@@ -1451,7 +1541,7 @@ executionLoop:
 				continue
 			}
 		}
-		if outcome.State != hyworker.ExecutionSuspended {
+		if outcome.State != agentservice.ExecutionSuspended {
 			break
 		}
 		summary := "waiting for durable resume"
@@ -1498,7 +1588,7 @@ executionLoop:
 		}
 	}
 	state := agentservice.SubagentCompleted
-	if ctx.Err() != nil {
+	if ctx.Err() != nil || coordinatorCancelled {
 		state = agentservice.SubagentCancelled
 		runErr = nil
 	} else if runErr != nil {
@@ -1522,7 +1612,8 @@ func discardAgentAttemptBlocks(blocks []AgentTranscriptBlock, runID string) []Ag
 func (r *subagentRuntime) persistActiveState(id, summary string) error {
 	r.mu.Lock()
 	active := r.active[id]
-	if active == nil || active.terminalizing || active.terminalized {
+	if active == nil || active.terminalizing || active.terminalized ||
+		active.run.State == agentservice.SubagentCancelling || subagentTerminal(active.run.State) {
 		r.mu.Unlock()
 		return context.Canceled
 	}
@@ -1543,16 +1634,24 @@ func (r *subagentRuntime) persistActiveState(id, summary string) error {
 	active.activity = summary
 	active.lastVisibleAt = time.Now()
 	r.mu.Unlock()
-	if err := r.store.Save(r.ctx, run); err != nil {
+	if err := r.persistActiveRun(active, run); err != nil {
+		if errors.Is(err, errSubagentPersistenceSuperseded) {
+			return context.Canceled
+		}
 		return err
 	}
 	r.mu.Lock()
-	if current := r.active[id]; current != nil && !current.terminalizing && !current.terminalized {
+	current := r.active[id]
+	fresh := current == active && !current.terminalizing && !current.terminalized &&
+		current.run.State != agentservice.SubagentCancelling && !subagentTerminal(current.run.State)
+	if fresh {
 		current.run = run
 		r.signalChangedLocked()
 	}
 	r.mu.Unlock()
-	r.emitState(run, string(run.State))
+	if fresh {
+		r.emitState(run, string(run.State))
+	}
 	return nil
 }
 
@@ -1571,18 +1670,18 @@ func (r *subagentRuntime) ownsDurableRun(runID string) bool {
 func waitForSubagentResume(ctx context.Context, coding *agentservice.Service, runID string) (*agentservice.Run, error) {
 	const pollInterval = 100 * time.Millisecond
 	for {
-		durable, err := coding.Runner().Run(ctx, runID)
+		durable, err := coding.LoadRun(ctx, runID)
 		if err != nil {
 			return nil, err
 		}
 		switch durable.Status {
-		case api.RunStatusRunning, api.RunStatusCreated, api.RunStatusBlocked:
-			resumed, resumeErr := coding.ResumeRun(ctx, runID)
+		case agentruntime.RunStatusRunning, agentruntime.RunStatusCreated, agentruntime.RunStatusBlocked:
+			resumed, resumeErr := coding.ResumeChildRun(ctx, runID)
 			if resumeErr != nil {
 				return nil, resumeErr
 			}
 			return resumed, nil
-		case api.RunStatusCompleted, api.RunStatusFailed, api.RunStatusCancelled:
+		case agentruntime.RunStatusCompleted, agentruntime.RunStatusFailed, agentruntime.RunStatusCancelled:
 			return nil, fmt.Errorf("subagent durable run %q became terminal with status %q", runID, durable.Status)
 		}
 		timer := time.NewTimer(pollInterval)
@@ -1716,9 +1815,11 @@ func (r *subagentRuntime) terminalize(id string, request terminalRequest) {
 	}
 	run.Summary = subagentSummary(run)
 
+	active.persistMu.Lock()
 	saveCtx, saveCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	saveErr := r.store.Save(saveCtx, run)
 	saveCancel()
+	active.persistMu.Unlock()
 	if saveErr != nil {
 		run.State = agentservice.SubagentFailed
 		run.Error = fmt.Sprintf("persist terminal subagent: %v", saveErr)

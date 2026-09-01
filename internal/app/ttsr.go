@@ -10,9 +10,9 @@ import (
 	"strings"
 
 	agentservice "github.com/Viking602/azem/internal/agent"
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/session"
-	hyagent "github.com/Viking602/venat/agent"
 	"github.com/Viking602/venat/message"
 	hyprovider "github.com/Viking602/venat/provider"
 	"github.com/Viking602/venat/tool"
@@ -50,7 +50,7 @@ type ttsrHook struct {
 	store           *session.Service
 	sessionID       string
 	runID           string
-	control         *hyagent.ControlQueue
+	control         *turnControlQueue
 	buffers         map[string]string
 	toolNames       map[string]string
 	toolArguments   map[string]string
@@ -72,7 +72,7 @@ func cloneTTSRConfig(source config.TTSRConfig) config.TTSRConfig {
 	return cloned
 }
 
-func newTTSRHook(cfg config.TTSRConfig, coding *agentservice.Service, store *session.Service, sessionID, runID string, control *hyagent.ControlQueue) (*ttsrHook, error) {
+func newTTSRHook(cfg config.TTSRConfig, coding *agentservice.Service, store *session.Service, sessionID, runID string, control *turnControlQueue) (*ttsrHook, error) {
 	if !cfg.Enabled || len(cfg.Rules) == 0 {
 		return nil, nil
 	}
@@ -230,16 +230,16 @@ func (runtime *ttsrHook) inject(ctx context.Context, rules []compiledTTSRRule, m
 		return err
 	}
 	value := message.NewText(message.RoleSystem, content)
-	value.Visibility = message.VisibilityPrivate
+	agentruntime.SetMessageVisibility(&value, agentruntime.MessageVisibilityPrivate)
 	interrupt := false
 	for _, rule := range rules {
 		if ttsrShouldInterrupt(firstNonempty(rule.InterruptMode, runtime.cfg.InterruptMode), matchContext.source) {
 			interrupt = true
 		}
 	}
-	kind := hyagent.ControlFollowUp
+	kind := turnControlFollowUp
 	if interrupt {
-		kind = hyagent.ControlSteer
+		kind = turnControlSteer
 	}
 	if runtime.store != nil {
 		evidence, _ := json.Marshal(map[string]any{"version": 1, "rules": ttsrRuleNames(rules), "source": matchContext.source, "tool": matchContext.toolName, "controlId": controlID})
@@ -247,14 +247,11 @@ func (runtime *ttsrHook) inject(ctx context.Context, rules []compiledTTSRRule, m
 			return fmt.Errorf("persist TTSR injection: %w", err)
 		}
 	}
-	if err := runtime.control.Enqueue(hyagent.ControlMessage{ID: controlID, Kind: kind, Message: value}); err != nil {
+	if err := runtime.control.Enqueue(turnControlMessage{ID: controlID, Kind: kind, Message: value, DiscardRejectedOutput: interrupt && runtime.cfg.ContextMode == "discard"}); err != nil {
 		return err
 	}
 	for _, rule := range rules {
 		runtime.injectedAt[strings.ToLower(rule.Name)] = runtime.messageCount
-	}
-	if interrupt {
-		return &hyagent.StreamRuleInterruptError{Reason: "matched " + strings.Join(ttsrRuleNames(rules), ", "), KeepPartial: runtime.cfg.ContextMode == "keep"}
 	}
 	return nil
 }

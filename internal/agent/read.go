@@ -28,7 +28,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/Viking602/azem/internal/resource"
-	"github.com/Viking602/venat/coding"
 	"github.com/Viking602/venat/message"
 	"github.com/Viking602/venat/tool"
 	"github.com/klauspost/compress/zstd"
@@ -75,7 +74,7 @@ func newOMPReadDriver(root string, delegate tool.Driver, resources *resource.Rou
 func (driver *ompReadDriver) Definition() tool.Definition {
 	additional := false
 	return tool.Definition{
-		Name:        coding.ToolReadFile,
+		Name:        ToolReadFile,
 		Description: "Read workspace files, directories, URLs, documents, archives, SQLite rows, notebooks, images, and registered internal resource URIs. Local text reads retain hashline edit anchors.",
 		InputSchema: tool.Schema{
 			Type: "object", Required: []string{"path"}, AdditionalProperties: &additional,
@@ -89,7 +88,6 @@ func (driver *ompReadDriver) Definition() tool.Definition {
 				"maxBytes":  {Type: "integer", Description: "Maximum returned bytes, capped at 16 MiB."},
 			},
 		},
-		EffectType: tool.EffectReadOnly, RiskLevel: "low", PolicyTags: []string{"coding", "read"},
 	}
 }
 
@@ -138,7 +136,7 @@ func (driver *ompReadDriver) readURI(ctx context.Context, call tool.Call, input 
 	if driver.resources == nil {
 		return tool.Result{}, errors.New("internal resources are unavailable")
 	}
-	caller, _ := tool.CallerFromContext(ctx)
+	caller, _ := InvocationFromContext(ctx)
 	result, err := driver.resources.Read(ctx, input.Path, input.Selector, resource.Scope{
 		SessionID: caller.SessionID, RunID: caller.TeamRunID, Workspace: driver.root,
 	})
@@ -279,7 +277,7 @@ func (driver *ompReadDriver) delegateText(ctx context.Context, call tool.Call, i
 		return tool.Result{}, err
 	}
 	if !result.IsError {
-		var observed coding.ReadFileToolResult
+		var observed ReadFileToolResult
 		if json.Unmarshal(result.Structured, &observed) == nil && observed.Path != "" && observed.Tag != "" {
 			oldHeader := observed.Header
 			observed.Header = "[" + observed.Path + "#" + observed.Tag + "]"
@@ -387,7 +385,7 @@ func readTextResult(call tool.Call, path, selector, kind, content string, trunca
 }
 
 func readError(call tool.Call, err error) tool.Result {
-	return tool.Result{ToolCallID: call.ID, Name: call.Name, Content: "coding.read_file failed: " + err.Error(), IsError: true}
+	return tool.Result{ToolCallID: call.ID, Name: call.Name, Content: "read_file failed: " + err.Error(), IsError: true}
 }
 
 func splitReadSelector(path, explicit string) (string, string) {

@@ -5,18 +5,17 @@ import (
 	"path/filepath"
 	"testing"
 
+	agentservice "github.com/Viking602/azem/internal/agent"
 	"github.com/Viking602/azem/internal/config"
 	cursordriver "github.com/Viking602/azem/internal/provider/cursor"
 	"github.com/Viking602/azem/internal/session"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
-	"github.com/Viking602/venat/coding"
 	"github.com/Viking602/venat/message"
-	hyprovider "github.com/Viking602/venat/provider"
 	"github.com/Viking602/venat/tool"
 )
 
 func TestCursorExecHostUnavailableWithoutBus(t *testing.T) {
-	result, err := (*cursorExecHost)(nil).Execute(context.Background(), message.ToolCall{Name: coding.ToolReadFile})
+	result, err := (*cursorExecHost)(nil).Execute(context.Background(), message.ToolCall{Name: agentservice.ToolReadFile})
 	if err != nil || !result.IsError || result.Content != "Tool not available" {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
@@ -25,7 +24,7 @@ func TestCursorExecHostUnavailableWithoutBus(t *testing.T) {
 type cursorApprovalResultDriver struct{}
 
 func (cursorApprovalResultDriver) Definition() tool.Definition {
-	return tool.Definition{Name: "coding.approval_test", EffectType: tool.EffectWrite}
+	return tool.Definition{Name: "coding.approval_test"}
 }
 
 func (cursorApprovalResultDriver) Execute(_ context.Context, call tool.Call, _ tool.UpdateSink) (tool.Result, error) {
@@ -43,12 +42,12 @@ func TestCursorExecHostReturnsGovernedApprovalResult(t *testing.T) {
 type cursorTimelineDriver struct{}
 
 func (cursorTimelineDriver) Definition() tool.Definition {
-	return tool.Definition{Name: "coding.timeline_test", EffectType: tool.EffectReadOnly}
+	return tool.Definition{Name: "coding.timeline_test"}
 }
 
 func (cursorTimelineDriver) Execute(_ context.Context, call tool.Call, sink tool.UpdateSink) (tool.Result, error) {
 	if sink != nil {
-		if err := sink(tool.Update{Kind: "running"}); err != nil {
+		if err := sink(tool.Update{Kind: tool.UpdateProgress, Message: "running"}); err != nil {
 			return tool.Result{}, err
 		}
 	}
@@ -115,7 +114,6 @@ func TestCursorExecHostSyncsServerConfirmedTodoSnapshot(t *testing.T) {
 
 func TestCursorExecHostImplementsTypedRequestChannels(t *testing.T) {
 	host := &cursorExecHost{bus: tool.NewBus()}
-	var _ hyprovider.NativeToolHost = host
 	var _ cursordriver.ExecHost = host
 	var _ cursordriver.TodoSynchronizer = host
 }

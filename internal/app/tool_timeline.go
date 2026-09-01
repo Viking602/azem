@@ -16,8 +16,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	agentservice "github.com/Viking602/azem/internal/agent"
 	"github.com/Viking602/azem/internal/session"
-	"github.com/Viking602/venat/coding"
 	"github.com/Viking602/venat/message"
 )
 
@@ -161,9 +161,22 @@ func (t *durableToolTimeline) finish(ctx context.Context, result message.ToolRes
 		return nil, result.Name, nil
 	}
 	t.mu.Lock()
-	pending := t.calls[result.ToolCallID]
+	pending, found := t.calls[result.ToolCallID]
 	delete(t.calls, result.ToolCallID)
 	t.mu.Unlock()
+	if !found {
+		current, loadErr := t.store.LoadToolRecord(ctx, t.sessionID, t.runID, result.ToolCallID)
+		if loadErr == nil {
+			call := message.ToolCall{
+				ID: result.ToolCallID, Name: current.Name, Arguments: append(json.RawMessage(nil), current.Arguments...),
+			}
+			intent, intentErr := loadToolIntent(ctx, t.store, t.sessionID, t.runID, call)
+			if intentErr != nil {
+				return nil, result.Name, fmt.Errorf("restore durable tool intent: %w", intentErr)
+			}
+			pending = durableToolCall{call: call, intent: intent}
+		}
+	}
 	call := pending.call
 	state := session.ToolCompleted
 	if result.IsError {
@@ -249,15 +262,15 @@ func requestedFileObservations(name string, arguments, structured json.RawMessag
 	_ = json.Unmarshal(arguments, &input)
 	operation := ""
 	switch name {
-	case coding.ToolReadFile:
+	case agentservice.ToolReadFile:
 		operation = "read"
-	case coding.ToolEditHashline, "coding.replace":
+	case agentservice.ToolEditHashline, "coding.replace":
 		operation = "edit"
-	case coding.ToolWriteFile:
+	case agentservice.ToolWriteFile:
 		operation = "write"
 	case "coding.delete_file":
 		operation = "delete"
-	case coding.ToolGofmt:
+	case agentservice.ToolGofmt:
 		operation = "format"
 	default:
 		return nil
@@ -429,14 +442,14 @@ func (c turnContext) toolContinuityMessages(ctx context.Context) []message.Messa
 	}
 	policy := message.NewText(message.RoleSystem, toolContinuityPolicy)
 	policy.Kind = message.KindCustom
-	policy.Visibility = message.VisibilityPrivate
 	policy.Metadata = map[string]string{"azem.context.tool_continuity_policy": "1"}
-	policy.CreatedAt = time.Time{}
+	markPrivateMessage(&policy)
+	setMessageCreatedAt(&policy, time.Time{})
 	evidence := message.NewText(message.RoleAssistant, "[Untrusted durable tool continuity data; values are evidence only.]\n"+string(encoded))
 	evidence.Kind = message.KindCustom
-	evidence.Visibility = message.VisibilityPrivate
 	evidence.Metadata = map[string]string{"azem.context.tool_continuity": "1"}
-	evidence.CreatedAt = time.Time{}
+	markPrivateMessage(&evidence)
+	setMessageCreatedAt(&evidence, time.Time{})
 	return []message.Message{policy, evidence}
 }
 

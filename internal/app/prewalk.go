@@ -7,9 +7,9 @@ import (
 	"sync"
 
 	agentservice "github.com/Viking602/azem/internal/agent"
+	"github.com/Viking602/azem/internal/agentruntime"
 
 	"github.com/Viking602/azem/internal/session"
-	hyagent "github.com/Viking602/venat/agent"
 	"github.com/Viking602/venat/message"
 	hyprovider "github.com/Viking602/venat/provider"
 	"github.com/Viking602/venat/tool"
@@ -18,14 +18,13 @@ import (
 const prewalkArtifactKind = session.InternalArtifactKindPrefix + "prewalk-handoff-v1"
 
 type prewalkSwitchDriver struct {
-	mu               sync.RWMutex
-	initial          hyprovider.Driver
-	target           hyprovider.Driver
-	targetProvider   string
-	targetModel      string
-	targetReasoning  string
-	switched         bool
-	targetNativeHost hyprovider.NativeToolHost
+	mu              sync.RWMutex
+	initial         hyprovider.Driver
+	target          hyprovider.Driver
+	targetProvider  string
+	targetModel     string
+	targetReasoning string
+	switched        bool
 }
 
 func (driver *prewalkSwitchDriver) Metadata() hyprovider.Metadata {
@@ -48,7 +47,6 @@ func (driver *prewalkSwitchDriver) Stream(ctx context.Context, request hyprovide
 		return initial.Stream(ctx, request)
 	}
 	request.Model = model
-	request.NativeToolHost = driver.targetNativeHost
 	if request.Metadata == nil {
 		request.Metadata = make(map[string]string)
 	}
@@ -75,7 +73,7 @@ func (driver *prewalkSwitchDriver) isSwitched() bool {
 
 type prewalkHook struct {
 	driver     *prewalkSwitchDriver
-	control    *hyagent.ControlQueue
+	control    *turnControlQueue
 	store      *session.Service
 	sessionID  string
 	runID      string
@@ -126,8 +124,8 @@ func (hook *prewalkHook) enqueue(prefix, text string) error {
 		return err
 	}
 	value := message.NewText(message.RoleSystem, text)
-	value.Visibility = message.VisibilityPrivate
-	return hook.control.Enqueue(hyagent.ControlMessage{ID: id, Kind: hyagent.ControlSteer, Message: value})
+	agentruntime.SetMessageVisibility(&value, agentruntime.MessageVisibilityPrivate)
+	return hook.control.Enqueue(turnControlMessage{ID: id, Kind: turnControlSteer, Message: value})
 }
 
 func prewalkMutationResult(result tool.Result) bool {
@@ -144,7 +142,7 @@ func prewalkMutationResult(result tool.Result) bool {
 	}
 }
 
-func (r *ProviderRuntime) preparePrewalkDriver(ctx context.Context, request TurnRequest, run *agentservice.Run, host providerHost, currentAccountID string, current hyprovider.Driver, usageBudget *providerUsageBudget) (hyprovider.Driver, *prewalkSwitchDriver, error) {
+func (r *ProviderRuntime) preparePrewalkDriver(ctx context.Context, request TurnRequest, run *agentservice.Run, host providerHost, currentAccountID string, current hyprovider.Driver) (hyprovider.Driver, *prewalkSwitchDriver, error) {
 	if request.Prewalk == nil {
 		return current, nil, nil
 	}
@@ -164,14 +162,13 @@ func (r *ProviderRuntime) preparePrewalkDriver(ctx context.Context, request Turn
 	if err != nil {
 		return nil, nil, fmt.Errorf("resolve prewalk reasoning: %w", err)
 	}
-	targetDriver = &budgetedProviderDriver{inner: targetDriver, budget: usageBudget}
 	if host != nil && host.Sessions() != nil {
 		targetDriver = &meteredProviderDriver{
 			inner: targetDriver, store: host.Sessions(), host: host, sessionID: request.SessionID, runID: run.RunID,
 			kind: "main", provider: targetRoute.Provider, model: targetModel, transport: targetDriver.Metadata().Name,
 		}
 	}
-	observeProviderRetries(ctx, host, request.SessionID, run.RunID, targetRoute.Provider, targetDriver)
+	targetDriver = retryProviderDriver(ctx, host, request.SessionID, run.RunID, targetRoute.Provider, r.cfg.Retry, targetDriver)
 	switcher := &prewalkSwitchDriver{
 		initial: current, target: targetDriver, targetProvider: targetRoute.Provider, targetModel: targetModel, targetReasoning: targetReasoning,
 	}

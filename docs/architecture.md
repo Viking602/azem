@@ -1,19 +1,19 @@
 # Architecture
 
-Last verified: 2026-08-24
+Last verified: 2026-08-30
 
-Azem is a local-first coding agent with two user interfaces over one Go
-runtime. The terminal and desktop applications share configuration, agent
-execution, provider routing, approvals, durable state, Skills, MCP servers,
-subagents, and recovery. The UI layers project that runtime; they do not own a
-second execution engine.
+Azem is a local-first coding agent with a terminal UI and one native desktop
+client over one Go runtime. Bubble Tea and GPUI share
+configuration, agent execution, provider routing, approvals, durable state,
+Skills, MCP servers, subagents, and recovery. The presentation layers project
+that runtime; they do not own another execution engine.
 
 ## Runtime overview
 
 ```mermaid
 flowchart LR
     TUI["Bubble Tea TUI"] --> APP["internal/app Service"]
-    GUI["React desktop"] --> BRIDGE["Bounded Wails Bridge"] --> APP
+    GPUI["Native GPUI client"] --> IPC["Authenticated local IPC"] --> DAEMON["Workspace daemon"] --> BRIDGE["Closed desktop operations"] --> APP
     APP --> PROVIDERS["ChatGPT / Grok subscription drivers"]
     APP --> LLMUX["llmux provider adapter"]
     APP --> AGENT["Venat-backed agent runtime"]
@@ -26,44 +26,51 @@ flowchart LR
 
 ## Startup and composition
 
-`cmd/azem/main.go` starts the Bubble Tea application. `cmd/azem-gui/main.go`
-starts Wails, embeds the built React application, and registers the desktop
-Bridge. Both paths call the composition root in `internal/app/bootstrap.go`.
+`cmd/azem/main.go` starts the Bubble Tea application.
+`cmd/azem-daemon/main.go` starts the desktop composition root without a
+renderer; `gpui/crates/azem-gpui` connects to it through
+`internal/desktopipc`. Both runtime paths call `internal/app/bootstrap.go`.
 
-Bootstrap has four ordered stages:
+Bootstrap preserves one recovery and execution ownership chain:
 
-1. `loadConfiguration` resolves the startup path and operating-system paths,
-   loads strict configuration, and creates protected data directories.
-2. `buildCore` opens SQLite. Desktop bootstrap restores the most recently
-   opened valid project unless `--workspace` selected one explicitly; terminal
-   bootstrap keeps its process working directory. It then loads Skills,
-   constructs session and agent services, selects credential stores, and
-   builds provider routing.
-3. `wireService` attaches hooks, MCP, memory, recovery, background processes,
-   and provider execution to one `app.Service`.
-4. `start` performs crash recovery, starts supporting services, and emits the
-   initial runtime projection.
+1. Resolve the destination database path without migration/open and acquire
+   the exclusive-or-shared process recovery fence.
+2. Resolve paths, relocate legacy state while fenced, load strict
+   configuration, and open/backup/migrate SQLite. Desktop bootstrap restores
+   the most recently opened valid project unless `--workspace` is explicit.
+3. The exclusive owner performs legacy crash preparation before constructing
+   the service-lifetime Venat `durable.Runtime`; shared-fence windows skip it.
+4. `buildCore` loads Skills/tools/providers and constructs sessions,
+   application orchestration, the SQLite durable backend, and provider routing.
+   `wireService` attaches hooks, MCP, memory, Subagents, automation, and
+   recovery to one `app.Service`.
+5. `start` classifies/replays v1 execution bindings, restores Team/Subagent
+   application state, publishes recovery projection, downgrades the fence, and
+   starts supporting services.
 
 If construction fails, bootstrap closes every component it already opened.
-Do not bypass this composition root with package globals or a second desktop
-runtime.
+Do not bypass this composition root with package globals or another execution
+runtime. The GPUI daemon is the composition root moved behind IPC, not a second
+implementation of agents, providers, approvals, or persistence.
 
 ## Package boundaries
 
 | Package | Responsibility | Must not own |
 |---|---|---|
 | `cmd/azem` | CLI flags, signals, TUI startup and shutdown | Agent or persistence behavior |
-| `cmd/azem-gui` | Wails lifecycle, windows, deep links, desktop startup | Arbitrary filesystem or shell APIs |
-| `frontend/src` | React projection, interaction state, typed Bridge calls | Provider execution or authoritative durable state |
+| `cmd/azem-daemon` / `internal/daemon` | One workspace-scoped desktop runtime, endpoint publication, and explicit shutdown | UI rendering or alternate application semantics |
+| `gpui/crates/azem-gpui` | Native window lifecycle, granular projection state, virtualized rendering, and user input | Provider execution or authoritative durable state |
+| `gpui/crates/azem-ipc` / `internal/desktopipc` | Versioned authenticated framing, bounded replay, binary streams, and closed Bridge dispatch | New product actions or transport-specific business logic |
 | `internal/desktop` | Closed Bridge operation set and event forwarding | Agent shell execution or a generic `sh -c` API |
 | `internal/desktop/termhost` | Human-only PTY sessions for the desktop window | Venat tools, approvals, or model-driven stdin |
 | `internal/tui` | Bubble Tea state, rendering, input routing | Duplicate runtime services |
-| `internal/app` | Composition and orchestration of turns, events, providers, approvals, subagents, and recovery | Provider-specific wire parsing or raw SQL |
-| `internal/agent` | Governed tools, Venat runs, teams, scheduling, worktrees | UI rendering |
+| `internal/app` | Composition, provider engine construction, policy, approvals, Team/Subagent/automation orchestration, events, and recovery | Provider wire parsing, durable backend mechanics, or raw SQL |
+| `internal/agentruntime` | Azem-owned run/task/approval/resource-claim domain and tool policy descriptors | Venat compatibility aliases or UI projection |
+| `internal/agent` | Governed tools, v1 execution bindings/manifests, one durable runtime owner, Team scheduling | UI rendering or provider transport parsing |
 | `internal/provider` | Provider transports, request/stream normalization, model catalog | Product-level session state |
 | `internal/session` | Sessions, projections, timeline records, attachments, usage, blob hydration | Schema migrations |
-| `internal/blobstore` | Content-addressed SHA-256 files for large payloads | Session catalog or Venat control plane |
-| `internal/store/sqlite` | Runtime migrations, SQLC adapters, Venat store contracts, blob-store open | UI or provider transport behavior |
+| `internal/blobstore` | Content-addressed SHA-256 files for large payloads | Session catalog or execution policy |
+| `internal/store/sqlite` | Runtime migrations, SQLC adapters, Azem stores, Venat v0.16 `durable.Backend`, blob-store open | UI or provider transport behavior |
 | `internal/workrevision` | Revision-bound intents, observations, guidance, dispositions, and verification records | UI status as an independent source of truth |
 | `internal/securityscan` | Native security targets, immutable snapshots, durable Standard/Deep coordination, findings, remediation, contracts, and exports | Provider transport parsing, foreground session ownership, or UI rendering |
 | `internal/evidence` / `internal/codingmemory` | Structural retrieval lineage and opt-in typed memory | Provider routing or automatic promotion |
@@ -81,15 +88,17 @@ into focused runtime and storage packages. Cycles are forbidden by
 ```text
 TUI command or desktop TurnRequest
   -> app.Service validates session, mode, Skills, and active-run state
-  -> ProviderRuntime resolves provider/model and builds the Venat engine
+  -> ProviderRuntime resolves provider/account/model and creates the Azem run plus pending v1 binding
+  -> app builds a direct agent.Engine with context, tools, retry, approval hook, and output guardrails
+  -> agent.Service seals the immutable manifest before durable.Runtime StartStream/ResumeStream
   -> known text-only main model + images invokes agents.vision and substitutes private textual evidence
-  -> approval policy governs file, shell, MCP, and external actions
-  -> durable run, action attempts, tool records, and projections are persisted
+  -> Azem policy governs file, shell, MCP, native Cursor, and external actions
+  -> Venat durable fences the execution lease/checkpoint and settles each model/tool attempt
+  -> Azem persists idempotent session blocks, tool records, usage, and terminal projection
   -> eventBroker emits ordered runtime events
-  -> TUI update loop or desktop Bridge receives the projection
-  -> React store reducer updates timeline, approvals, Todos, and subagents
-  -> subagent evidence status is derived from durable disposition/verification records
-  -> the same `agent_state` payload projects that status to TUI and React
+  -> TUI receives directly; GPUI receives desktop events through IPC
+  -> renderer reducers update timeline, approvals, Todos, subagents, terminals, and settings
+  -> subagent evidence status remains derived from durable disposition/verification records
 
 ```
 
@@ -103,17 +112,21 @@ does not register a tool. A separately approved adapter may be attached through
 model before `ProviderRuntime.resolveDriverForAccount` continues through the
 existing account, catalog, and provider checks.
 
-The desktop Bridge exposes named methods and a bounded runtime projection. Add
-a Bridge method only when a desktop feature needs a real application operation;
-never expose an arbitrary command runner or general filesystem API. The
-workspace browser and workspace change review are deliberate read-only
-exceptions with relative-path, resolved-symlink, entry-count, file-size,
-Git-output, timeout, and binary-content enforcement in
+The desktop operation layer exposes named methods and a bounded runtime
+projection. GPUI uses that set through an authenticated, versioned local IPC
+dispatcher; the transport adds no new
+actions. Control frames are length-bounded JSON, attachments and terminal
+output are bounded binary frames, and reconnect uses a durable snapshot plus a
+byte-bounded sequence replay. Add a Bridge method only when a desktop feature
+needs a real application operation; never expose an arbitrary command runner or
+general filesystem API. The workspace browser and workspace change review are
+deliberate read-only exceptions with relative-path, resolved-symlink,
+entry-count, file-size, Git-output, timeout, and binary-content enforcement in
 `internal/desktop/workspace_files.go` and
-`internal/desktop/workspace_changes.go`; React cannot weaken those boundaries.
-The embedded terminal is a second deliberate exception: Go owns the PTY, the
-renderer only displays xterm output and forwards keystrokes through named
-Bridge methods, and the agent tool catalog cannot write to those sessions.
+`internal/desktop/workspace_changes.go`; neither renderer can weaken those
+boundaries. The embedded terminal is a second deliberate exception: Go owns the
+PTY, the renderer displays bounded output and forwards human keystrokes through
+named Bridge methods, and the agent tool catalog cannot write to those sessions.
 
 ## Planning lifecycle
 
@@ -165,15 +178,17 @@ The GUI is project-catalog driven, not process-working-directory driven:
 desktop_projects
   -> session_workspaces
   -> session list event
-  -> React project tree
+  -> GPUI project tree
   -> active project runtime (branch, PR, tools)
 ```
 
-Each desktop window owns one workspace-scoped runtime because tools, Skills,
-hooks, Git state, and PR operations require an unambiguous root. The sidebar
-may show every persisted project; opening a session owned by another project
-launches that workspace and session together. Project history lives in SQLite
-and must not be serialized as one `workspace.root` setting.
+The single desktop window connects to one workspace-scoped runtime at a time
+because tools, Skills, hooks, Git state, and PR operations require an
+unambiguous root. The sidebar may show every persisted project; opening a
+session owned by another project reconnects the existing renderer to that
+workspace and session while the previous daemon keeps background work alive.
+Project history lives in SQLite and must not be serialized as one
+`workspace.root` setting.
 
 ## Provider text phases
 
@@ -181,7 +196,7 @@ Provider frames are normalized before application events are emitted. The
 `TextPhase` value must survive this complete path:
 
 ```text
-provider stream -> app event -> session/desktop projection -> frontend store -> timeline
+provider stream -> app event -> session/desktop projection -> GPUI state -> timeline
 ```
 
 `commentary` surrounds work and tool calls, `reasoning` remains a distinct
@@ -191,9 +206,9 @@ For providers without a native text phase, streamed text stays provisional
 until a tool call classifies it as commentary or a natural stop confirms it as
 the final answer.
 
-The desktop bridge may deliver coalesced text bursts. React keeps those events
-ordered, presents text in adaptive chunks at no more than about 30 updates per
-second, and accelerates when a terminal event or large backlog is waiting.
+The desktop bridge may deliver coalesced text bursts. GPUI keeps those events
+ordered, presents bounded frame-paced updates, and catches up when a terminal
+event or large backlog is waiting.
 Partial chunks do not advance the durable event sequence until the original
 event is fully presented. Transcript following uses immediate scrolling while
 a run is active so repeated smooth-scroll animations cannot compete with text
@@ -336,17 +351,19 @@ merges automatically.
 
 ## Durable runtime relationship
 
-Venat owns run, task, lease, admission, retry, and resource-claim contracts.
-Azem supplies SQLite store adapters, provider/tool bindings, UI projections,
-and product policy. Do not duplicate framework recovery or scheduling behavior
-inside presentation packages. Release verification uses `GOWORK=off` so the
-declared module version, not an adjacent checkout, defines behavior.
+Venat owns one execution's lease, continuation, terminal result, and
+provider/tool attempt settlement. Azem owns session/run/task identity,
+admission, retry, resource claims, Team/Subagent orchestration, SQLite
+repositories, provider/tool bindings, policy, and UI projection. Presentation
+packages must not duplicate either boundary. Release verification uses
+`GOWORK=off` so the declared module version, not an adjacent checkout, defines
+behavior.
 
 ### Native security scanning
 
-`internal/securityscan` uses the same provider drivers, Venat store, governed
-tools, and subagent scheduler as interactive work. `internal/app` constructs a
-background automation profile without claiming the single foreground
+`internal/securityscan` uses the same provider drivers, durable runtime/backend,
+governed tools, and Azem Subagent scheduler as interactive work.
+`internal/app` constructs a background automation profile without claiming the
 `Service.activeRun`, so scans do not create a second model runtime or block a
 conversation. Models submit semantic drafts through host-bound tools; the Go
 finalizer owns target binding, stable identities, report/SARIF projection,

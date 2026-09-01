@@ -14,12 +14,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	hyagent "github.com/Viking602/venat/agent"
-	"github.com/Viking602/venat/api"
 	"github.com/Viking602/venat/message"
 	hyprovider "github.com/Viking602/venat/provider"
 	"github.com/Viking602/venat/tool"
-	hyworker "github.com/Viking602/venat/worker"
 
 	agentservice "github.com/Viking602/azem/internal/agent"
 	"github.com/Viking602/azem/internal/auth"
@@ -142,88 +141,39 @@ func TestMainInstructionsContract(t *testing.T) {
 	}
 }
 
-func TestAgentDefinitionUsesParallelToolDispatch(t *testing.T) {
-	definition := agentDefinitionForSpec("test", "Test", "", hyagent.Spec{}, api.GovernancePolicy{}, nil)
-	if definition.ToolMode != api.ToolModeParallel {
-		t.Fatalf("tool mode = %q, want %q", definition.ToolMode, api.ToolModeParallel)
-	}
-}
-
-func TestMaterializeAgentDefinitionPersistsImmutableRevision(t *testing.T) {
-	ctx := context.Background()
-	store, err := sqlitestore.Open(ctx, ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	codingService, err := agentservice.NewService(store, t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = codingService.Close(ctx) })
+func TestDirectAgentBuildPreservesExecutableSpecAndSeparatesRequestBudget(t *testing.T) {
 	spec := hyagent.Spec{
-		Instructions: "Persist this executable definition.",
+		Instructions: "Preserve this executable profile.",
 		Model:        "definition-test-model",
 		Tools:        []string{"definition.lookup"},
-		LoopPolicy:   hyagent.LoopPolicy{UnlimitedIterations: true, MaxWallClock: time.Minute},
-		ExtraBody:    map[string]any{"custom_wire_option": "definition-test"},
+		LoopPolicy: hyagent.LoopPolicy{
+			UnlimitedIterations: true,
+			ContextTokenTarget:  8192,
+		},
+		ExtraBody: map[string]any{"custom_wire_option": "definition-test"},
 	}
-	governance := api.GovernancePolicy{Budget: api.Budget{
-		MaxTokens: 500, MaxToolCalls: 4, MaxRuntime: time.Minute,
-	}}
-	definition := agentDefinitionForSpec(
-		"azem-definition-test", "Azem Definition Test", "Definition integration test",
-		spec, governance, map[string]string{"role": "test"},
-	)
-	deps := hyagent.BuildDeps{
+	engine, err := hyagent.Build(spec, hyagent.BuildDeps{
 		Providers: hyprovider.Single(&compactionTestDriver{}),
-		Tools: tool.NewBus(planModeTestDriver{definition: tool.Definition{
-			Name: "definition.lookup", EffectType: tool.EffectReadOnly,
-		}}),
-	}
-	for range 2 {
-		engine, err := materializeAgentDefinition(ctx, codingService, definition, spec, deps)
-		if err != nil {
-			t.Fatalf("materialize definition: %v", err)
-		}
-		if engine.Model != spec.Model || !engine.LoopPolicy.UnlimitedIterations ||
-			engine.ExtraBody["custom_wire_option"] != "definition-test" {
-			t.Fatalf("materialized engine=%+v", engine)
-		}
-		definitions := engine.Tools.Definitions()
-		if len(definitions) != 1 || definitions[0].Name != spec.Tools[0] {
-			t.Fatalf("materialized tools=%#v, want %v", definitions, spec.Tools)
-		}
-	}
-	snapshots, err := codingService.Runner().ListAgentDefinitionSnapshots(ctx, api.AgentDefinitionSnapshotSelector{
-		DefinitionIDs: []string{definition.ID},
+		Tools: tool.NewBus(planModeTestDriver{
+			definition: tool.Definition{Name: "definition.lookup", InputSchema: tool.Schema{Type: "object"}},
+			policy:     agentruntime.ToolPolicy{Effect: agentruntime.ToolEffectReadOnly},
+		}),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshots) != 1 || snapshots[0].Definition.Version == "" ||
-		!reflect.DeepEqual(snapshots[0].Definition.Governance, governance) ||
-		!reflect.DeepEqual(snapshots[0].Definition.Tools, spec.Tools) ||
-		len(snapshots[0].Definition.Capabilities) != 0 {
-		t.Fatalf("definition snapshots=%#v", snapshots)
+	engine.ToolMode = tool.ModeParallel
+	parallel := true
+	engine.ParallelToolCalls = &parallel
+	if engine.Model != spec.Model || engine.ToolMode != tool.ModeParallel || engine.ParallelToolCalls == nil || !*engine.ParallelToolCalls ||
+		!engine.LoopPolicy.UnlimitedIterations || engine.LoopPolicy.Budget != nil ||
+		engine.LoopPolicy.ContextTokenTarget != 8192 ||
+		engine.ExtraBody["custom_wire_option"] != "definition-test" {
+		t.Fatalf("direct engine=%+v", engine)
 	}
-	firstVersion := snapshots[0].Definition.Version
-	spec.LoopPolicy.MaxWallClock = 2 * time.Minute
-	definition = agentDefinitionForSpec(
-		definition.ID, definition.Name, definition.Description,
-		spec, governance, map[string]string{"role": "test"},
-	)
-	if _, err := materializeAgentDefinition(ctx, codingService, definition, spec, deps); err != nil {
-		t.Fatalf("materialize changed definition: %v", err)
-	}
-	snapshots, err = codingService.Runner().ListAgentDefinitionSnapshots(ctx, api.AgentDefinitionSnapshotSelector{
-		DefinitionIDs: []string{definition.ID},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(snapshots) != 2 || snapshots[0].Definition.Version == snapshots[1].Definition.Version ||
-		(snapshots[0].Definition.Version != firstVersion && snapshots[1].Definition.Version != firstVersion) {
-		t.Fatalf("changed definition snapshots=%#v", snapshots)
+	definitions := engine.Tools.Definitions()
+	if len(definitions) != 1 || definitions[0].Name != spec.Tools[0] {
+		t.Fatalf("direct engine tools=%#v, want %v", definitions, spec.Tools)
 	}
 }
 
@@ -301,38 +251,73 @@ func TestArtifactV2ReadModesStayBounded(t *testing.T) {
 	}
 }
 
-func TestSingleRunManifestAcceptsEmptyResolvedSkillSet(t *testing.T) {
-	manifest := singleRunManifest{
-		Version: 2, Provider: "chatgpt", AccountID: "account-1", Model: "model", Reasoning: "minimal",
-		ActiveSkills: []string{}, PlanMode: true, ApprovedPlanID: "plan-artifact", StaticIdentity: "identity", StartedAt: time.Now().UTC(),
-	}
-	encoded, err := json.Marshal(manifest)
+func TestExecutionManifestAcceptsEmptyResolvedSkillSet(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
-	decoded, err := decodeSingleRunManifest(string(encoded))
-	if err != nil || decoded.AccountID != manifest.AccountID || !decoded.PlanMode || decoded.ApprovedPlanID != "plan-artifact" || decoded.ActiveSkills == nil || len(decoded.ActiveSkills) != 0 {
-		t.Fatalf("decoded empty-skill manifest=%+v error=%v", decoded, err)
+	defer store.Close(context.Background())
+	workspace := t.TempDir()
+	coding, err := agentservice.NewService(store, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer coding.Close(context.Background())
+	profile := &agentruntime.ExecutableProfile{
+		Provider: "chatgpt", AccountID: "account-1", RawModel: "model", Model: "model", Reasoning: "minimal",
+		ActiveSkills: []string{}, ToolSetHash: "tool-set", ToolProfileHash: "tool-profile",
+		PlanMode: true, ApprovedPlanID: "plan-artifact", StaticIdentity: "identity",
+		WorkspaceAnchor: workspace, PromptFingerprint: "prompt", ToolSchemaFingerprint: "schema",
+	}
+	run, err := coding.StartRunWithMetadata(ctx, "test manifest", map[string]string{"session_id": "session-1"}, agentservice.RunExecutionPolicy{ExecutableProfile: profile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := coding.LoadRunExecutionManifest(ctx, run.RunID)
+	if err != nil || manifest.AccountID != profile.AccountID || !manifest.PlanMode || manifest.ApprovedPlanID != "plan-artifact" || manifest.ActiveSkills == nil || len(manifest.ActiveSkills) != 0 {
+		t.Fatalf("persisted empty-skill manifest=%+v error=%v", manifest, err)
 	}
 }
 
-type planModeTestDriver struct{ definition tool.Definition }
+type planModeTestDriver struct {
+	definition tool.Definition
+	policy     agentruntime.ToolPolicy
+}
 
 func (d planModeTestDriver) Definition() tool.Definition { return d.definition }
+func (d planModeTestDriver) ToolPolicy() agentruntime.ToolPolicy {
+	return d.policy
+}
 
 func (planModeTestDriver) Execute(context.Context, tool.Call, tool.UpdateSink) (tool.Result, error) {
 	return tool.Result{}, nil
 }
 
+func TestAutomationObservedDriverPreservesToolPolicy(t *testing.T) {
+	driver := &automationObservedDriver{Driver: planModeTestDriver{
+		definition: tool.Definition{Name: agentservice.ToolReadFile},
+		policy:     agentruntime.ToolPolicy{Effect: agentruntime.ToolEffectReadOnly, RiskLevel: "low"},
+	}}
+	descriptor, err := agentservice.DescribeTool(driver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := descriptor.PolicyForCall(tool.Call{Name: agentservice.ToolReadFile})
+	if policy.Effect != agentruntime.ToolEffectReadOnly || policy.RequiresApproval || policy.RequiresActionTask || policy.RiskLevel != "low" {
+		t.Fatalf("observed read policy = %+v", policy)
+	}
+}
+
 func TestPlanModeToolDriversKeepOnlyReadOnlyOperations(t *testing.T) {
 	drivers := []tool.Driver{
-		planModeTestDriver{tool.Definition{Name: "coding.read_file", EffectType: tool.EffectReadOnly}},
-		planModeTestDriver{tool.Definition{Name: subagentSpawnTool, EffectType: tool.EffectReadOnly}},
-		planModeTestDriver{tool.Definition{Name: subagentKillTool, EffectType: tool.EffectReadOnly}},
+		planModeTestDriver{definition: tool.Definition{Name: "coding.read_file"}, policy: agentruntime.ToolPolicy{Effect: agentruntime.ToolEffectReadOnly}},
+		planModeTestDriver{definition: tool.Definition{Name: subagentSpawnTool}, policy: agentruntime.ToolPolicy{Effect: agentruntime.ToolEffectReadOnly}},
+		planModeTestDriver{definition: tool.Definition{Name: subagentKillTool}, policy: agentruntime.ToolPolicy{Effect: agentruntime.ToolEffectReadOnly}},
 		&askDriver{},
 		&submitPlanDriver{},
-		planModeTestDriver{tool.Definition{Name: "coding.write_file", EffectType: tool.EffectWrite}},
-		planModeTestDriver{tool.Definition{Name: "coding.shell", EffectType: tool.EffectExternalSideEffect}},
+		planModeTestDriver{definition: tool.Definition{Name: "coding.write_file"}, policy: agentruntime.ToolPolicy{Effect: agentruntime.ToolEffectWrite}},
+		planModeTestDriver{definition: tool.Definition{Name: "coding.shell"}, policy: agentruntime.ToolPolicy{Effect: agentruntime.ToolEffectExternalSideEffect}},
 	}
 	if got, want := toolDriverNames(planModeToolDrivers(drivers)), []string{"coding.read_file", subagentSpawnTool, askToolName, submitPlanToolName}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("plan mode tools = %v, want %v", got, want)
@@ -368,36 +353,43 @@ func TestPlanModeModelRouteOverridesOnlyPlanTurns(t *testing.T) {
 	}
 }
 
-type retryConfiguredDriver struct {
-	maxDelay time.Duration
-	observer hyprovider.RetryObserver
-}
+type retryConfiguredDriver struct{ calls int }
+
+type retryConfiguredError struct{}
+
+func (retryConfiguredError) Error() string   { return "retry fixture" }
+func (retryConfiguredError) Retryable() bool { return true }
 
 func (d *retryConfiguredDriver) Metadata() hyprovider.Metadata {
 	return hyprovider.Metadata{Name: "retry-configured"}
 }
 
 func (d *retryConfiguredDriver) Stream(context.Context, hyprovider.Request) (hyprovider.Stream, error) {
-	return nil, errors.New("not used")
+	d.calls++
+	if d.calls <= 2 {
+		return nil, retryConfiguredError{}
+	}
+	return hyprovider.NewSliceStream([]hyprovider.Event{{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete}}), nil
 }
 
-func (d *retryConfiguredDriver) SetMaxRetryDelay(maxDelay time.Duration) {
-	d.maxDelay = maxDelay
-}
-
-func (d *retryConfiguredDriver) SetRetryObserver(observer hyprovider.RetryObserver) {
-	d.observer = observer
-}
-
-func TestObserveProviderRetriesBindsConfiguredDelayCap(t *testing.T) {
-	host := &Service{cfg: config.Default()}
-	host.cfg.Retry.MaxDelayDuration = 37 * time.Second
+func TestRetryProviderDriverUsesConfiguredAttemptCount(t *testing.T) {
+	policy := config.Default().Retry
+	policy.Enabled = true
+	policy.MaxRetries = 2
+	policy.BaseDelayDuration = 0
 	driver := &retryConfiguredDriver{}
 
-	observeProviderRetries(context.Background(), host, "session", "run", "provider", driver)
-
-	if driver.maxDelay != host.cfg.Retry.MaxDelayDuration || driver.observer == nil {
-		t.Fatalf("retry configuration maxDelay=%s observer=%v", driver.maxDelay, driver.observer != nil)
+	retrying := retryProviderDriver(context.Background(), nil, "session", "run", "provider", policy, driver)
+	stream, err := retrying.Stream(context.Background(), hyprovider.Request{Model: "model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	if event, recvErr := stream.Recv(); recvErr != nil || event.Kind != hyprovider.EventDone {
+		t.Fatalf("event=%#v error=%v", event, recvErr)
+	}
+	if driver.calls != 3 {
+		t.Fatalf("physical calls=%d, want initial plus two retries", driver.calls)
 	}
 }
 
@@ -528,22 +520,22 @@ func TestRecapPromptRequiresAConcisePlainTextStatus(t *testing.T) {
 
 func TestMainRunWaitsForWorkspaceClaimInsteadOfFailing(t *testing.T) {
 	calls := 0
-	outcome, err := executeMainRunUntilAvailable(context.Background(), func() (hyworker.ExecutionOutcome, error) {
+	outcome, err := executeMainRunUntilAvailable(context.Background(), func() (agentservice.ExecutionOutcome, error) {
 		calls++
 		if calls == 1 {
-			return hyworker.ExecutionOutcome{}, &hyworker.TaskExecutionUnavailableError{
+			return agentservice.ExecutionOutcome{}, &agentservice.TaskExecutionUnavailableError{
 				TaskID: "waiting-task",
-				ResourceClaims: api.ResourceClaimDecision{
-					Reason: api.ResourceClaimDeniedConflict,
-					Conflicts: []api.ResourceClaim{{
+				ResourceClaims: agentruntime.ResourceClaimDecision{
+					Reason: agentruntime.ResourceClaimDeniedConflict,
+					Conflicts: []agentruntime.ResourceClaim{{
 						ID: "active-writer", ExpiresAt: time.Now().UTC().Add(time.Millisecond),
 					}},
 				},
 			}
 		}
-		return hyworker.ExecutionOutcome{State: hyworker.ExecutionCompleted}, nil
+		return agentservice.ExecutionOutcome{State: agentservice.ExecutionCompleted}, nil
 	})
-	if err != nil || outcome.State != hyworker.ExecutionCompleted || calls != 2 {
+	if err != nil || outcome.State != agentservice.ExecutionCompleted || calls != 2 {
 		t.Fatalf("outcome=%+v calls=%d error=%v", outcome, calls, err)
 	}
 }
@@ -574,5 +566,126 @@ func TestResolveLLMuxDriverUsesConfiguredModelAndStoredCredential(t *testing.T) 
 	}
 	if account.ID != "api-key" || model != "gpt-test" || window != 128000 || driver.Metadata().Name != "llmux:openai" {
 		t.Fatalf("resolution = account:%+v model:%q window:%d metadata:%+v", account, model, window, driver.Metadata())
+	}
+}
+
+type automationCoordinatorHost struct {
+	*Service
+	bound bool
+}
+
+func (h *automationCoordinatorHost) BindProviderEngine(engine hyagent.Engine) hyagent.Engine {
+	h.bound = true
+	return h.Service.BindProviderEngine(engine)
+}
+
+func TestAutomationEngineUsesSharedHostCoordinator(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	workspace := t.TempDir()
+	coding, err := agentservice.NewService(store, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer coding.Close(ctx)
+	cfg := config.Default()
+	hostService := NewService(ctx, cfg)
+	defer hostService.Shutdown(ctx)
+	host := &automationCoordinatorHost{Service: hostService}
+	runtime := &ProviderRuntime{cfg: cfg, coding: coding, host: host}
+	metadata := map[string]string{
+		"session_id":         "automation-session",
+		"automation_kind":    "security_scan",
+		"automation_version": "v1",
+	}
+	run, err := coding.StartRunWithMetadata(ctx, "inspect the workspace", metadata, agentservice.RunExecutionPolicy{AgentVersion: "v1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := TurnRequest{
+		SessionID: "automation-session", Prompt: "inspect the workspace", Provider: "test", Model: "model", Reasoning: "high",
+		DisableSubagents: true,
+		automation: &automationTurn{
+			Kind: "security_scan", Version: "v1", WorkspaceRoot: workspace, Instructions: "Inspect the workspace without changing it.",
+			AllowedTools: map[string]bool{agentservice.ToolReadFile: true},
+		},
+	}
+	_, engine, err := runtime.buildAutomationRun(ctx, request, run, "account", "model", 128_000, metadataOnlyDriver{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !host.bound {
+		t.Fatal("automation engine bypassed the shared host coordinator")
+	}
+	driver, ok := engine.Tools.Driver(agentservice.ToolReadFile)
+	if !ok {
+		t.Fatalf("automation engine omitted %s", agentservice.ToolReadFile)
+	}
+	governed, ok := driver.(*governedAgentTool)
+	if !ok || governed.host != hostService || governed.approvalGate == nil {
+		t.Fatalf("automation tool is not bound to shared approval coordinator: %#v", driver)
+	}
+}
+
+func TestAutomationSessionIsMaterializedAndArchived(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	sessions := session.NewService(store.DB(), store.Blobs())
+	host := NewService(ctx, config.Default())
+	host.AttachDurable(sessions, nil)
+	defer host.Shutdown(ctx)
+	runtime := &ProviderRuntime{host: host}
+	request := TurnRequest{
+		SessionID: "security:scan:worker", Provider: "test", Model: "model", Reasoning: "high",
+	}
+	if err := runtime.ensureAutomationSession(ctx, request, "security_audit"); err != nil {
+		t.Fatal(err)
+	}
+	created, err := sessions.LoadSession(ctx, request.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Title != "security_audit" || created.ProviderID != "test" || created.ModelID != "model" {
+		t.Fatalf("automation session = %+v", created)
+	}
+	var archived bool
+	if err := store.DB().QueryRowContext(ctx, `SELECT archived FROM session_ui_state WHERE session_id=?`, request.SessionID).Scan(&archived); err != nil {
+		t.Fatal(err)
+	}
+	if !archived {
+		t.Fatal("automation session was not archived")
+	}
+
+	if _, err := sessions.Ensure(ctx, session.Session{ID: "user-session", Title: "User session"}); err != nil {
+		t.Fatal(err)
+	}
+	request.SessionID = "user-session"
+	if err := runtime.ensureAutomationSession(ctx, request, "security_audit"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT COALESCE((SELECT archived FROM session_ui_state WHERE session_id='user-session'),0)`).Scan(&archived); err != nil {
+		t.Fatal(err)
+	}
+	if archived {
+		t.Fatal("existing user session was archived")
+	}
+}
+
+func TestSecurityExecutionErrorPreservesBatchFailures(t *testing.T) {
+	err := securityExecutionError(&tool.BatchExecutionError{Failures: []tool.CallExecutionError{
+		{CallID: "read-1", Err: errors.New("first failure")},
+		{CallID: "read-2", Err: errors.New("second failure")},
+	}})
+	if message := err.Error(); !strings.Contains(message, "read-1") || !strings.Contains(message, "first failure") ||
+		!strings.Contains(message, "read-2") || !strings.Contains(message, "second failure") {
+		t.Fatalf("batch error lost call details: %q", message)
 	}
 }

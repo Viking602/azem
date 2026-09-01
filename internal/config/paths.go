@@ -26,6 +26,17 @@ type Paths struct {
 	Workspace  string
 }
 
+// RuntimeDatabasePath resolves the unified SQLite path without migrating or
+// opening it. Bootstrap uses it to acquire the process recovery fence before
+// any database relocation, backup, migration, or read.
+func RuntimeDatabasePath() (string, error) {
+	home, err := Home()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, databaseFileName), nil
+}
+
 func ResolvePaths(startupWorkspace string) (Paths, error) {
 	return resolvePaths(startupWorkspace, "")
 }

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/venat/tool"
 
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
@@ -14,7 +15,11 @@ import (
 type externalTestDriver struct{ name string }
 
 func (driver externalTestDriver) Definition() tool.Definition {
-	return tool.Definition{Name: driver.name, Description: "external", InputSchema: tool.Schema{Type: "object"}, EffectType: tool.EffectReadOnly}
+	return tool.Definition{Name: driver.name, Description: "external", InputSchema: tool.Schema{Type: "object"}}
+}
+
+func (externalTestDriver) ToolPolicy() agentruntime.ToolPolicy {
+	return readOnlyPolicy("test")
 }
 
 func (driver externalTestDriver) Execute(context.Context, tool.Call, tool.UpdateSink) (tool.Result, error) {

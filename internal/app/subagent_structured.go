@@ -111,7 +111,7 @@ func structuredSubagentGuardrail(contract *structuredSubagentContract) hyagent.O
 		}
 		attempts++
 		if attempts <= structuredSubagentRetries {
-			return hyagent.RetryOutput(message.NewText(message.RoleUser, "Your final output did not match the required JSON Schema: "+result.Error+"\\nReturn only one corrected JSON value, with no Markdown fence or prose.")), nil
+			return hyagent.RetryOutputWithPolicy(hyagent.RetryPolicy{IncludeRejectedOutput: true}, message.NewText(message.RoleUser, "Your final output did not match the required JSON Schema: "+result.Error+"\\nReturn only one corrected JSON value, with no Markdown fence or prose.")), nil
 		}
 		if contract.mode == "strict" {
 			return hyagent.BlockOutput("schema_violation: " + result.Error), nil

@@ -14,6 +14,7 @@ import (
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/hooks"
 	"github.com/Viking602/azem/internal/provider/catalog"
+	"github.com/Viking602/azem/internal/provider/codex"
 	llmuxdriver "github.com/Viking602/azem/internal/provider/llmux"
 )
 
@@ -776,6 +777,9 @@ func subscriptionModelsFromCatalog(models []catalog.Model) []config.LLMuxModelCo
 		}
 		if model.SupportsStructured {
 			capabilities = append(capabilities, "structured-output")
+		}
+		if model.SupportsServiceTier(codex.FastServiceTier) {
+			capabilities = append(capabilities, "fast")
 		}
 		result = append(result, config.LLMuxModelConfig{
 			ID: model.ID, Disabled: model.Disabled, Name: model.Name, Aliases: append([]string(nil), model.Aliases...),

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/azem/internal/session"
 	"github.com/Viking602/venat/message"
 )
@@ -287,7 +288,8 @@ func (importer *Importer) convertClaudeRecord(targetSessionID, sourceSessionID, 
 		if len(parts) == 0 && len(calls) == 0 {
 			return nil, nil
 		}
-		modelMessage := message.Message{Role: message.RoleAssistant, Content: parts, ToolCalls: calls, Visibility: message.VisibilityShared, CreatedAt: createdAt}
+		modelMessage := message.Message{Role: message.RoleAssistant, Content: parts, ToolCalls: calls}
+		agentruntime.SetMessageCreatedAt(&modelMessage, createdAt)
 		modelMessage.Response.Model = stringValue(wireMessage["model"])
 		modelMessage.Response.ID = stringValue(wireMessage["id"])
 		block, err := importedBlock(modelMessage, nil, runID)
@@ -315,7 +317,7 @@ func (importer *Importer) convertClaudeRecord(targetSessionID, sourceSessionID, 
 		parts = append(parts, imageParts...)
 		result := message.ToolResult{ToolCallID: callID, Name: firstText(toolNames[callID], "unknown"), Parts: parts, IsError: boolValue(item["is_error"])}
 		modelMessage := message.NewToolResult(result)
-		modelMessage.CreatedAt = createdAt
+		agentruntime.SetMessageCreatedAt(&modelMessage, createdAt)
 		block, err := importedBlock(modelMessage, nil, runID)
 		if err != nil {
 			return nil, err
@@ -334,7 +336,8 @@ func (importer *Importer) convertClaudeRecord(targetSessionID, sourceSessionID, 
 	if len(parts) == 0 && len(attachments) == 0 {
 		return nil, nil
 	}
-	modelMessage := message.Message{Role: message.RoleUser, Content: parts, Visibility: message.VisibilityShared, CreatedAt: createdAt}
+	modelMessage := message.Message{Role: message.RoleUser, Content: parts}
+	agentruntime.SetMessageCreatedAt(&modelMessage, createdAt)
 	block, err := importedBlock(modelMessage, attachments, runID)
 	if err != nil {
 		return nil, err

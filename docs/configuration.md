@@ -1,6 +1,6 @@
 # Configuration
 
-Last verified: 2026-08-24
+Last verified: 2026-08-30
 
 `internal/config.Config` and `internal/config.Default` are authoritative. Azem
 strictly decodes YAML, applies defaults, and validates the complete result
@@ -175,7 +175,7 @@ working directory. Remote entries use `transport: streamable_http` and an HTTPS
 URL; plain HTTP remains restricted to loopback hosts. Desktop header and
 environment inputs accept only `env:NAME` or `keyring:NAME` references. Literal
 secret values and plugin-scoped runtime variables are neither serialized nor
-emitted to the frontend.
+emitted to the renderer.
 
 ## Network proxy resolution
 
@@ -209,7 +209,8 @@ plugins:
 The runtime always scans the Azem data directory at
 `plugin-packages/`. Install Azem-only plugins under
 `plugin-packages/local/<plugin>`. When `import_codex` is true, desktop startup
-reads `codex plugin list --json` only to build an available-import catalog.
+reads Codex's local `config.toml` and plugin package directories to build an
+available-import catalog; it never launches or depends on the Codex CLI.
 Nothing is copied or executed until its plugin ID is selected in
 `codex_imports` through Settings. Selected packages are copied to
 `plugin-packages/codex/<marketplace>/<plugin>` before scanning. Codex directories
@@ -571,13 +572,13 @@ Theme, interface font, interface font size, and chat-surface text sizes are
 desktop-only preferences. The searchable font picker reads installed families
 and their localized names from macOS AppKit, Linux fontconfig, or the Windows
 installed font collection. Preferences apply immediately, persist in the
-WebView's local storage, and do not modify `config.yaml`. Interface font size
+desktop preference store, and do not modify `config.yaml`. Interface font size
 is clamped to 11–20 px; the default is the operating-system UI font at 14 px
 and applies to chrome such as the sidebar, Settings, and Inspector shell.
 Conversation UI text (`azem:chat-font-size`, default 13 px, 12–20 px) and
 fenced code (`azem:chat-code-font-size`, default 12 px, 11–18 px) are
-independent and apply only on `.thread-surface` and the subagent side-chat
-transcript. Code blocks keep their dedicated monospace stack.
+independent and apply only to the conversation and subagent transcript
+surfaces. Code blocks keep their dedicated monospace stack.
 
 ## Usage ledger
 

@@ -8,18 +8,17 @@ import (
 	"testing"
 
 	"github.com/Viking602/azem/internal/resource"
-	"github.com/Viking602/venat/coding"
 	"github.com/Viking602/venat/tool"
 )
 
 func TestSSHResourceListsConfiguredHostsThroughReadTool(t *testing.T) {
-	ctx := tool.WithCaller(context.Background(), tool.CallerInfo{SessionID: "ssh-index"})
+	ctx := WithInvocation(context.Background(), Invocation{SessionID: "ssh-index"})
 	root := t.TempDir()
 	router := resource.NewRouter(2 << 20)
 	service := newASTWriteService(t, ctx, root, router)
-	read := findWorkspaceTool(t, service, root, coding.ToolReadFile)
+	read := findWorkspaceTool(t, service, root, ToolReadFile)
 	arguments := json.RawMessage(`{"path":"ssh://"}`)
-	result, err := read.Execute(ctx, tool.Call{ID: "ssh", Name: coding.ToolReadFile, Arguments: arguments}, nil)
+	result, err := read.Execute(ctx, tool.Call{ID: "ssh", Name: ToolReadFile, Arguments: arguments}, nil)
 	if err != nil || result.IsError || !strings.Contains(result.Content, "SSH hosts") {
 		t.Fatalf("SSH host index = %#v, %v", result, err)
 	}
@@ -36,9 +35,9 @@ func TestReliableSearchReadsExactInternalResource(t *testing.T) {
 		t.Fatal(err)
 	}
 	service := newASTWriteService(t, ctx, root, router)
-	search := findWorkspaceTool(t, service, root, coding.ToolSearch)
+	search := findWorkspaceTool(t, service, root, ToolSearch)
 	arguments := json.RawMessage(`{"query":"needle","path":"fixture://sample.txt"}`)
-	result, err := search.Execute(ctx, tool.Call{ID: "search", Name: coding.ToolSearch, Arguments: arguments}, nil)
+	result, err := search.Execute(ctx, tool.Call{ID: "search", Name: ToolSearch, Arguments: arguments}, nil)
 	if err != nil || result.IsError || !strings.Contains(result.Content, "[fixture://sample.txt#") || !strings.Contains(result.Content, "2:remote needle") {
 		t.Fatalf("internal resource search = %#v, %v", result, err)
 	}

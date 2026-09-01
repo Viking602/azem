@@ -9,11 +9,12 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"time"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/azem/internal/blobstore"
 	"github.com/Viking602/azem/internal/store/sqlite/dbgen"
-	"github.com/Viking602/venat/api"
 )
 
 const (
@@ -28,7 +29,6 @@ const (
 	kindAction       = "action_attempt"
 	kindAgentProfile = "agent_profile"
 	kindCapability   = "capability"
-	kindUsage        = "usage"
 	kindDeadLetter   = "dead_letter"
 	kindHandoff      = "handoff"
 	kindTeamState    = "team_state"
@@ -36,31 +36,31 @@ const (
 )
 
 type unitOfWork struct {
-	db      *sql.DB
-	tx      *sql.Tx
-	blobs   blobstore.Store
-	pending map[string][]byte
-	closed  bool
+	db       *sql.DB
+	tx       *sql.Tx
+	blobs    blobstore.Store
+	pending  map[string][]byte
+	obsolete map[string]struct{}
+	closed   bool
 }
 
-func (u *unitOfWork) Runs() api.RunStore                     { return u }
-func (u *unitOfWork) Tasks() api.TaskStore                   { return u }
-func (u *unitOfWork) Events() api.EventStore                 { return u }
-func (u *unitOfWork) Blackboard() api.BlackboardReadWriter   { return u }
-func (u *unitOfWork) MailboxOutbox() api.MailboxOutboxStore  { return u }
-func (u *unitOfWork) UserMessages() api.UserMessageStore     { return u }
-func (u *unitOfWork) Trace() api.TraceStore                  { return u }
-func (u *unitOfWork) Leases() api.LeaseStore                 { return u }
-func (u *unitOfWork) Approvals() api.ApprovalStore           { return u }
-func (u *unitOfWork) ResumeTokens() api.ResumeTokenStore     { return u }
-func (u *unitOfWork) ActionAttempts() api.ActionAttemptStore { return u }
-func (u *unitOfWork) AgentProfiles() api.AgentProfileStore   { return u }
-func (u *unitOfWork) CapabilityCatalog() api.CapabilityStore { return u }
-func (u *unitOfWork) UsageRecords() api.UsageStore           { return u }
-func (u *unitOfWork) DeadLetters() api.DeadLetterStore       { return u }
-func (u *unitOfWork) Handoffs() api.HandoffStore             { return u }
-func (u *unitOfWork) TeamStates() api.TeamStateStore         { return u }
-func (u *unitOfWork) AgentInstances() api.AgentInstanceStore { return u }
+func (u *unitOfWork) Runs() agentruntime.RunStore                     { return u }
+func (u *unitOfWork) Tasks() agentruntime.TaskStore                   { return u }
+func (u *unitOfWork) Events() agentruntime.EventStore                 { return u }
+func (u *unitOfWork) Blackboard() agentruntime.BlackboardReadWriter   { return u }
+func (u *unitOfWork) MailboxOutbox() agentruntime.MailboxOutboxStore  { return u }
+func (u *unitOfWork) UserMessages() agentruntime.UserMessageStore     { return u }
+func (u *unitOfWork) Trace() agentruntime.TraceStore                  { return u }
+func (u *unitOfWork) Leases() agentruntime.LeaseStore                 { return u }
+func (u *unitOfWork) Approvals() agentruntime.ApprovalStore           { return u }
+func (u *unitOfWork) ResumeTokens() agentruntime.ResumeTokenStore     { return u }
+func (u *unitOfWork) ActionAttempts() agentruntime.ActionAttemptStore { return u }
+func (u *unitOfWork) AgentProfiles() agentruntime.AgentProfileStore   { return u }
+func (u *unitOfWork) CapabilityCatalog() agentruntime.CapabilityStore { return u }
+func (u *unitOfWork) DeadLetters() agentruntime.DeadLetterStore       { return u }
+func (u *unitOfWork) Handoffs() agentruntime.HandoffStore             { return u }
+func (u *unitOfWork) TeamStates() agentruntime.TeamStateStore         { return u }
+func (u *unitOfWork) AgentInstances() agentruntime.AgentInstanceStore { return u }
 
 func (u *unitOfWork) Commit(ctx context.Context) error {
 	if u.closed {
@@ -76,6 +76,9 @@ func (u *unitOfWork) Commit(ctx context.Context) error {
 	if err := u.tx.Commit(); err != nil {
 		return errors.Join(err, u.cleanupInstalled(installed))
 	}
+	// The SQL commit is authoritative. Obsolete blob collection is best-effort;
+	// reporting it as a commit failure would create an ambiguous durable outcome.
+	_ = u.cleanupInstalled(u.obsoleteDigests())
 	return nil
 }
 
@@ -180,7 +183,15 @@ func payloadReferenced(ctx context.Context, queryer rowQueryer, digest string) (
 		SELECT 1 FROM events WHERE data_sha256 = ?
 		UNION ALL
 		SELECT 1 FROM records WHERE data_sha256 = ?
-	)`, digest, digest).Scan(&referenced)
+		UNION ALL
+		SELECT 1 FROM agent_executions WHERE execution_digest = ?
+		UNION ALL
+		SELECT 1 FROM agent_effect_attempts WHERE attempt_digest = ?
+		UNION ALL
+		SELECT 1 FROM agent_execution_receipts WHERE receipt_digest = ?
+		UNION ALL
+		SELECT 1 FROM agent_execution_bindings WHERE manifest_digest = ?
+	)`, digest, digest, digest, digest, digest, digest).Scan(&referenced)
 	return referenced, err
 }
 
@@ -203,6 +214,25 @@ func (u *unitOfWork) stagePayload(digest string, payload []byte) {
 	u.pending[digest] = append([]byte(nil), payload...)
 }
 
+func (u *unitOfWork) stageObsoletePayload(digest string) {
+	if digest == "" {
+		return
+	}
+	if u.obsolete == nil {
+		u.obsolete = make(map[string]struct{})
+	}
+	u.obsolete[digest] = struct{}{}
+}
+
+func (u *unitOfWork) obsoleteDigests() []string {
+	digests := make([]string, 0, len(u.obsolete))
+	for digest := range u.obsolete {
+		digests = append(digests, digest)
+	}
+	sort.Strings(digests)
+	return digests
+}
+
 func (u *unitOfWork) loadPayload(ctx context.Context, inline []byte, digest string) ([]byte, error) {
 	if digest != "" {
 		if payload, ok := u.pending[digest]; ok {
@@ -212,16 +242,16 @@ func (u *unitOfWork) loadPayload(ctx context.Context, inline []byte, digest stri
 	return loadPayload(ctx, u.blobs, inline, digest)
 }
 
-func (u *unitOfWork) SaveRun(ctx context.Context, value api.Run) error {
+func (u *unitOfWork) SaveRun(ctx context.Context, value agentruntime.Run) error {
 	return u.save(ctx, kindRun, value.ID, "", value.ID, "", string(value.Status), value.CreatedAt, "", "", value, true)
 }
 
-func (u *unitOfWork) LoadRun(ctx context.Context, id string) (api.Run, error) {
-	return loadRecord[api.Run](ctx, u, kindRun, id, "")
+func (u *unitOfWork) LoadRun(ctx context.Context, id string) (agentruntime.Run, error) {
+	return loadRecord[agentruntime.Run](ctx, u, kindRun, id, "")
 }
 
-func (u *unitOfWork) ListRuns(ctx context.Context, selector api.RunSelector) ([]api.Run, error) {
-	values, err := listRecords[api.Run](ctx, u, kindRun, "")
+func (u *unitOfWork) ListRuns(ctx context.Context, selector agentruntime.RunSelector) ([]agentruntime.Run, error) {
+	values, err := listRunRecords(ctx, u, selector.Statuses)
 	if err != nil {
 		return nil, err
 	}
@@ -242,19 +272,48 @@ func (u *unitOfWork) ListRuns(ctx context.Context, selector api.RunSelector) ([]
 	return limit(filtered, selector.Limit), nil
 }
 
-func (u *unitOfWork) SaveTask(ctx context.Context, value api.Task) error {
+func listRunRecords(ctx context.Context, u *unitOfWork, statuses []agentruntime.RunStatus) ([]agentruntime.Run, error) {
+	if len(statuses) == 0 {
+		return listRecords[agentruntime.Run](ctx, u, kindRun, "")
+	}
+	query := `SELECT data,data_sha256 FROM records WHERE kind=? AND status IN (?` + strings.Repeat(",?", len(statuses)-1) + `) ORDER BY created_at,key1,key2`
+	args := make([]any, 1, len(statuses)+1)
+	args[0] = kindRun
+	for _, status := range statuses {
+		args = append(args, string(status))
+	}
+	listed, err := u.tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list %s: %w", kindRun, err)
+	}
+	defer listed.Close()
+	rows := make([]payloadRow, 0)
+	for listed.Next() {
+		var row payloadRow
+		if err := listed.Scan(&row.Data, &row.Digest); err != nil {
+			return nil, fmt.Errorf("list %s: %w", kindRun, err)
+		}
+		rows = append(rows, row)
+	}
+	if err := listed.Err(); err != nil {
+		return nil, fmt.Errorf("list %s: %w", kindRun, err)
+	}
+	return decodePayloadRows[agentruntime.Run](ctx, u, rows)
+}
+
+func (u *unitOfWork) SaveTask(ctx context.Context, value agentruntime.Task) error {
 	return u.save(ctx, kindTask, value.ID, value.RunID, value.RunID, value.ID, string(value.Status), value.CreatedAt, "", "", value, true)
 }
 
-func (u *unitOfWork) LoadTask(ctx context.Context, runID string, taskID string) (api.Task, error) {
-	return loadRecord[api.Task](ctx, u, kindTask, taskID, runID)
+func (u *unitOfWork) LoadTask(ctx context.Context, runID string, taskID string) (agentruntime.Task, error) {
+	return loadRecord[agentruntime.Task](ctx, u, kindTask, taskID, runID)
 }
 
-func (u *unitOfWork) ListTasks(ctx context.Context, runID string) ([]api.Task, error) {
-	return listRecords[api.Task](ctx, u, kindTask, runID)
+func (u *unitOfWork) ListTasks(ctx context.Context, runID string) ([]agentruntime.Task, error) {
+	return listRecords[agentruntime.Task](ctx, u, kindTask, runID)
 }
 
-func (u *unitOfWork) AppendEvent(ctx context.Context, value api.Event) error {
+func (u *unitOfWork) AppendEvent(ctx context.Context, value agentruntime.Event) error {
 	queries := dbgen.New(u.tx)
 	if value.Sequence <= 0 {
 		latest, err := queries.LatestEventSequence(ctx, value.RunID)
@@ -285,15 +344,15 @@ func (u *unitOfWork) AppendEvent(ctx context.Context, value api.Event) error {
 	return nil
 }
 
-func (u *unitOfWork) ListEvents(ctx context.Context, runID string) ([]api.Event, error) {
+func (u *unitOfWork) ListEvents(ctx context.Context, runID string) ([]agentruntime.Event, error) {
 	return u.listEventsAfter(ctx, runID, 0, false)
 }
 
-func (u *unitOfWork) ListAfter(ctx context.Context, runID string, afterSeq uint64) ([]api.Event, error) {
+func (u *unitOfWork) ListAfter(ctx context.Context, runID string, afterSeq uint64) ([]agentruntime.Event, error) {
 	return u.listEventsAfter(ctx, runID, afterSeq, true)
 }
 
-func (u *unitOfWork) listEventsAfter(ctx context.Context, runID string, afterSeq uint64, strict bool) ([]api.Event, error) {
+func (u *unitOfWork) listEventsAfter(ctx context.Context, runID string, afterSeq uint64, strict bool) ([]agentruntime.Event, error) {
 	queries := dbgen.New(u.tx)
 	var payloads []payloadRow
 	if strict {
@@ -317,23 +376,23 @@ func (u *unitOfWork) listEventsAfter(ctx context.Context, runID string, afterSeq
 			payloads = append(payloads, payloadRow{Data: row.Data, Digest: row.DataSha256})
 		}
 	}
-	return decodePayloadRows[api.Event](ctx, u, payloads)
+	return decodePayloadRows[agentruntime.Event](ctx, u, payloads)
 }
 
-func (u *unitOfWork) SaveTraceSpan(ctx context.Context, value api.TraceSpan) error {
+func (u *unitOfWork) SaveTraceSpan(ctx context.Context, value agentruntime.TraceSpan) error {
 	return u.save(ctx, kindTrace, value.ID, "", value.RunID, value.TaskID, string(value.Status), value.StartedAt, "", "", value, true)
 }
 
-func (u *unitOfWork) ListTraceSpans(ctx context.Context, runID string) ([]api.TraceSpan, error) {
-	return listRecords[api.TraceSpan](ctx, u, kindTrace, runID)
+func (u *unitOfWork) ListTraceSpans(ctx context.Context, runID string) ([]agentruntime.TraceSpan, error) {
+	return listRecords[agentruntime.TraceSpan](ctx, u, kindTrace, runID)
 }
 
-func (u *unitOfWork) WriteItem(ctx context.Context, value api.BlackboardItem) error {
+func (u *unitOfWork) WriteItem(ctx context.Context, value agentruntime.BlackboardItem) error {
 	return u.save(ctx, kindBlackboard, value.ID, "", value.RunID, value.TaskID, string(value.Visibility), value.CreatedAt, "", "", value, true)
 }
 
-func (u *unitOfWork) SelectItems(ctx context.Context, runID string, selector api.BlackboardSelector) ([]api.BlackboardItem, error) {
-	values, err := listRecords[api.BlackboardItem](ctx, u, kindBlackboard, runID)
+func (u *unitOfWork) SelectItems(ctx context.Context, runID string, selector agentruntime.BlackboardSelector) ([]agentruntime.BlackboardItem, error) {
+	values, err := listRecords[agentruntime.BlackboardItem](ctx, u, kindBlackboard, runID)
 	if err != nil {
 		return nil, err
 	}
@@ -346,48 +405,48 @@ func (u *unitOfWork) SelectItems(ctx context.Context, runID string, selector api
 	return limit(filtered, selector.Limit), nil
 }
 
-func blackboardItemMatches(value api.BlackboardItem, selector api.BlackboardSelector) bool {
+func blackboardItemMatches(value agentruntime.BlackboardItem, selector agentruntime.BlackboardSelector) bool {
 	return blackboardOwnerMatches(value, selector) &&
 		blackboardSourceMatches(value, selector) &&
 		blackboardVersionMatches(value, selector)
 }
 
-func blackboardOwnerMatches(value api.BlackboardItem, selector api.BlackboardSelector) bool {
+func blackboardOwnerMatches(value agentruntime.BlackboardItem, selector agentruntime.BlackboardSelector) bool {
 	return (selector.RunID == "" || value.RunID == selector.RunID) &&
 		(selector.TaskID == "" || value.TaskID == selector.TaskID) &&
 		(len(selector.ItemTypes) == 0 || contains(selector.ItemTypes, value.Type))
 }
 
-func blackboardSourceMatches(value api.BlackboardItem, selector api.BlackboardSelector) bool {
+func blackboardSourceMatches(value agentruntime.BlackboardItem, selector agentruntime.BlackboardSelector) bool {
 	return (len(selector.SourceTypes) == 0 || contains(selector.SourceTypes, value.Source.Type)) &&
 		(len(selector.SourceIDs) == 0 || contains(selector.SourceIDs, value.Source.ID)) &&
 		(len(selector.SourceAgentIDs) == 0 || contains(selector.SourceAgentIDs, value.Source.ID))
 }
 
-func blackboardVersionMatches(value api.BlackboardItem, selector api.BlackboardSelector) bool {
+func blackboardVersionMatches(value agentruntime.BlackboardItem, selector agentruntime.BlackboardSelector) bool {
 	return (selector.Visibility == "" || value.Visibility == selector.Visibility) &&
 		(selector.SinceVersion == 0 || value.Version > selector.SinceVersion) &&
 		(len(selector.Keys) == 0 || contains(selector.Keys, value.Key))
 }
 
-func (u *unitOfWork) QueueMessage(ctx context.Context, value api.UserMessage) error {
+func (u *unitOfWork) QueueMessage(ctx context.Context, value agentruntime.UserMessage) error {
 	return u.save(ctx, kindUserMessage, value.ID, value.RunID, value.RunID, value.TaskID, string(value.Status), value.CreatedAt, "", value.IdempotencyKey, value, false)
 }
 
-func (u *unitOfWork) LoadMessage(ctx context.Context, runID string, messageID string) (api.UserMessage, error) {
-	return loadRecord[api.UserMessage](ctx, u, kindUserMessage, messageID, runID)
+func (u *unitOfWork) LoadMessage(ctx context.Context, runID string, messageID string) (agentruntime.UserMessage, error) {
+	return loadRecord[agentruntime.UserMessage](ctx, u, kindUserMessage, messageID, runID)
 }
 
-func (u *unitOfWork) UpdateMessage(ctx context.Context, value api.UserMessage) error {
+func (u *unitOfWork) UpdateMessage(ctx context.Context, value agentruntime.UserMessage) error {
 	return u.save(ctx, kindUserMessage, value.ID, value.RunID, value.RunID, value.TaskID, string(value.Status), value.CreatedAt, "", value.IdempotencyKey, value, true)
 }
 
-func (u *unitOfWork) ListMessages(ctx context.Context, runID string) ([]api.UserMessage, error) {
-	return listRecords[api.UserMessage](ctx, u, kindUserMessage, runID)
+func (u *unitOfWork) ListMessages(ctx context.Context, runID string) ([]agentruntime.UserMessage, error) {
+	return listRecords[agentruntime.UserMessage](ctx, u, kindUserMessage, runID)
 }
 
-func (u *unitOfWork) ListPendingFor(ctx context.Context, selector api.UserMessageSelector) ([]api.UserMessage, error) {
-	values, err := listRecords[api.UserMessage](ctx, u, kindUserMessage, selector.RunID)
+func (u *unitOfWork) ListPendingFor(ctx context.Context, selector agentruntime.UserMessageSelector) ([]agentruntime.UserMessage, error) {
+	values, err := listRecords[agentruntime.UserMessage](ctx, u, kindUserMessage, selector.RunID)
 	if err != nil {
 		return nil, err
 	}
@@ -395,7 +454,7 @@ func (u *unitOfWork) ListPendingFor(ctx context.Context, selector api.UserMessag
 	for _, value := range values {
 		statuses := selector.Statuses
 		if len(statuses) == 0 {
-			statuses = []string{string(api.UserMessageQueued)}
+			statuses = []string{string(agentruntime.UserMessageQueued)}
 		}
 		if !contains(statuses, string(value.Status)) || !within(value.CreatedAt, selector.Since, selector.Until) {
 			continue
@@ -406,35 +465,35 @@ func (u *unitOfWork) ListPendingFor(ctx context.Context, selector api.UserMessag
 	return limit(filtered, selector.Limit), nil
 }
 
-func (u *unitOfWork) ListQueuedMessages(ctx context.Context) ([]api.UserMessage, error) {
-	return u.ListPendingFor(ctx, api.UserMessageSelector{})
+func (u *unitOfWork) ListQueuedMessages(ctx context.Context) ([]agentruntime.UserMessage, error) {
+	return u.ListPendingFor(ctx, agentruntime.UserMessageSelector{})
 }
 
-func (u *unitOfWork) QueueEnvelope(ctx context.Context, value api.TaskEnvelope) error {
+func (u *unitOfWork) QueueEnvelope(ctx context.Context, value agentruntime.TaskEnvelope) error {
 	return u.save(ctx, kindEnvelope, value.ID, "", value.RunID, value.TaskID, value.Status, value.CreatedAt, "", "", value, false)
 }
 
-func (u *unitOfWork) LoadEnvelope(ctx context.Context, id string) (api.TaskEnvelope, error) {
-	return loadRecord[api.TaskEnvelope](ctx, u, kindEnvelope, id, "")
+func (u *unitOfWork) LoadEnvelope(ctx context.Context, id string) (agentruntime.TaskEnvelope, error) {
+	return loadRecord[agentruntime.TaskEnvelope](ctx, u, kindEnvelope, id, "")
 }
 
-func (u *unitOfWork) UpdateEnvelope(ctx context.Context, value api.TaskEnvelope) error {
+func (u *unitOfWork) UpdateEnvelope(ctx context.Context, value agentruntime.TaskEnvelope) error {
 	return u.save(ctx, kindEnvelope, value.ID, "", value.RunID, value.TaskID, value.Status, value.CreatedAt, "", "", value, true)
 }
 
-func (u *unitOfWork) ListEnvelopes(ctx context.Context, runID string) ([]api.TaskEnvelope, error) {
-	return listRecords[api.TaskEnvelope](ctx, u, kindEnvelope, runID)
+func (u *unitOfWork) ListEnvelopes(ctx context.Context, runID string) ([]agentruntime.TaskEnvelope, error) {
+	return listRecords[agentruntime.TaskEnvelope](ctx, u, kindEnvelope, runID)
 }
 
-func (u *unitOfWork) SaveApproval(ctx context.Context, value api.ApprovalRequest) error {
+func (u *unitOfWork) SaveApproval(ctx context.Context, value agentruntime.ApprovalRequest) error {
 	return u.save(ctx, kindApproval, value.ApprovalID, "", value.RunID, value.TaskID, value.Status, time.Time{}, "", "", value, true)
 }
 
-func (u *unitOfWork) LoadApproval(ctx context.Context, id string) (api.ApprovalRequest, error) {
-	return loadRecord[api.ApprovalRequest](ctx, u, kindApproval, id, "")
+func (u *unitOfWork) LoadApproval(ctx context.Context, id string) (agentruntime.ApprovalRequest, error) {
+	return loadRecord[agentruntime.ApprovalRequest](ctx, u, kindApproval, id, "")
 }
 
-func (u *unitOfWork) SaveResumeToken(ctx context.Context, value api.ResumeToken) error {
+func (u *unitOfWork) SaveResumeToken(ctx context.Context, value agentruntime.ResumeToken) error {
 	status := value.Metadata["status"]
 	if status == "" {
 		status = "pending"
@@ -442,12 +501,12 @@ func (u *unitOfWork) SaveResumeToken(ctx context.Context, value api.ResumeToken)
 	return u.save(ctx, kindResume, value.TokenID, "", value.RunID, value.TaskID, status, time.Time{}, "", "", value, true)
 }
 
-func (u *unitOfWork) LoadResumeToken(ctx context.Context, id string) (api.ResumeToken, error) {
-	return loadRecord[api.ResumeToken](ctx, u, kindResume, id, "")
+func (u *unitOfWork) LoadResumeToken(ctx context.Context, id string) (agentruntime.ResumeToken, error) {
+	return loadRecord[agentruntime.ResumeToken](ctx, u, kindResume, id, "")
 }
 
-func (u *unitOfWork) ListPending(ctx context.Context, selector api.ResumeTokenSelector) ([]api.ResumeToken, error) {
-	values, err := listRecords[api.ResumeToken](ctx, u, kindResume, selector.RunID)
+func (u *unitOfWork) ListPending(ctx context.Context, selector agentruntime.ResumeTokenSelector) ([]agentruntime.ResumeToken, error) {
+	values, err := listRecords[agentruntime.ResumeToken](ctx, u, kindResume, selector.RunID)
 	if err != nil {
 		return nil, err
 	}
@@ -488,7 +547,7 @@ func (u *unitOfWork) save(ctx context.Context, kind, key1, key2, runID, taskID, 
 	}
 	if err != nil {
 		if !upsert && isConstraint(err) {
-			return fmt.Errorf("save %s: %w: key %q already exists", kind, errors.Join(api.ErrIdempotencyConflict, err), key1)
+			return fmt.Errorf("save %s: %w: key %q already exists", kind, errors.Join(agentruntime.ErrIdempotencyConflict, err), key1)
 		}
 		return fmt.Errorf("save %s: %w", kind, err)
 	}
@@ -501,7 +560,7 @@ func loadRecord[T any](ctx context.Context, u *unitOfWork, kind string, key1 str
 	row, err := dbgen.New(u.tx).GetRecordData(ctx, dbgen.GetRecordDataParams{Kind: kind, Key1: key1, Key2: key2})
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return zero, api.ErrNotFound
+			return zero, agentruntime.ErrNotFound
 		}
 		return zero, fmt.Errorf("load %s: %w", kind, err)
 	}
@@ -625,6 +684,6 @@ func limit[T any](values []T, count int) []T {
 }
 
 var (
-	_ api.UnitOfWork               = (*unitOfWork)(nil)
-	_ api.UserMessageOutboxScanner = (*unitOfWork)(nil)
+	_ agentruntime.UnitOfWork               = (*unitOfWork)(nil)
+	_ agentruntime.UserMessageOutboxScanner = (*unitOfWork)(nil)
 )

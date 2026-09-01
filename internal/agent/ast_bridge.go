@@ -184,7 +184,7 @@ func (bridge *astBridge) resolve() error {
 			}
 		}
 		if modulePath == "" {
-			candidate := filepath.Join(root, "frontend", "node_modules", "@oh-my-pi", "pi-natives", "native", "index.js")
+			candidate := filepath.Join(root, "runtime-js", "node_modules", "@oh-my-pi", "pi-natives", "native", "index.js")
 			if regularFile(candidate) {
 				modulePath = candidate
 			}
@@ -209,7 +209,7 @@ func (bridge *astBridge) resolve() error {
 		return errors.New("AST bridge script is missing")
 	}
 	if !regularFile(modulePath) {
-		return errors.New("@oh-my-pi/pi-natives is missing; run frontend dependency installation")
+		return errors.New("@oh-my-pi/pi-natives is missing; run `bun install --cwd runtime-js`")
 	}
 	bridge.runtimePath, bridge.scriptPath, bridge.modulePath = runtimePath, scriptPath, modulePath
 	return nil

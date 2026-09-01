@@ -13,7 +13,6 @@ import (
 	"testing"
 
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
-	"github.com/Viking602/venat/coding"
 	"github.com/Viking602/venat/tool"
 )
 
@@ -42,10 +41,10 @@ func TestOMPReadDriverCoversStructureArchiveSQLiteNotebookImageAndDirectory(t *t
 	writeZipFixture(t, filepath.Join(root, "bundle.zip"), "notes/a.txt", "inside")
 	writeSQLiteFixture(t, filepath.Join(root, "data.db"))
 
-	read := findWorkspaceTool(t, service, root, coding.ToolReadFile)
+	read := findWorkspaceTool(t, service, root, ToolReadFile)
 	assertReadContains(t, ctx, read, `{"path":"sample.go"}`, "type Thing", "func Build")
 	assertReadContains(t, ctx, read, `{"path":"sample.go:3-5"}`, "[sample.go#", "3:type Thing", "5:func Build")
-	raw, err := read.Execute(ctx, tool.Call{ID: "raw", Name: coding.ToolReadFile, Arguments: json.RawMessage(`{"path":"sample.go:raw"}`)}, nil)
+	raw, err := read.Execute(ctx, tool.Call{ID: "raw", Name: ToolReadFile, Arguments: json.RawMessage(`{"path":"sample.go:raw"}`)}, nil)
 	if err != nil || raw.IsError || raw.Content != "package sample\n\ntype Thing struct{}\n\nfunc Build() {}\n" {
 		t.Fatalf("raw read = %#v, %v", raw, err)
 	}
@@ -55,7 +54,7 @@ func TestOMPReadDriverCoversStructureArchiveSQLiteNotebookImageAndDirectory(t *t
 	assertReadContains(t, ctx, read, `{"path":"book.ipynb"}`, "Cell 1 (code)", "print(1)")
 
 	assertReadContains(t, ctx, read, `{"path":"conflict.txt:conflicts"}`, "<<<<<<< ours", ">>>>>>> theirs")
-	result, err := read.Execute(ctx, tool.Call{ID: "image", Name: coding.ToolReadFile, Arguments: json.RawMessage(`{"path":"image.png"}`)}, nil)
+	result, err := read.Execute(ctx, tool.Call{ID: "image", Name: ToolReadFile, Arguments: json.RawMessage(`{"path":"image.png"}`)}, nil)
 	if err != nil || result.IsError || len(result.Parts) != 1 || result.Parts[0].MediaType != "image/png" {
 		t.Fatalf("image read = %#v, %v", result, err)
 	}
@@ -82,7 +81,7 @@ func TestOMPReadDriverReadsAllowedWebContent(t *testing.T) {
 	driver := newOMPReadDriver(t.TempDir(), nil, nil, "allow")
 	result, err := driver.Execute(context.Background(), tool.Call{
 		ID:        "web",
-		Name:      coding.ToolReadFile,
+		Name:      ToolReadFile,
 		Arguments: json.RawMessage(`{"path":"` + server.URL + `"}`),
 	}, nil)
 	if err != nil || result.IsError || !strings.Contains(result.Content, "Hello") || strings.Contains(result.Content, "hidden") {
@@ -107,7 +106,7 @@ func findWorkspaceTool(t *testing.T, service *Service, root, name string) tool.D
 
 func assertReadContains(t *testing.T, ctx context.Context, driver tool.Driver, arguments string, wants ...string) {
 	t.Helper()
-	result, err := driver.Execute(ctx, tool.Call{ID: "read", Name: coding.ToolReadFile, Arguments: json.RawMessage(arguments)}, nil)
+	result, err := driver.Execute(ctx, tool.Call{ID: "read", Name: ToolReadFile, Arguments: json.RawMessage(arguments)}, nil)
 	if err != nil || result.IsError {
 		t.Fatalf("read %s = %#v, %v", arguments, result, err)
 	}

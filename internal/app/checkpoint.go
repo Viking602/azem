@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/azem/internal/session"
 	hyagent "github.com/Viking602/venat/agent"
 	"github.com/Viking602/venat/message"
@@ -23,14 +24,14 @@ const (
 )
 
 type persistedCheckpointState struct {
-	Version   int               `json:"version"`
-	Active    bool              `json:"active"`
-	Goal      string            `json:"goal,omitempty"`
-	StartedAt time.Time         `json:"startedAt,omitempty"`
-	Snapshot  []message.Message `json:"snapshot,omitempty"`
-	Report    string            `json:"report,omitempty"`
-	RewoundAt time.Time         `json:"rewoundAt,omitempty"`
-	SavedAt   time.Time         `json:"savedAt"`
+	Version   int                             `json:"version"`
+	Active    bool                            `json:"active"`
+	Goal      string                          `json:"goal,omitempty"`
+	StartedAt time.Time                       `json:"startedAt,omitempty"`
+	Snapshot  []agentruntime.PersistedMessage `json:"snapshot,omitempty"`
+	Report    string                          `json:"report,omitempty"`
+	RewoundAt time.Time                       `json:"rewoundAt,omitempty"`
+	SavedAt   time.Time                       `json:"savedAt"`
 }
 
 type checkpointController struct {
@@ -40,6 +41,7 @@ type checkpointController struct {
 	runID         string
 	state         persistedCheckpointState
 	pendingReport string
+	artifactRunID string
 }
 
 type checkpointDriver struct {
@@ -65,7 +67,7 @@ func newCheckpointController(ctx context.Context, store *session.Service, sessio
 	if controller.state.Version != 1 {
 		return nil, fmt.Errorf("context checkpoint version %d is unsupported", controller.state.Version)
 	}
-	controller.state.Snapshot = cloneCheckpointMessages(controller.state.Snapshot)
+	controller.artifactRunID = artifact.RunID
 	return controller, nil
 }
 
@@ -82,13 +84,13 @@ func (driver *checkpointDriver) Definition() tool.Definition {
 		return tool.Definition{
 			Name: checkpointToolName, Description: "Create one context checkpoint before expensive exploration. Later call rewind with concise findings; the engine removes every intermediate checkpoint message from active model history and retains only the checkpoint plus report. Only one checkpoint may be active, and rewind is mandatory before finishing.",
 			InputSchema: tool.Schema{Type: "object", Required: []string{"goal"}, AdditionalProperties: &additional, Properties: map[string]tool.Schema{"goal": {Type: "string", Description: "investigation goal"}}},
-			EffectType:  tool.EffectReadOnly, RiskLevel: "low", PolicyTags: []string{"checkpoint", "context"}, Concurrency: tool.ConcurrencyExclusive, ConcurrencyGroup: "context-checkpoint",
+			Concurrency: tool.ConcurrencyExclusive, ConcurrencyGroup: "context-checkpoint",
 		}
 	}
 	return tool.Definition{
 		Name: rewindToolName, Description: "End the active context checkpoint. Rewind model history to the checkpoint and replace intermediate exploration with the supplied concise findings report. This changes context only; it never reverts workspace files.",
 		InputSchema: tool.Schema{Type: "object", Required: []string{"report"}, AdditionalProperties: &additional, Properties: map[string]tool.Schema{"report": {Type: "string", Description: "concise investigation findings"}}},
-		EffectType:  tool.EffectReadOnly, RiskLevel: "low", PolicyTags: []string{"checkpoint", "context"}, Concurrency: tool.ConcurrencyExclusive, ConcurrencyGroup: "context-checkpoint",
+		Concurrency: tool.ConcurrencyExclusive, ConcurrencyGroup: "context-checkpoint",
 	}
 }
 
@@ -139,6 +141,7 @@ func (controller *checkpointController) begin(goal string) (time.Time, error) {
 	}
 	now := time.Now().UTC()
 	controller.state = persistedCheckpointState{Version: 1, Active: true, Goal: goal, StartedAt: now}
+	controller.artifactRunID = controller.runID
 	controller.pendingReport = ""
 	return now, nil
 }
@@ -159,49 +162,12 @@ func (controller *checkpointController) requestRewind(report string) error {
 	return nil
 }
 
-func (controller *checkpointController) Apply(ctx context.Context, history []message.Message, results []tool.Result) ([]message.Message, error) {
-	controller.mu.Lock()
-	defer controller.mu.Unlock()
-	for _, result := range results {
-		if result.IsError {
-			continue
-		}
-		switch result.Name {
-		case checkpointToolName:
-			if !controller.state.Active {
-				continue
-			}
-			controller.state.Snapshot = cloneCheckpointMessages(history)
-			if err := controller.persistLocked(ctx); err != nil {
-				return nil, err
-			}
-		case rewindToolName:
-			if !controller.state.Active || controller.pendingReport == "" || len(controller.state.Snapshot) == 0 {
-				continue
-			}
-			report := controller.pendingReport
-			controller.pendingReport = ""
-			base := cloneCheckpointMessages(controller.state.Snapshot)
-			value := message.NewText(message.RoleSystem, "Checkpoint called and rewound. Report retained below. Need explore again → create a new checkpoint.\n\nReport:\n"+report)
-			value.Visibility = message.VisibilityPrivate
-			history = append(base, value)
-			controller.state.Active = false
-			controller.state.Report = report
-			controller.state.RewoundAt = time.Now().UTC()
-			controller.state.Snapshot = nil
-			if err := controller.persistLocked(ctx); err != nil {
-				return nil, err
-			}
-		}
-	}
-	return cloneCheckpointMessages(history), nil
-}
-
 func (controller *checkpointController) persistLocked(ctx context.Context) error {
 	if controller.store == nil {
 		return nil
 	}
 	controller.state.Version = 1
+	controller.artifactRunID = controller.runID
 	controller.state.SavedAt = time.Now().UTC()
 	payload, err := json.Marshal(controller.state)
 	if err != nil {
@@ -219,14 +185,83 @@ func (controller *checkpointController) active() bool {
 	return controller.state.Active
 }
 
-func (controller *checkpointController) TransformContext(_ context.Context, messages []message.Message) ([]message.Message, error) {
-	if !controller.active() {
-		return messages, nil
+func (controller *checkpointController) TransformContext(ctx context.Context, messages []message.Message) ([]message.Message, error) {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+
+	if controller.state.Active && controller.pendingReport != "" && len(controller.state.Snapshot) > 0 {
+		report := controller.pendingReport
+		controller.pendingReport = ""
+		controller.state.Active = false
+		controller.state.Report = report
+		controller.state.RewoundAt = time.Now().UTC()
+		history := controller.rewoundMessagesLocked(messages)
+		if err := controller.persistLocked(ctx); err != nil {
+			return nil, err
+		}
+		return history, nil
+	}
+	if !controller.state.Active {
+		return controller.rewoundMessagesLocked(messages), nil
+	}
+	if len(controller.state.Snapshot) == 0 {
+		controller.state.Snapshot = agentruntime.PersistMessages(messages)
+		if err := controller.persistLocked(ctx); err != nil {
+			return nil, err
+		}
 	}
 	value := message.NewText(message.RoleSystem, "Exploration checkpoint active. MUST call rewind with concise findings before yielding or finishing. Do not create another checkpoint while this one is active.")
-	value.Visibility = message.VisibilityPrivate
+	markPrivateMessage(&value)
 	return append(cloneCheckpointMessages(messages), value), nil
 }
+
+func (controller *checkpointController) finalizedMessages(messages []message.Message) []message.Message {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	return controller.rewoundMessagesLocked(messages)
+}
+
+func finalizedCheckpointMessages(ctx context.Context, store *session.Service, sessionID, runID string, messages []message.Message) ([]message.Message, error) {
+	controller, err := newCheckpointController(ctx, store, sessionID, runID)
+	if err != nil {
+		return nil, err
+	}
+	return controller.finalizedMessages(messages), nil
+}
+
+func (controller *checkpointController) rewoundMessagesLocked(messages []message.Message) []message.Message {
+	if controller.artifactRunID != controller.runID || controller.state.Active || controller.state.Report == "" || len(controller.state.Snapshot) == 0 {
+		return messages
+	}
+	boundary := checkpointRewindBoundary(messages)
+	if boundary < 0 {
+		return messages
+	}
+	history := agentruntime.RuntimeMessages(controller.state.Snapshot)
+	report := message.NewText(message.RoleSystem, "Checkpoint called and rewound. Report retained below. Need explore again → create a new checkpoint.\n\nReport:\n"+controller.state.Report)
+	markPrivateMessage(&report)
+	history = append(history, report)
+	history = append(history, cloneCheckpointMessages(messages[boundary+1:])...)
+	return history
+}
+
+func checkpointRewindBoundary(messages []message.Message) int {
+	boundary := -1
+	for index := range messages {
+		result := messages[index].ToolResult
+		if result == nil || result.Name != rewindToolName || result.IsError {
+			continue
+		}
+		var outcome struct {
+			Rewound bool `json:"rewound"`
+		}
+		if json.Unmarshal(result.Structured, &outcome) == nil && outcome.Rewound {
+			boundary = index
+		}
+	}
+	return boundary
+}
+
 func (*checkpointController) BeforeModelCall(context.Context, *hyprovider.Request) error { return nil }
 func (*checkpointController) BeforeToolCall(context.Context, *tool.Call) error           { return nil }
 func (*checkpointController) AfterToolCall(context.Context, *tool.Result) error          { return nil }
@@ -238,9 +273,9 @@ func (controller *checkpointController) guardrail() hyagent.OutputGuardrail {
 			return hyagent.AllowOutput(), nil
 		}
 		value := message.NewText(message.RoleSystem, "Exploration checkpoint remains active. Call rewind now with the concise findings report before finishing.")
-		value.Visibility = message.VisibilityPrivate
+		markPrivateMessage(&value)
 
-		return hyagent.RetryOutput(value), nil
+		return hyagent.RetryOutputWithPolicy(hyagent.RetryPolicy{IncludeRejectedOutput: true}, value), nil
 	})
 }
 

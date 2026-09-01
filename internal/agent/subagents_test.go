@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/Viking602/azem/internal/blobstore"
-	"github.com/Viking602/venat/coding"
 	"github.com/Viking602/venat/tool"
 
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
@@ -40,7 +39,7 @@ func TestSQLSubagentRunStoreRoundTrip(t *testing.T) {
 		State: SubagentRunning, Summary: "reading files", Provider: "grok", Model: "model", Reasoning: "high",
 		CapabilityMode: "read-only", RequestedIsolation: "worktree", Isolation: "none", CWD: "/workspace",
 		Background: true, Output: "partial", Warning: "shared fallback", Transcript: json.RawMessage(`[{"role":"user","text":"inspect"}]`),
-		ToolCalls: 2, Turns: 3, TokensUsed: 42, ToolsUsed: []string{"coding.read_file", "coding.search"},
+		ToolCalls: 2, Turns: 3, TokensUsed: 42, ToolsUsed: []string{"read_file", "search"},
 		WorktreePath: "/worktrees/child-1", StartedAt: started,
 	}
 	if err := store.Create(ctx, run); err != nil {
@@ -149,7 +148,7 @@ func TestWorkspaceDriversFilterGitDiffByEffectiveRoot(t *testing.T) {
 	}()
 	foundEditDefinition := false
 	for _, definition := range service.ToolDefinitions() {
-		if definition.Name != coding.ToolEditHashline {
+		if definition.Name != ToolEditHashline {
 			continue
 		}
 		foundEditDefinition = true
@@ -160,7 +159,7 @@ func TestWorkspaceDriversFilterGitDiffByEffectiveRoot(t *testing.T) {
 		}
 	}
 	if !foundEditDefinition {
-		t.Fatalf("service omitted %q", coding.ToolEditHashline)
+		t.Fatalf("service omitted %q", ToolEditHashline)
 	}
 
 	nonGit := t.TempDir()
@@ -168,8 +167,8 @@ func TestWorkspaceDriversFilterGitDiffByEffectiveRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if hasToolDriver(drivers, coding.ToolGitDiff) {
-		t.Fatalf("non-Git workspace exposed %q", coding.ToolGitDiff)
+	if hasToolDriver(drivers, ToolGitDiff) {
+		t.Fatalf("non-Git workspace exposed %q", ToolGitDiff)
 	}
 
 	repository := t.TempDir()
@@ -190,8 +189,8 @@ func TestWorkspaceDriversFilterGitDiffByEffectiveRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !hasToolDriver(drivers, coding.ToolGitDiff) {
-		t.Fatalf("repository subdirectory omitted %q", coding.ToolGitDiff)
+	if !hasToolDriver(drivers, ToolGitDiff) {
+		t.Fatalf("repository subdirectory omitted %q", ToolGitDiff)
 	}
 
 	worktree := filepath.Join(t.TempDir(), "child-worktree")
@@ -200,8 +199,8 @@ func TestWorkspaceDriversFilterGitDiffByEffectiveRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !hasToolDriver(drivers, coding.ToolGitDiff) {
-		t.Fatalf("Git worktree omitted %q", coding.ToolGitDiff)
+	if !hasToolDriver(drivers, ToolGitDiff) {
+		t.Fatalf("Git worktree omitted %q", ToolGitDiff)
 	}
 }
 

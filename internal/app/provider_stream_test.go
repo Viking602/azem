@@ -16,13 +16,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	hyagent "github.com/Viking602/venat/agent"
-	"github.com/Viking602/venat/api"
 	"github.com/Viking602/venat/message"
 	hyprovider "github.com/Viking602/venat/provider"
-	"github.com/Viking602/venat/stream"
 	"github.com/Viking602/venat/tool"
-	hyworker "github.com/Viking602/venat/worker"
 
 	agentservice "github.com/Viking602/azem/internal/agent"
 	"github.com/Viking602/azem/internal/auth"
@@ -41,7 +39,8 @@ func TestFailedProviderTurnPersistsStreamedBreakpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	coding, err := agentservice.NewService(store, t.TempDir())
+	workspace := t.TempDir()
+	coding, err := agentservice.NewService(store, workspace)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,6 +69,14 @@ func TestFailedProviderTurnPersistsStreamedBreakpoint(t *testing.T) {
 	}
 	run, err := coding.StartRun(ctx, "keep the failed breakpoint")
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := coding.SealExecutionProfile(ctx, run, agentruntime.ExecutableProfile{
+		Provider: "test", AccountID: "test-account", RawModel: "test", Model: "test", Reasoning: "none",
+		ActiveSkills: []string{}, ToolSetHash: "test-tools", ToolProfileHash: "test-tool-profile",
+		StaticIdentity: "failed-stream-test", WorkspaceAnchor: workspace,
+		PromptFingerprint: "failed-stream-prompt", ToolSchemaFingerprint: "failed-stream-schema",
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := sessions.AppendBlock(ctx, "failed-session", session.Block{
@@ -105,6 +112,16 @@ func TestFailedProviderTurnPersistsStreamedBreakpoint(t *testing.T) {
 		projection.Blocks[3].Content != "work completed before the provider failed" {
 		t.Fatalf("failed breakpoint blocks=%+v", projection.Blocks)
 	}
+	failureData := projection.Blocks[3].Data
+	if failureData["failureKind"] != string(hyagent.FailureKindEngineError) {
+		t.Fatalf("failure data=%v, want engine_error", failureData)
+	}
+	if _, ok := failureData["stopReason"]; !ok {
+		t.Fatalf("failure data=%v, want exact stop reason", failureData)
+	}
+	if failureData["usage"] == "" {
+		t.Fatalf("failure data=%v, want partial usage", failureData)
+	}
 	if !reflect.DeepEqual(projection.ModelHistory, beforeFailure.ModelHistory) ||
 		projection.CheckpointGeneration != beforeFailure.CheckpointGeneration {
 		t.Fatalf("failed breakpoint changed checkpoint:\n got=%+v generation=%d\nwant=%+v generation=%d",
@@ -118,7 +135,8 @@ func TestProviderTurnSuspensionEmitsRecoveryWithoutTerminalFailure(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	coding, err := agentservice.NewService(store, t.TempDir())
+	workspace := t.TempDir()
+	coding, err := agentservice.NewService(store, workspace)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,6 +146,14 @@ func TestProviderTurnSuspensionEmitsRecoveryWithoutTerminalFailure(t *testing.T)
 	}
 	run, err := coding.StartRun(ctx, "perform one durable write")
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := coding.SealExecutionProfile(ctx, run, agentruntime.ExecutableProfile{
+		Provider: "test", AccountID: "test-account", RawModel: "test", Model: "test", Reasoning: "none",
+		ActiveSkills: []string{}, ToolSetHash: "durable-write", ToolProfileHash: "durable-write-profile",
+		StaticIdentity: "suspension-test", WorkspaceAnchor: workspace,
+		PromptFingerprint: "perform-one-durable-write", ToolSchemaFingerprint: "durable-write-schema",
+	}); err != nil {
 		t.Fatal(err)
 	}
 	service := NewService(ctx, config.Default())
@@ -170,18 +196,21 @@ func TestProviderTurnSuspensionEmitsRecoveryWithoutTerminalFailure(t *testing.T)
 			t.Fatalf("suspended turn emitted terminal event: %#v", event)
 		}
 	}
-	if recovery.State != "suspended" || recovery.Data["kind"] != string(hyworker.SuspensionReconciliation) {
+	if recovery.State != "suspended" || recovery.Data["kind"] != string(agentservice.SuspensionReconciliation) {
 		t.Fatalf("recovery event = %#v", recovery)
 	}
 	if driver.calls != 1 {
 		t.Fatalf("durable side effect calls = %d, want one", driver.calls)
 	}
-	task, err := coding.Runner().Task(ctx, run.RunID, run.TaskID)
+	tasks, err := coding.ListTasks(ctx, run.RunID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if task.Status != api.TaskStatusReconcileRequired {
-		t.Fatalf("durable task status = %q, want reconcile_required", task.Status)
+	if len(tasks) != 1 || tasks[0].ID != run.TaskID {
+		t.Fatalf("durable tasks = %#v, want task %q", tasks, run.TaskID)
+	}
+	if tasks[0].Status != agentruntime.TaskStatusReconcileRequired {
+		t.Fatalf("durable task status = %q, want reconcile_required", tasks[0].Status)
 	}
 }
 
@@ -190,10 +219,12 @@ type uncertainActionDriver struct {
 }
 
 func (*uncertainActionDriver) Definition() tool.Definition {
-	return tool.Definition{
-		Name:               "durable.write",
-		EffectType:         tool.EffectExternalSideEffect,
-		RequiresActionTask: true,
+	return tool.Definition{Name: "durable.write"}
+}
+
+func (*uncertainActionDriver) ToolPolicy() agentruntime.ToolPolicy {
+	return agentruntime.ToolPolicy{
+		Effect: agentruntime.ToolEffectExternalSideEffect, RequiresActionTask: true,
 	}
 }
 
@@ -202,13 +233,14 @@ func (d *uncertainActionDriver) Execute(_ context.Context, call tool.Call, _ too
 	return tool.Result{ToolCallID: call.ID, Name: call.Name}, errors.New("connection lost after write")
 }
 
-func TestProviderTurnAutoRetryDiscardsPartialAssistant(t *testing.T) {
+func TestProviderTurnDoesNotRetryPartialAssistant(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
-	coding, err := agentservice.NewService(store, t.TempDir())
+	workspace := t.TempDir()
+	coding, err := agentservice.NewService(store, workspace)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,14 +248,20 @@ func TestProviderTurnAutoRetryDiscardsPartialAssistant(t *testing.T) {
 	if _, err := sessions.Ensure(ctx, session.Session{ID: "retry-session", Title: "Retry"}); err != nil {
 		t.Fatal(err)
 	}
-	run, err := coding.StartRunWithMetadata(ctx, "recover this turn", nil, agentservice.RunExecutionPolicy{
-		RetryPolicy: api.RetryPolicy{MaxAttempts: 3},
-	})
+	run, err := coding.StartRunWithMetadata(ctx, "do not replay this turn", nil, agentservice.RunExecutionPolicy{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := sessions.AppendBlock(ctx, "retry-session", session.Block{
-		Kind: "user", RunID: run.RunID, Title: "You", Content: "recover this turn",
+		Kind: "user", RunID: run.RunID, Title: "You", Content: "do not replay this turn",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := coding.SealExecutionProfile(ctx, run, agentruntime.ExecutableProfile{
+		Provider: "test", AccountID: "test-account", RawModel: "test", Model: "test", Reasoning: "none",
+		ActiveSkills: []string{}, ToolSetHash: "test-tools", ToolProfileHash: "test-tool-profile",
+		StaticIdentity: "test-static", WorkspaceAnchor: workspace,
+		PromptFingerprint: "test-prompt", ToolSchemaFingerprint: "test-tool-schema",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -238,83 +276,86 @@ func TestProviderTurnAutoRetryDiscardsPartialAssistant(t *testing.T) {
 		if err := service.Shutdown(shutdownCtx); err != nil {
 			t.Errorf("shutdown: %v", err)
 		}
+		if err := store.Close(shutdownCtx); err != nil {
+			t.Errorf("close store: %v", err)
+		}
 	})
-	driver := &compactionTestDriver{streams: [][]hyprovider.Event{
+	physical := &compactionTestDriver{streams: [][]hyprovider.Event{
 		{
 			{Kind: hyprovider.EventThinkingDelta, Thinking: "discarded partial reasoning"},
 			{Kind: hyprovider.EventTextDelta, Text: "uncommitted partial"},
 			{Kind: hyprovider.EventError, Err: &responses.APIError{Kind: responses.ErrorRateLimit, Code: "server_is_overloaded"}},
 		},
 		{
-			{Kind: hyprovider.EventThinkingDelta, Thinking: "**Recovered reasoning**"},
-			{Kind: hyprovider.EventTextDelta, Text: "recovered answer"},
+			{Kind: hyprovider.EventTextDelta, Text: "must not be requested"},
 			{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
 		},
 	}}
+	metered := &meteredProviderDriver{
+		inner: physical, store: sessions, host: service, sessionID: "retry-session",
+		runID: run.RunID, kind: "main", provider: "test", model: "test", transport: "fixture",
+	}
+	driver := retryProviderDriver(ctx, service, "retry-session", run.RunID, "test", cfg.Retry, metered)
 	service.wg.Add(1)
 	service.runProviderTurn(ctx, TurnRequest{
-		SessionID: "retry-session", Prompt: "recover this turn", Provider: "test", Model: "test",
+		SessionID: "retry-session", Prompt: "do not replay this turn", Provider: "test", Model: "test",
 	}, run, hyagent.Engine{Provider: driver, Model: "test", ContextBuilder: turnContext{instructions: "test"}})
+
 	eventCtx, eventCancel := context.WithTimeout(ctx, time.Second)
 	defer eventCancel()
 	var emitted []Event
+	var terminal Event
 	for {
 		event, nextErr := service.NextEvent(eventCtx)
 		if nextErr != nil {
-			t.Fatal(nextErr)
+			t.Fatalf("waiting for failed or suspended turn: %v; events=%+v", nextErr, emitted)
 		}
 		emitted = append(emitted, event)
-		if event.Kind == EventRunFinished {
+		if event.Kind == EventRunFailed || event.Kind == EventRecoveryState {
+			terminal = event
 			break
 		}
+		if event.Kind == EventRunFinished {
+			t.Fatalf("partial provider stream completed successfully: %+v", emitted)
+		}
 	}
-	retryIndex, firstTextIndex, recoveredTextIndex := -1, -1, -1
-	for index, event := range emitted {
-		if event.Kind == EventProviderRetry && event.State == "restarted" {
-			retryIndex = index
+	if terminal.Kind == EventRecoveryState && terminal.State != "suspended" {
+		t.Fatalf("partial provider stream recovery state=%+v", terminal)
+	}
+	sawPartial := false
+	for _, event := range emitted {
+		if event.Kind == EventProviderRetry {
+			t.Fatalf("partial provider stream retried: %+v", emitted)
 		}
 		if event.Kind == EventTextDelta && strings.Contains(event.Text, "uncommitted partial") {
-			firstTextIndex = index
+			sawPartial = true
 		}
-		if event.Kind == EventTextDelta && strings.Contains(event.Text, "recovered answer") {
-			recoveredTextIndex = index
+		if event.Kind == EventTextDelta && strings.Contains(event.Text, "must not be requested") {
+			t.Fatalf("second physical request reached the UI: %+v", emitted)
 		}
 	}
-	if firstTextIndex < 0 || retryIndex <= firstTextIndex || recoveredTextIndex <= retryIndex {
-		t.Fatalf("retry event ordering first=%d retry=%d recovered=%d events=%+v", firstTextIndex, retryIndex, recoveredTextIndex, emitted)
+	if !sawPartial {
+		t.Fatalf("partial output was not surfaced before failure: %+v", emitted)
 	}
-	childBlocks := discardAgentAttemptBlocks([]AgentTranscriptBlock{
-		{Kind: "tool", RunID: "child", Content: "keep"},
-		{Kind: "thinking", RunID: "child", Content: "discard"},
-		{Kind: "assistant", RunID: "child", Content: "discard"},
-	}, "child")
-	if len(childBlocks) != 1 || childBlocks[0].Kind != "tool" {
-		t.Fatalf("subagent retry retained uncommitted blocks: %+v", childBlocks)
+	if len(physical.requests) != 1 {
+		t.Fatalf("physical provider requests=%d, want exactly one", len(physical.requests))
 	}
-
-	if len(driver.requests) != 2 {
-		t.Fatalf("provider requests = %d, want initial request plus one session retry", len(driver.requests))
+	var requestCount int
+	var requestStatus string
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(MAX(status), '') FROM provider_requests WHERE run_id = ?`, run.RunID).Scan(&requestCount, &requestStatus); err != nil {
+		t.Fatal(err)
 	}
-	for _, current := range driver.requests[1].Messages {
-		if strings.Contains(current.Text, "uncommitted partial") {
-			t.Fatalf("failed partial assistant leaked into retry context: %#v", driver.requests[1].Messages)
-		}
+	if requestCount != 1 || requestStatus != "unknown" {
+		t.Fatalf("provider ledger count=%d status=%q, want one unknown physical request", requestCount, requestStatus)
 	}
 	projection, err := sessions.LoadProjection(ctx, "retry-session")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(projection.Blocks) != 3 ||
-		projection.Blocks[1].Kind != "thinking" ||
-		projection.Blocks[1].State != "completed" ||
-		projection.Blocks[1].Content != "**Recovered reasoning**" ||
-		projection.Blocks[2].Kind != "assistant" ||
-		projection.Blocks[2].State != "completed" ||
-		projection.Blocks[2].Content != "recovered answer" {
-		t.Fatalf("recovered transcript blocks=%+v", projection.Blocks)
-	}
-	if err := message.ValidateCompleteTurns(projection.ModelHistory.Messages); err != nil {
-		t.Fatalf("recovered model history is incomplete: %v", err)
+	for _, block := range projection.Blocks {
+		if strings.Contains(block.Content, "must not be requested") || block.State == "completed" && block.Kind == "assistant" {
+			t.Fatalf("failed partial turn committed as a recovered answer: %+v", projection.Blocks)
+		}
 	}
 }
 
@@ -412,11 +453,11 @@ func TestAuthenticatedTurnStreamsGovernedWriteAndCompletesDurably(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	durable, err := coding.Runner().Run(ctx, runID)
+	manifest, err := coding.LoadRunExecutionManifest(ctx, runID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	tasks, err := coding.Runner().ListTasks(ctx, runID)
+	tasks, err := coding.ListTasks(ctx, runID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -425,9 +466,9 @@ func TestAuthenticatedTurnStreamsGovernedWriteAndCompletesDurably(t *testing.T) 
 			t.Fatalf("session tasks must not take exclusive workspace claims: %#v", tasks)
 		}
 	}
-	manifest, err := decodeSingleRunManifest(durable.Metadata["single_run_manifest"])
-	if err != nil || manifest.AccountID != "acct" {
-		t.Fatalf("durable account binding=%q error=%v", manifest.AccountID, err)
+	if manifest.AccountID != "acct" || manifest.RawModel != "gpt-test" || manifest.Model != "gpt-test" ||
+		!manifest.Sealed || manifest.StaticIdentity == "" || manifest.ToolSchemaFingerprint == "" {
+		t.Fatalf("durable execution manifest=%+v", manifest)
 	}
 	var output strings.Builder
 	approved := false
@@ -555,7 +596,7 @@ finished:
 
 func TestProviderStreamSinkDoesNotReportMissingUsageAsZero(t *testing.T) {
 	service := NewService(context.Background(), config.Default())
-	if err := service.providerStreamSink("session", "run", "grok", "model", "high", "xai-responses").Emit(context.Background(), stream.Frame{Kind: stream.FrameDone}); err != nil {
+	if err := service.providerStreamSink("session", "run", "grok", "model", "high", "xai-responses").Emit(context.Background(), hyagent.Frame{Kind: hyagent.FrameDone}); err != nil {
 		t.Fatal(err)
 	}
 	event, err := service.NextEvent(context.Background())
@@ -567,5 +608,15 @@ func TestProviderStreamSinkDoesNotReportMissingUsageAsZero(t *testing.T) {
 	}
 	if event.Data["inputTokens"] != "" || event.Data["cachedInputTokens"] != "" || event.Data["outputTokens"] != "" || event.Data["totalTokens"] != "" || event.Data["cacheStatus"] != "" {
 		t.Fatalf("missing provider usage was reported as tokens: %+v", event.Data)
+	}
+}
+
+func TestReasoningTraceCollectorSeparatesDiscreteBoldTitles(t *testing.T) {
+	var collector reasoningTraceCollector
+	collector.append("**Inspecting workspace**")
+	collector.append("**Planning fix**")
+	collector.commit(false)
+	if got, want := collector.text(), "**Inspecting workspace**\n\n**Planning fix**"; got != want {
+		t.Fatalf("thinking trace = %q, want %q", got, want)
 	}
 }

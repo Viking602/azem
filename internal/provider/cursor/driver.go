@@ -36,9 +36,6 @@ type Driver struct {
 	cursorMaxMode bool
 	client        *http.Client
 	conversations *ConversationCache
-	retryDelay    func(int) time.Duration
-	maxRetryDelay time.Duration
-	retryObserver hyprovider.RetryObserver
 }
 
 // New constructs a Cursor driver sharing the supplied runtime conversation cache.
@@ -63,8 +60,6 @@ func (d *Driver) Metadata() hyprovider.Metadata {
 	return hyprovider.Metadata{Name: "cursor-agent", Models: append([]string(nil), d.models...), Version: "3"}
 }
 
-func (d *Driver) SetRetryObserver(observer hyprovider.RetryObserver) { d.retryObserver = observer }
-func (d *Driver) SetMaxRetryDelay(delay time.Duration)               { d.maxRetryDelay = delay }
 func (d *Driver) SetBaseURL(baseURL string) {
 	if strings.TrimSpace(baseURL) != "" {
 		d.baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
@@ -78,11 +73,7 @@ func (d *Driver) SetClient(client *http.Client) {
 }
 
 func (d *Driver) Stream(ctx context.Context, request hyprovider.Request) (hyprovider.Stream, error) {
-	baseConversationID := requestConversationID(request, "")
-	open := func() (hyprovider.Stream, error) { return d.openStream(ctx, request, baseConversationID) }
-	return hyprovider.OpenRetryingStream(ctx, open, hyprovider.StreamRetryOptions{
-		Delay: d.retryDelay, MaxDelay: d.maxRetryDelay, Observer: d.retryObserver,
-	})
+	return d.openStream(ctx, request, requestConversationID(request, ""))
 }
 
 func (d *Driver) openStream(ctx context.Context, request hyprovider.Request, baseConversationID string) (hyprovider.Stream, error) {
@@ -91,7 +82,7 @@ func (d *Driver) openStream(ctx context.Context, request hyprovider.Request, bas
 		return nil, err
 	}
 	request = withCursorMaxMode(request, d.cursorMaxMode)
-	payload, err := buildRunRequest(request, baseConversationID, d.accountScope, d.conversations)
+	payload, err := buildRunRequestContext(ctx, request, baseConversationID, d.accountScope, d.conversations)
 	if err != nil {
 		return nil, err
 	}
@@ -104,9 +95,9 @@ func (d *Driver) openStream(ctx context.Context, request hyprovider.Request, bas
 			})
 		}
 	}
-	execHost, _ := request.NativeToolHost.(ExecHost)
+	execHost := ExecHostFromContext(ctx)
 	var todoSync TodoSync
-	if synchronizer, ok := request.NativeToolHost.(TodoSynchronizer); ok {
+	if synchronizer, ok := execHost.(TodoSynchronizer); ok {
 		todoSync = TodoSync(synchronizer.SyncTodos)
 	}
 	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, d.baseURL+runPath, body)
@@ -526,8 +517,4 @@ func (s *eventStream) Close() error {
 	return nil
 }
 
-var (
-	_ hyprovider.Driver                 = (*Driver)(nil)
-	_ hyprovider.RetryObservable        = (*Driver)(nil)
-	_ hyprovider.RetryDelayConfigurable = (*Driver)(nil)
-)
+var _ hyprovider.Driver = (*Driver)(nil)

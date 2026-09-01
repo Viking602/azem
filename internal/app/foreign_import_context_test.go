@@ -10,9 +10,8 @@ import (
 
 func TestBlockMessageReplaysImportedToolContracts(t *testing.T) {
 	foreign := message.Message{
-		Role:       message.RoleAssistant,
-		ToolCalls:  []message.ToolCall{{ID: "call-1", Name: "read", Arguments: json.RawMessage(`{"path":"a.txt"}`)}},
-		Visibility: message.VisibilityShared,
+		Role:      message.RoleAssistant,
+		ToolCalls: []message.ToolCall{{ID: "call-1", Name: "read", Arguments: json.RawMessage(`{"path":"a.txt"}`)}},
 	}
 	encoded, err := json.Marshal(foreign)
 	if err != nil {

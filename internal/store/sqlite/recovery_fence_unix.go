@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"syscall"
 	"time"
@@ -14,6 +15,7 @@ import (
 const (
 	recoveryFencePreparing = "recovering\n"
 	recoveryFenceReady     = "ready\n"
+	recoveryFenceClean     = "clean\n"
 )
 
 type fileRecoveryFence struct {
@@ -34,7 +36,23 @@ func acquireRecoveryFence(ctx context.Context, path string) (RecoveryFence, bool
 			return nil, false, err
 		}
 		if owner {
-			return fence, true, nil
+			state, err := fence.readState()
+			if err != nil {
+				_ = fence.Close()
+				return nil, false, err
+			}
+			recover := state != recoveryFenceClean
+			if err := fence.writeState(recoveryFencePreparing); err != nil {
+				_ = fence.Close()
+				return nil, false, err
+			}
+			if !recover {
+				if err := fence.FinishRecovery(); err != nil {
+					_ = fence.Close()
+					return nil, false, err
+				}
+			}
+			return fence, recover, nil
 		}
 		ready, err := fence.waitForCompletedRecovery(ctx)
 		if err != nil {
@@ -51,7 +69,7 @@ func (f *fileRecoveryFence) tryStartRecovery() (bool, error) {
 	err := syscall.Flock(int(f.file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 	if err == nil {
 		f.exclusive = true
-		return true, f.writeState(recoveryFencePreparing)
+		return true, nil
 	}
 	if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
 		return false, nil
@@ -103,6 +121,21 @@ func (f *fileRecoveryFence) Close() error {
 	return errors.Join(unlockErr, closeErr)
 }
 
+func (f *fileRecoveryFence) CloseClean() error {
+	if f == nil || f.file == nil || f.exclusive {
+		return f.Close()
+	}
+	err := syscall.Flock(int(f.file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	if err == nil {
+		f.exclusive = true
+		return errors.Join(f.writeState(recoveryFenceClean), f.Close())
+	}
+	if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+		return f.Close()
+	}
+	return errors.Join(fmt.Errorf("lock runtime cleanly: %w", err), f.Close())
+}
+
 func (f *fileRecoveryFence) waitForLock(ctx context.Context, mode int) error {
 	for {
 		err := syscall.Flock(int(f.file.Fd()), mode|syscall.LOCK_NB)
@@ -133,7 +166,10 @@ func (f *fileRecoveryFence) writeState(state string) error {
 func (f *fileRecoveryFence) readState() (string, error) {
 	buffer := make([]byte, len(recoveryFencePreparing))
 	read, err := f.file.ReadAt(buffer, 0)
-	if err != nil && !errors.Is(err, os.ErrClosed) && read == 0 {
+	if err != nil && !errors.Is(err, os.ErrClosed) && !errors.Is(err, os.ErrNotExist) && read == 0 {
+		if errors.Is(err, io.EOF) {
+			return "", nil
+		}
 		return "", fmt.Errorf("read runtime recovery state: %w", err)
 	}
 	return string(buffer[:read]), nil

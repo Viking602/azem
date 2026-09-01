@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/venat/message"
 	hyprovider "github.com/Viking602/venat/provider"
 )
@@ -121,7 +122,7 @@ func TestBuildRejectsMalformedToolHistory(t *testing.T) {
 
 func TestBuildKeepsPrivateSystemMessagesInConversationPosition(t *testing.T) {
 	private := message.NewText(message.RoleSystem, "current trusted context")
-	private.Visibility = message.VisibilityPrivate
+	agentruntime.SetMessageVisibility(&private, agentruntime.MessageVisibilityPrivate)
 	data, err := Build(hyprovider.Request{
 		Model: "gpt-test",
 		Messages: []message.Message{
@@ -168,7 +169,7 @@ func TestBuildKeepsPrivateSystemMessagesInConversationPosition(t *testing.T) {
 
 func TestBuildPrivateTodoUpdatePreservesExactWirePrefix(t *testing.T) {
 	initial := message.NewText(message.RoleSystem, "[Session Todo private reminder] revision=1")
-	initial.Visibility = message.VisibilityPrivate
+	agentruntime.SetMessageVisibility(&initial, agentruntime.MessageVisibilityPrivate)
 	history := []message.Message{
 		message.NewText(message.RoleSystem, "stable rules"),
 		initial,
@@ -182,7 +183,7 @@ func TestBuildPrivateTodoUpdatePreservesExactWirePrefix(t *testing.T) {
 		t.Fatal(err)
 	}
 	update := message.NewText(message.RoleSystem, "[Session Todo private reminder] revision=2")
-	update.Visibility = message.VisibilityPrivate
+	agentruntime.SetMessageVisibility(&update, agentruntime.MessageVisibilityPrivate)
 	request.Messages = append(append([]message.Message(nil), history...), update)
 	secondData, err := Build(request, BuildOptions{})
 	if err != nil {

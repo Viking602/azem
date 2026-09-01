@@ -12,10 +12,10 @@ import (
 
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/hooks"
+	mcpruntime "github.com/Viking602/azem/internal/mcp"
 	hyagent "github.com/Viking602/venat/agent"
 	"github.com/Viking602/venat/message"
 	"github.com/Viking602/venat/tool"
-	"github.com/Viking602/venat/transport/mcpcontract"
 )
 
 func TestHookSourcesExcludeUntrustedProjectPaths(t *testing.T) {
@@ -76,6 +76,28 @@ func TestHookCallbacksCarryIDsAndNeverExposeCommand(t *testing.T) {
 			if key == "command" || value == "printf ok" {
 				t.Fatalf("raw command exposed in %#v", event.Data)
 			}
+		}
+	}
+}
+
+func TestAutoCompactHooksEmitVisibleLifecycle(t *testing.T) {
+	service := NewService(context.Background(), config.Default())
+	callback := service.autoCompactHooks(hooks.Metadata{SessionID: "session", RunID: "run"})
+	if err := callback(context.Background(), []message.Message{{Text: "before"}}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := callback(context.Background(), []message.Message{{Text: "before"}}, []message.Message{{Text: "after"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range []string{"compacting", "compacted"} {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		event, err := service.NextEvent(ctx)
+		cancel()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.Kind != EventContextUsage || event.State != state || event.SessionID != "session" || event.RunID != "run" {
+			t.Fatalf("event = %#v", event)
 		}
 	}
 }
@@ -247,7 +269,7 @@ func TestMCPElicitationHooksCanAnswerAndOverrideResult(t *testing.T) {
 	if len(probe.Runs) != 1 || probe.Runs[0].Failure != nil || probe.Runs[0].Output.HookSpecificOutput.Action != "decline" {
 		t.Fatalf("result hook probe = %#v", probe)
 	}
-	result, err := service.handleMCPElicitation(context.Background(), "github", mcpcontract.Elicitation{Mode: "form", Message: "Choose"})
+	result, err := service.handleMCPElicitation(context.Background(), "github", mcpruntime.Elicitation{Mode: "form", Message: "Choose"})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -7,11 +7,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Viking602/venat/coding"
 	"github.com/Viking602/venat/tool"
 )
 
-const ToolReplace = "coding.replace"
+const ToolReplace = "replace"
 
 type replaceDriver struct {
 	read tool.Driver
@@ -36,7 +35,7 @@ func (d replaceDriver) Definition() tool.Definition {
 	additional := false
 	return tool.Definition{
 		Name:        ToolReplace,
-		Description: "Replace unique old_text with new_text in an existing file. Each old_text must occur exactly once. Prefer coding.edit_hashline when you already have current [PATH#TAG] line anchors.",
+		Description: "Replace unique old_text with new_text in an existing file. Each old_text must occur exactly once. Prefer edit_hashline when you already have current [PATH#TAG] line anchors.",
 		InputSchema: tool.Schema{
 			Type: "object",
 			Properties: map[string]tool.Schema{
@@ -56,10 +55,6 @@ func (d replaceDriver) Definition() tool.Definition {
 			Required:             []string{"path", "edits"},
 			AdditionalProperties: &additional,
 		},
-		EffectType:         tool.EffectWrite,
-		RequiresActionTask: true,
-		RiskLevel:          "medium",
-		PolicyTags:         []string{"coding", "edit", "workspace-write"},
 	}
 }
 
@@ -72,19 +67,19 @@ func (d replaceDriver) Execute(ctx context.Context, call tool.Call, sink tool.Up
 		return replaceError(call, "path and edits are required"), nil
 	}
 	readArgs, _ := json.Marshal(map[string]string{"path": in.Path})
-	read, err := d.read.Execute(ctx, tool.Call{ID: call.ID + "-read", Name: coding.ToolReadFile, Arguments: readArgs}, nil)
+	read, err := d.read.Execute(ctx, tool.Call{ID: call.ID + "-read", Name: ToolReadFile, Arguments: readArgs}, nil)
 	if err != nil {
 		return replaceError(call, err.Error()), nil
 	}
 	if read.IsError {
 		return replaceError(call, read.Content), nil
 	}
-	var readResult coding.ReadFileToolResult
+	var readResult ReadFileToolResult
 	if len(read.Structured) == 0 || json.Unmarshal(read.Structured, &readResult) != nil {
 		return replaceError(call, "read result metadata is unavailable"), nil
 	}
 	if readResult.Truncated {
-		return replaceError(call, "file exceeds the safe read window; use coding.search/coding.read_file ranges with coding.edit_hashline instead"), nil
+		return replaceError(call, "file exceeds the safe read window; use search/read_file ranges with edit_hashline instead"), nil
 	}
 	header, count := hashlineHeaderAndCount(read.Content)
 	if header == "" {
@@ -99,14 +94,14 @@ func (d replaceDriver) Execute(ctx context.Context, call tool.Call, sink tool.Up
 		lines = 1
 	}
 	editArgs, _ := json.Marshal(map[string]string{"input": hashlineOverwritePatch(header, lines, updated)})
-	result, err := d.edit.Execute(ctx, tool.Call{ID: call.ID, Name: coding.ToolEditHashline, Arguments: editArgs}, sink)
+	result, err := d.edit.Execute(ctx, tool.Call{ID: call.ID, Name: ToolEditHashline, Arguments: editArgs}, sink)
 	result.ToolCallID = call.ID
 	result.Name = call.Name
 	return result, err
 }
 
 func replaceError(call tool.Call, message string) tool.Result {
-	return tool.Result{ToolCallID: call.ID, Name: call.Name, Content: "coding.replace failed: " + message, IsError: true}
+	return tool.Result{ToolCallID: call.ID, Name: call.Name, Content: "replace failed: " + message, IsError: true}
 }
 
 func hashlineHeaderAndCount(content string) (string, int) {

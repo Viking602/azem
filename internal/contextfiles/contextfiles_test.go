@@ -90,6 +90,14 @@ func TestImportCyclesAndMissingFilesRemainBounded(t *testing.T) {
 	}
 }
 
+func TestNestedPointersDoNotWalkNonGitWorkspace(t *testing.T) {
+	workspace := t.TempDir()
+	mustWrite(t, filepath.Join(workspace, "deep", "AGENTS.md"), "DEEP")
+	if pointers := discoverNestedPointers(context.Background(), workspace, nil); len(pointers) != 0 {
+		t.Fatalf("non-git workspace pointers = %v", pointers)
+	}
+}
+
 func mustWrite(t *testing.T, path, content string) {
 	t.Helper()
 	mustMkdir(t, filepath.Dir(path))

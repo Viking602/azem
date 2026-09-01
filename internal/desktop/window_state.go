@@ -17,7 +17,7 @@ const (
 )
 
 // WindowGeometry is the last known main-window frame on this machine.
-// Coordinates are absolute DIP pixels (same space as Wails Bounds/Position).
+// Coordinates are absolute device-independent pixels.
 type WindowGeometry struct {
 	X         int    `json:"x"`
 	Y         int    `json:"y"`

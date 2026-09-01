@@ -35,7 +35,7 @@ func validateLLMuxProvider(id string, provider LLMuxProviderConfig) error {
 	}
 	if provider.Backend != "" {
 		switch provider.Backend {
-		case "openai", "openai-compatible", "openai-completions", "openai-responses", "anthropic", "google", "mistral", "cohere", "xai":
+		case "openai", "openai-compatible", "openai-completions", "openai-responses", "open-responses", "anthropic", "google", "mistral", "cohere", "xai":
 		default:
 			return fmt.Errorf("providers.llmux.%s.backend is unsupported", id)
 		}

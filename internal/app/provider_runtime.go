@@ -7,17 +7,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/Viking602/azem/internal/adapterdeployment"
 	agentservice "github.com/Viking602/azem/internal/agent"
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/azem/internal/auth"
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/hooks"
 	mcpruntime "github.com/Viking602/azem/internal/mcp"
+	providerretry "github.com/Viking602/azem/internal/provider"
 	"github.com/Viking602/azem/internal/provider/catalog"
 	"github.com/Viking602/azem/internal/provider/codex"
 	cursordriver "github.com/Viking602/azem/internal/provider/cursor"
@@ -25,14 +26,28 @@ import (
 	"github.com/Viking602/azem/internal/provider/responses"
 	"github.com/Viking602/azem/internal/session"
 	hyagent "github.com/Viking602/venat/agent"
-	"github.com/Viking602/venat/api"
-	"github.com/Viking602/venat/coding"
 	"github.com/Viking602/venat/message"
 	hyprovider "github.com/Viking602/venat/provider"
 	hyskill "github.com/Viking602/venat/skill"
 	"github.com/Viking602/venat/tool"
-	hyworker "github.com/Viking602/venat/worker"
 )
+
+const providerDefaultReasoningIdentity = "provider-default"
+
+func durableReasoningIdentity(reasoning string) string {
+	reasoning = strings.TrimSpace(reasoning)
+	if reasoning == "" {
+		return providerDefaultReasoningIdentity
+	}
+	return reasoning
+}
+
+func requestedReasoning(identity string) string {
+	if strings.TrimSpace(identity) == providerDefaultReasoningIdentity {
+		return ""
+	}
+	return identity
+}
 
 type ProviderRuntime struct {
 	cfg                   config.Config
@@ -73,12 +88,12 @@ func (h editRecoveryHook) BeforeModelCall(_ context.Context, request *hyprovider
 	}
 	readTools := make([]message.ToolDefinition, 0, 1)
 	for _, definition := range request.Tools {
-		if definition.Name == coding.ToolReadFile {
+		if definition.Name == agentservice.ToolReadFile {
 			readTools = append(readTools, definition)
 		}
 	}
 	if len(readTools) == 0 {
-		return fmt.Errorf("edit recovery for %q requires unavailable tool %s", target, coding.ToolReadFile)
+		return fmt.Errorf("edit recovery for %q requires unavailable tool %s", target, agentservice.ToolReadFile)
 	}
 	request.Tools = readTools
 	return nil
@@ -95,34 +110,21 @@ var (
 
 const teamWorkspaceAnchorMetadata = "workspace_anchor"
 
-type singleRunManifest struct {
-	Version          int       `json:"version"`
-	Provider         string    `json:"provider"`
-	AccountID        string    `json:"account_id"`
-	Model            string    `json:"model"`
-	Reasoning        string    `json:"reasoning"`
-	ActiveSkills     []string  `json:"active_skills"`
-	PlanMode         bool      `json:"plan_mode,omitempty"`
-	ApprovedPlanID   string    `json:"approved_plan_id,omitempty"`
-	DisableSubagents bool      `json:"disable_subagents"`
-	StaticIdentity   string    `json:"static_identity"`
-	MaxTokens        int64     `json:"max_tokens"`
-	MaxToolCalls     int       `json:"max_tool_calls"`
-	MaxWallClockNS   int64     `json:"max_wall_clock_ns"`
-	StartedAt        time.Time `json:"started_at"`
-}
-
 type liveApproval struct {
 	approvalID  string
 	agentID     string
 	agentType   string
 	run         *agentservice.Run
 	callID      string
+	operationID string
 	sessionID   string
 	runID       string
 	fingerprint string
 	request     approvalReviewRequest
+	pending     agentservice.PendingApproval
 	decision    chan agentservice.ApprovalMode
+	suspension  chan error
+	suspendable bool
 	resolving   bool
 	resolved    bool
 }
@@ -172,7 +174,7 @@ func (r *ProviderRuntime) Start(ctx context.Context, request TurnRequest) (*agen
 	executionPolicy := agentservice.RunExecutionPolicy{
 		AgentVersion: "runtime",
 		Governance:   singleRunGovernance(r.cfg, request),
-		Budget: &api.TaskBudget{
+		Budget: &agentruntime.TaskBudget{
 			MaxTokens: r.cfg.Agents.Main.MaxTokens, MaxWallClock: r.cfg.Agents.Main.MaxWallClockDuration,
 			MaxToolCalls: r.cfg.Agents.Main.MaxToolCalls,
 		},
@@ -180,13 +182,6 @@ func (r *ProviderRuntime) Start(ctx context.Context, request TurnRequest) (*agen
 	executionPolicy.ResourceClaims, err = topLevelWorkspaceWriteClaims(r.cfg.Workspace.AllowWrite, r.cfg.Workspace.ShellPolicy, r.cfg.Workspace.Root)
 	if err != nil {
 		return nil, hyagent.Engine{}, err
-	}
-	if r.cfg.Retry.Enabled {
-		executionPolicy.RetryPolicy = api.RetryPolicy{
-			MaxAttempts: r.cfg.Retry.MaxRetries + 1,
-			Backoff:     r.cfg.Retry.BaseDelayDuration,
-			MaxBackoff:  r.cfg.Retry.MaxDelayDuration,
-		}
 	}
 	run, err := r.coding.StartRunWithMetadata(ctx, request.Prompt, map[string]string{"session_id": request.SessionID}, executionPolicy)
 	if err != nil {
@@ -210,7 +205,7 @@ func (r *ProviderRuntime) Start(ctx context.Context, request TurnRequest) (*agen
 		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, err.Error(), err)
 		return nil, hyagent.Engine{}, err
 	}
-	durable, err := r.coding.Runner().Run(ctx, run.RunID)
+	durable, err := r.coding.LoadRun(ctx, run.RunID)
 	if err != nil {
 		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, err.Error(), err)
 		return nil, hyagent.Engine{}, err
@@ -219,7 +214,7 @@ func (r *ProviderRuntime) Start(ctx context.Context, request TurnRequest) (*agen
 		durable.Metadata = map[string]string{}
 	}
 	durable.Metadata["session_id"] = request.SessionID
-	if err := r.coding.Runner().SaveRun(ctx, durable); err != nil {
+	if err := r.coding.SaveRun(ctx, durable); err != nil {
 		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, err.Error(), err)
 		return nil, hyagent.Engine{}, err
 	}
@@ -239,18 +234,9 @@ func canonicalRunUserHighWater(blocks []session.Block, runID string) *int64 {
 }
 
 func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnRequest, run *agentservice.Run, accountID, modelID string, contextWindow int, driver hyprovider.Driver) (*agentservice.Run, hyagent.Engine, error) {
-	providerDriver := driver
-	maxTokens := r.cfg.Agents.Main.MaxTokens
-	maxToolCalls := r.cfg.Agents.Main.MaxToolCalls
 	maxWallClock := r.cfg.Agents.Main.MaxWallClockDuration
 	if request.budgetRestored {
-		maxTokens, maxToolCalls, maxWallClock = request.maxTokens, request.maxToolCalls, request.maxWallClock
-		if maxToolCalls > 0 {
-			maxToolCalls -= request.usedToolCalls
-			if maxToolCalls <= 0 {
-				return nil, hyagent.Engine{}, fmt.Errorf("%w: max tool calls reached", errResumeBudgetExhausted)
-			}
-		}
+		maxWallClock = request.maxWallClock
 		if maxWallClock > 0 {
 			maxWallClock -= time.Since(request.startedAt)
 			if maxWallClock <= 0 {
@@ -258,11 +244,6 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 			}
 		}
 	}
-	usageBudget := &providerUsageBudget{maxTokens: maxTokens, used: request.usedTokens}
-	if maxTokens > 0 && usageBudget.used >= maxTokens {
-		return nil, hyagent.Engine{}, fmt.Errorf("%w: max tokens reached", errResumeBudgetExhausted)
-	}
-	driver = &budgetedProviderDriver{inner: driver, budget: usageBudget}
 	parentBudget, err := calculateContextBudget(modelID, contextWindow, 0, r.cfg.Agents.Context)
 	if err != nil {
 		return nil, hyagent.Engine{}, err
@@ -274,7 +255,6 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 	subagents := r.subagents
 	subagentInitErr := r.subagentInitErr
 	r.mu.RUnlock()
-	observeProviderRetries(ctx, host, request.SessionID, run.RunID, request.Provider, providerDriver)
 	if subagentInitErr != nil {
 		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, subagentInitErr.Error(), subagentInitErr)
 		return nil, hyagent.Engine{}, subagentInitErr
@@ -321,10 +301,12 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 			continue
 		}
 
-		governed := &governedAgentTool{definition: definition, driver: workspaceDriver, coding: r.coding, run: run, host: host, sessionID: request.SessionID}
 		metadata := hooks.Metadata{SessionID: request.SessionID, RunID: run.RunID, AgentID: "main", AgentType: "main", CWD: r.cfg.Workspace.Root}
-		drivers = append(drivers, wrapHookDriver(host, metadata, governed))
-		toolNames = append(toolNames, definition.Name)
+		governed := &governedAgentTool{
+			definition: definition, driver: wrapHookDriver(host, metadata, workspaceDriver),
+			coding: r.coding, run: run, host: host, sessionID: request.SessionID,
+		}
+		drivers = append(drivers, governed)
 	}
 	if host != nil && host.Sessions() != nil && request.origin != turnOriginAutoLearn {
 		drivers = append(drivers, wrapHookDriver(host, host.HookMetadata(request.SessionID, run.RunID), &todoDriver{sessionID: request.SessionID, store: host.Sessions(), emit: func(event Event) bool {
@@ -354,9 +336,11 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 	if manager != nil && !request.VibeMode && request.origin != turnOriginAutoLearn {
 		for _, external := range manager.Snapshot() {
 			definition := external.Definition()
-			governed := &governedAgentTool{definition: definition, driver: external, coding: r.coding, run: run, host: host, sessionID: request.SessionID}
-			drivers = append(drivers, wrapHookDriver(host, host.HookMetadata(request.SessionID, run.RunID), governed))
-			toolNames = append(toolNames, definition.Name)
+			governed := &governedAgentTool{
+				definition: definition, driver: wrapHookDriver(host, host.HookMetadata(request.SessionID, run.RunID), external),
+				coding: r.coding, run: run, host: host, sessionID: request.SessionID,
+			}
+			drivers = append(drivers, governed)
 		}
 	}
 	if subagents != nil && !request.DisableSubagents && request.origin != turnOriginAutoLearn {
@@ -396,9 +380,11 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 		}
 		for _, external := range subagentDrivers {
 			definition := external.Definition()
-			governed := &governedAgentTool{definition: definition, driver: external, coding: r.coding, run: run, host: host, sessionID: request.SessionID}
-			drivers = append(drivers, wrapHookDriver(host, host.HookMetadata(request.SessionID, run.RunID), governed))
-			toolNames = append(toolNames, definition.Name)
+			governed := &governedAgentTool{
+				definition: definition, driver: wrapHookDriver(host, host.HookMetadata(request.SessionID, run.RunID), external),
+				coding: r.coding, run: run, host: host, sessionID: request.SessionID,
+			}
+			drivers = append(drivers, governed)
 		}
 	}
 	if request.PlanMode {
@@ -446,7 +432,6 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 		ExtraBody:       extraBody,
 		LoopPolicy: hyagent.LoopPolicy{
 			UnlimitedIterations: true,
-			MaxWallClock:        maxWallClock,
 			ContextTokenTarget:  hardContextTarget,
 		},
 	}
@@ -498,26 +483,11 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 			})
 		}
 	}
-	type profileSkill struct {
-		Skill          any               `json:"skill"`
-		ResourceHashes map[string]string `json:"resource_hashes,omitempty"`
-	}
 	profileSkillNames := mergeSkillNames(activeSkills, skillSnapshot.Available)
-	resolvedSkills := make([]profileSkill, 0, len(profileSkillNames))
-	for _, name := range profileSkillNames {
-		if resolved, ok := skillSnapshot.Registry.Get(name); ok {
-			profile := profileSkill{Skill: resolved, ResourceHashes: make(map[string]string, len(resolved.Resources))}
-			for _, resource := range resolved.Resources {
-				payload, readErr := hyskill.ReadResource(resolved, resource.Name)
-				if readErr != nil {
-					_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, readErr.Error(), readErr)
-					return nil, hyagent.Engine{}, fmt.Errorf("hash skill %s resource %s: %w", name, resource.Name, readErr)
-				}
-				digest := sha256.Sum256(payload)
-				profile.ResourceHashes[resource.Name] = hex.EncodeToString(digest[:])
-			}
-			resolvedSkills = append(resolvedSkills, profile)
-		}
+	resolvedSkills, skillProfileErr := immutableSkillProfiles(skillSnapshot.Registry, profileSkillNames)
+	if skillProfileErr != nil {
+		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, skillProfileErr.Error(), skillProfileErr)
+		return nil, hyagent.Engine{}, skillProfileErr
 	}
 	attachmentRoot := ""
 	if host != nil {
@@ -528,6 +498,7 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 	if request.Provider == "cursor" {
 		transportVersion = driverMetadata.Version
 	}
+	wireDefinitions := turnTools.Bus().Definitions()
 	staticPayload, marshalErr := json.Marshal(struct {
 		Provider, Account, Model, Reasoning, Transport, Instructions string
 		TransportVersion                                             string `json:"transport_version,omitempty"`
@@ -538,7 +509,7 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 		Wire                                                         int
 	}{
 		request.Provider, accountID, modelID, request.Reasoning, driverMetadata.Name, instructionFingerprint, transportVersion,
-		resolvedSkills, tool.NewBus(drivers...).Definitions(), r.cfg,
+		resolvedSkills, wireDefinitions, r.cfg,
 		r.ChatGPTEndpoint, r.GrokEndpoint, attachmentRoot,
 		request.PlanMode, request.DisableSubagents, session.CurrentWireVersion,
 	})
@@ -548,14 +519,14 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 	}
 	staticDigest := sha256.Sum256(staticPayload)
 	contextManager.staticIdentity = hex.EncodeToString(staticDigest[:])
-	if request.resuming {
-		if request.immutableIdentity != contextManager.staticIdentity {
-			return nil, hyagent.Engine{}, fmt.Errorf("%w: tools, skills, or provider transport differ", errResumeProfileChanged)
-		}
-	} else if persistErr := r.persistSingleRunManifest(ctx, run.RunID, request, accountID, modelID, activeSkills, contextManager.staticIdentity); persistErr != nil {
-		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, persistErr.Error(), persistErr)
-		return nil, hyagent.Engine{}, persistErr
+	toolSchemaPayload, marshalErr := json.Marshal(wireDefinitions)
+	if marshalErr != nil {
+		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, marshalErr.Error(), marshalErr)
+		return nil, hyagent.Engine{}, fmt.Errorf("encode immutable tool schema: %w", marshalErr)
 	}
+	toolSchemaFingerprint := hashText(string(toolSchemaPayload))
+	toolSetHash := hashText(strings.Join(toolNames, "\x00"))
+	toolProfileHash := hashText(toolSetHash + "\x00" + toolSchemaFingerprint + "\x00" + contextManager.staticIdentity)
 	if host != nil && host.Sessions() != nil && request.origin != turnOriginAutoLearn {
 		staticIdentity := activeCacheIdentity(contextManager.staticIdentity, request.modelHistory.ContextManifestHash, request.modelHistory.SummaryHash)
 		_, _, identityErr := host.Sessions().EnsureCacheIdentity(ctx, request.SessionID, staticIdentity)
@@ -618,7 +589,8 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 			reportInputTokens: contextManager.providerPressure.observeInputTokens,
 		}
 	}
-	driver, prewalkSwitch, err := r.preparePrewalkDriver(ctx, request, run, host, accountID, driver, usageBudget)
+	driver = retryProviderDriver(ctx, host, request.SessionID, run.RunID, request.Provider, r.cfg.Retry, driver)
+	driver, prewalkSwitch, err := r.preparePrewalkDriver(ctx, request, run, host, accountID, driver)
 	if err != nil {
 		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, err.Error(), err)
 		return nil, hyagent.Engine{}, err
@@ -651,16 +623,8 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 			})
 		}}
 	}
-	definition := agentDefinitionForSpec(
-		run.HolderID, "Azem Main", "Primary interactive coding agent", spec,
-		singleRunGovernance(r.cfg, request),
-		map[string]string{
-			"role": "coding", "provider": request.Provider,
-			"runtime_identity": contextManager.staticIdentity,
-		},
-	)
 	toolBus := turnTools.Bus()
-	engine, err := materializeAgentDefinition(ctx, r.coding, definition, spec, hyagent.BuildDeps{
+	engine, err := hyagent.Build(spec, hyagent.BuildDeps{
 		Providers:      hyprovider.Single(driver),
 		Skills:         skillSnapshot.Registry,
 		Tools:          toolBus,
@@ -670,6 +634,23 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, err.Error(), err)
 		return nil, hyagent.Engine{}, err
 	}
+	profile := agentruntime.ExecutableProfile{
+		Provider: request.Provider, AccountID: accountID, RawModel: firstNonempty(request.Model, modelID),
+		Model: modelID, Reasoning: durableReasoningIdentity(request.Reasoning), ActiveSkills: append([]string{}, activeSkills...),
+		ToolSetHash: toolSetHash, ToolProfileHash: toolProfileHash,
+		PlanMode: request.PlanMode, ApprovedPlanID: request.approvedPlanArtifactID, DisableSubagents: request.DisableSubagents,
+		StaticIdentity: contextManager.staticIdentity, WorkspaceAnchor: canonicalWorkspaceAnchor(r.cfg.Workspace.Root),
+		PromptFingerprint: instructionFingerprint, ToolSchemaFingerprint: toolSchemaFingerprint,
+	}
+	if sealErr := r.coding.SealExecutionProfile(ctx, run, profile); sealErr != nil {
+		err = sealErr
+		if request.resuming && errors.Is(sealErr, agentruntime.ErrConflict) {
+			err = fmt.Errorf("%w: %v", errResumeProfileChanged, sealErr)
+		}
+		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, err.Error(), err)
+		return nil, hyagent.Engine{}, err
+	}
+	engine.ToolMode = tool.ModeParallel
 	parallelToolCalls := true
 	engine.PromptCacheKey = request.SessionID
 	if request.origin != turnOriginAutoLearn && host != nil && host.Sessions() != nil {
@@ -684,25 +665,19 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 		engine.PromptCacheKey += ":autolearn"
 	}
 	engine.ParallelToolCalls = &parallelToolCalls
-	var turnControl *hyagent.ControlQueue
+	var turnControl *turnControlQueue
 	if host != nil {
 		turnControl = host.TurnControl(run.RunID)
-		engine.Control = turnControl
 	}
-	engine.NativeToolHost = newAttachmentRequestHost(host)
-	if request.Provider == "cursor" {
-		engine.NativeToolHost = newCursorExecHost(
+	attachmentRoot = providerAttachmentRoot(host)
+	var cursorHost cursordriver.ExecHost
+	if request.Provider == "cursor" || prewalkSwitch != nil && prewalkSwitch.targetProvider == "cursor" {
+		cursorHost = newCursorExecHost(
 			host, r.cfg.Workspace.Root, request.SessionID, run.RunID, run.RunID, "", toolBus,
 		)
 	}
-	if prewalkSwitch != nil {
-		prewalkSwitch.targetNativeHost = newAttachmentRequestHost(host)
-		if prewalkSwitch.targetProvider == "cursor" {
-			prewalkSwitch.targetNativeHost = newCursorExecHost(
-				host, r.cfg.Workspace.Root, request.SessionID, run.RunID, run.RunID, "", toolBus,
-			)
-		}
-	}
+	engine = bindProviderRequestScope(engine, attachmentRoot, cursorHost)
+
 	advisor := r.advisorForRun(ctx, host, request.SessionID, run.RunID, request.Provider, accountID, modelID, request.Reasoning)
 	r.mu.RLock()
 	ttsrConfig := cloneTTSRConfig(r.cfg.TTSR)
@@ -720,7 +695,6 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 		return nil, hyagent.Engine{}, ttsrErr
 	}
 	if checkpoint != nil {
-		engine.ContextTransition = checkpoint
 		engine.Hooks = engine.Hooks.Prepend(checkpoint)
 		engine.OutputGuardrails = append(engine.OutputGuardrails, checkpoint.guardrail())
 	}
@@ -775,10 +749,11 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 			},
 		))
 	}
+	engine = bindTurnControl(engine, turnControl)
 	return run, engine, nil
 }
 
-func singleRunGovernance(cfg config.Config, request TurnRequest) api.GovernancePolicy {
+func singleRunGovernance(cfg config.Config, request TurnRequest) agentruntime.GovernancePolicy {
 	maxTokens := cfg.Agents.Main.MaxTokens
 	maxToolCalls := cfg.Agents.Main.MaxToolCalls
 	maxRuntime := cfg.Agents.Main.MaxWallClockDuration
@@ -787,82 +762,21 @@ func singleRunGovernance(cfg config.Config, request TurnRequest) api.GovernanceP
 		maxToolCalls = request.maxToolCalls
 		maxRuntime = request.maxWallClock
 	}
-	return api.GovernancePolicy{Budget: api.Budget{
+	return agentruntime.GovernancePolicy{Budget: agentruntime.Budget{
 		MaxTokens: maxTokens, MaxToolCalls: maxToolCalls, MaxRuntime: maxRuntime,
 	}}
-}
-
-func agentDefinitionForSpec(
-	id, name, description string,
-	spec hyagent.Spec,
-	governance api.GovernancePolicy,
-	metadata map[string]string,
-) api.AgentDefinition {
-	metadata = maps.Clone(metadata)
-	if metadata == nil {
-		metadata = make(map[string]string)
-	}
-	loopPolicy, _ := json.Marshal(spec.LoopPolicy)
-	stopSequences, _ := json.Marshal(spec.StopSequences)
-	metadata["venat.loop_policy"] = string(loopPolicy)
-	metadata["venat.thinking_budget"] = fmt.Sprint(spec.ThinkingBudget)
-	metadata["venat.stop_sequences"] = string(stopSequences)
-	return api.AgentDefinition{
-		ID: id, Name: name, Description: description,
-		Instructions:    spec.Instructions,
-		Skills:          append([]string(nil), spec.Skills...),
-		AvailableSkills: append([]string(nil), spec.AvailableSkills...),
-		Model: api.ModelPolicy{
-			Provider: spec.Provider, Model: spec.Model, FallbackModel: spec.FallbackModel,
-			Temperature: spec.Temperature, TopP: spec.TopP, MaxTokens: spec.MaxTokens,
-		},
-		Tools:      append([]string(nil), spec.Tools...),
-		ToolMode:   api.ToolModeParallel,
-		Governance: governance,
-		Status:     "active",
-		Metadata:   metadata,
-	}
-}
-
-func materializeAgentDefinition(
-	ctx context.Context,
-	coding *agentservice.Service,
-	definition api.AgentDefinition,
-	spec hyagent.Spec,
-	deps hyagent.BuildDeps,
-) (hyagent.Engine, error) {
-	versioned := definition
-	versioned.Version = ""
-	encoded, err := json.Marshal(versioned)
-	if err != nil {
-		return hyagent.Engine{}, fmt.Errorf("encode agent definition: %w", err)
-	}
-	digest := sha256.Sum256(encoded)
-	definition.Version = hex.EncodeToString(digest[:])
-	deployed, err := (hyworker.DefinitionDeployment{
-		Runner: coding.Runner(), BuildDeps: deps,
-		Admission: hyworker.StandardAdmissionController{Runner: coding.Runner()},
-		TTL:       10 * time.Minute,
-	}).Deploy(ctx, definition)
-	if err != nil {
-		return hyagent.Engine{}, err
-	}
-	if err := deployed.Close(); err != nil {
-		return hyagent.Engine{}, fmt.Errorf("close agent definition deployment: %w", err)
-	}
-	engine := deployed.Worker.Engine
-	engine.LoopPolicy = spec.LoopPolicy
-	engine.ThinkingBudget = spec.ThinkingBudget
-	engine.StopSequences = append([]string(nil), spec.StopSequences...)
-	engine.ExtraBody = maps.Clone(spec.ExtraBody)
-	return engine, nil
 }
 
 func planModeToolDrivers(drivers []tool.Driver) []tool.Driver {
 	allowed := make([]tool.Driver, 0, len(drivers))
 	for _, driver := range drivers {
 		definition := driver.Definition()
-		if (definition.EffectType == tool.EffectReadOnly || definition.Name == submitPlanToolName) && definition.Name != subagentKillTool {
+		descriptor, err := agentservice.DescribeTool(driver)
+		if err != nil {
+			continue
+		}
+		policy := descriptor.PolicyForCall(tool.Call{Name: definition.Name})
+		if (policy.IsReadOnly() || definition.Name == submitPlanToolName) && definition.Name != subagentKillTool {
 			allowed = append(allowed, driver)
 		}
 	}
@@ -877,30 +791,30 @@ func toolDriverNames(drivers []tool.Driver) []string {
 	return names
 }
 
-func (r *ProviderRuntime) persistSingleRunManifest(ctx context.Context, runID string, request TurnRequest, accountID, resolvedModel string, activeSkills []string, staticIdentity string) error {
-	durable, err := r.coding.Runner().Run(ctx, runID)
-	if err != nil {
-		return err
+type immutableSkillProfile struct {
+	Skill          any               `json:"skill"`
+	ResourceHashes map[string]string `json:"resource_hashes,omitempty"`
+}
+
+func immutableSkillProfiles(registry *hyskill.Registry, names []string) ([]immutableSkillProfile, error) {
+	profiles := make([]immutableSkillProfile, 0, len(names))
+	for _, name := range names {
+		resolved, ok := registry.Get(name)
+		if !ok {
+			return nil, fmt.Errorf("hash skill %s: skill is not registered", name)
+		}
+		profile := immutableSkillProfile{Skill: resolved, ResourceHashes: make(map[string]string, len(resolved.Resources))}
+		for _, resource := range resolved.Resources {
+			payload, err := hyskill.ReadResource(resolved, resource.Name)
+			if err != nil {
+				return nil, fmt.Errorf("hash skill %s resource %s: %w", name, resource.Name, err)
+			}
+			digest := sha256.Sum256(payload)
+			profile.ResourceHashes[resource.Name] = hex.EncodeToString(digest[:])
+		}
+		profiles = append(profiles, profile)
 	}
-	if durable.Metadata == nil {
-		durable.Metadata = map[string]string{}
-	}
-	manifest := singleRunManifest{
-		Version: 2, Provider: request.Provider, AccountID: accountID, Model: resolvedModel, Reasoning: request.Reasoning,
-		ActiveSkills: append([]string(nil), activeSkills...), PlanMode: request.PlanMode, ApprovedPlanID: request.approvedPlanArtifactID, DisableSubagents: request.DisableSubagents,
-		StaticIdentity: staticIdentity, MaxTokens: r.cfg.Agents.Main.MaxTokens, MaxToolCalls: r.cfg.Agents.Main.MaxToolCalls,
-		MaxWallClockNS: int64(r.cfg.Agents.Main.MaxWallClockDuration), StartedAt: durable.CreatedAt.UTC(),
-	}
-	if manifest.ActiveSkills == nil {
-		manifest.ActiveSkills = []string{}
-	}
-	encodedManifest, err := json.Marshal(manifest)
-	if err != nil {
-		return err
-	}
-	durable.Metadata["session_id"] = request.SessionID
-	durable.Metadata["single_run_manifest"] = string(encodedManifest)
-	return r.coding.Runner().SaveRun(ctx, durable)
+	return profiles, nil
 }
 
 type ContextBudget struct {
@@ -1070,6 +984,15 @@ func (r *ProviderRuntime) CancelParentSubagents(sessionID, parentRunID string) {
 	}
 }
 
+func (r *ProviderRuntime) CancelParentSubagentsAcrossSessions(parentRunID string) {
+	r.mu.RLock()
+	runtime := r.subagents
+	r.mu.RUnlock()
+	if runtime != nil {
+		runtime.CancelByParentRunAcrossSessions(parentRunID, true)
+	}
+}
+
 func (r *ProviderRuntime) UnfinishedChildren(sessionID, parentRunID string) []agentservice.SubagentRun {
 	r.mu.RLock()
 	runtime := r.subagents
@@ -1113,7 +1036,7 @@ func (r *ProviderRuntime) DetailSubagent(ctx context.Context, sessionID, id stri
 	runtime := r.subagents
 	r.mu.RUnlock()
 	if runtime == nil {
-		return nil, api.ErrNotFound
+		return nil, agentruntime.ErrNotFound
 	}
 	return runtime.Detail(ctx, sessionID, id)
 }
@@ -1150,36 +1073,35 @@ func (r *ProviderRuntime) TeamResolver(ctx context.Context, request TurnRequest)
 	return teamProviderResolution{providerID: request.Provider, accountID: account.ID, modelID: modelID, contextWindow: contextWindow, driver: driver, resolver: hyprovider.Single(driver)}, nil
 }
 
-func observeProviderRetries(ctx context.Context, host providerHost, sessionID, runID, providerID string, driver hyprovider.Driver) {
-	if host == nil {
-		return
+func retryProviderDriver(ctx context.Context, host providerHost, sessionID, runID, providerID string, policy config.RetryConfig, driver hyprovider.Driver) hyprovider.Driver {
+	if !policy.Enabled || policy.MaxRetries <= 0 {
+		return driver
 	}
-	if configurable, ok := driver.(hyprovider.RetryDelayConfigurable); ok {
-		configurable.SetMaxRetryDelay(host.RetryConfig().MaxDelayDuration)
+	var observer hyprovider.RetryObserver
+	if host != nil {
+		observer = func(progress hyprovider.RetryProgress) error {
+			cause := ""
+			if progress.Cause != nil {
+				cause = progress.Cause.Error()
+			}
+			data := map[string]string{
+				"provider": providerID, "attempt": fmt.Sprint(progress.Attempt), "max": fmt.Sprint(progress.Max),
+				"delay_ms": fmt.Sprint(progress.Delay.Milliseconds()),
+			}
+			if progress.Cause != nil {
+				data[errcode.DataKey] = string(errcode.Classify(progress.Cause))
+			}
+			if !host.EmitEvent(ctx, Event{
+				Kind: EventProviderRetry, SessionID: sessionID, RunID: runID, State: "waiting", Text: cause,
+				Data: data,
+			}) {
+				return eventDeliveryError(ctx)
+			}
+			return nil
+		}
 	}
-	retryDriver, ok := driver.(hyprovider.RetryObservable)
-	if !ok {
-		return
-	}
-	retryDriver.SetRetryObserver(func(progress hyprovider.RetryProgress) error {
-		cause := ""
-		if progress.Cause != nil {
-			cause = progress.Cause.Error()
-		}
-		data := map[string]string{
-			"provider": providerID, "attempt": fmt.Sprint(progress.Attempt), "max": fmt.Sprint(progress.Max),
-			"delay_ms": fmt.Sprint(progress.Delay.Milliseconds()),
-		}
-		if progress.Cause != nil {
-			data[errcode.DataKey] = string(errcode.Classify(progress.Cause))
-		}
-		if !host.EmitEvent(ctx, Event{
-			Kind: EventProviderRetry, SessionID: sessionID, RunID: runID, State: "waiting", Text: cause,
-			Data: data,
-		}) {
-			return eventDeliveryError(ctx)
-		}
-		return nil
+	return providerretry.WithRetry(driver, providerretry.RetryConfig{
+		MaxRetries: policy.MaxRetries, BaseDelay: policy.BaseDelayDuration, MaxDelay: policy.MaxDelayDuration, Observer: observer,
 	})
 }
 
@@ -1212,13 +1134,12 @@ func (r *ProviderRuntime) ApprovalReviewer(ctx context.Context, sessionID, runID
 	if err != nil {
 		return nil, err
 	}
-	observeProviderRetries(ctx, host, sessionID, runID, providerID, driver)
-	reviewer, err := codex.NewProviderReviewer(driver, resolvedModel, reasoning, r.approvalReviewTimeout)
-	if err != nil || host == nil || host.Sessions() == nil {
-		return reviewer, err
+	if host != nil && host.Sessions() != nil {
+		driver = &meteredProviderDriver{
+			inner: driver, store: host.Sessions(), host: host, sessionID: sessionID, runID: runID,
+			kind: "review", provider: providerID, model: resolvedModel, transport: driver.Metadata().Name,
+		}
 	}
-	return reviewer.WithDriver(&meteredProviderDriver{
-		inner: driver, store: host.Sessions(), host: host, sessionID: sessionID, runID: runID,
-		kind: "review", provider: providerID, model: resolvedModel, transport: driver.Metadata().Name,
-	}), nil
+	driver = retryProviderDriver(ctx, host, sessionID, runID, providerID, r.cfg.Retry, driver)
+	return codex.NewProviderReviewer(driver, resolvedModel, reasoning, r.approvalReviewTimeout)
 }

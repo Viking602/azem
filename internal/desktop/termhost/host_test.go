@@ -91,6 +91,38 @@ func TestSecondSessionIsIndependent(t *testing.T) {
 	}
 }
 
+func TestTerminalTitleResetsAfterAllSessionsClose(t *testing.T) {
+	requireUnixPTY(t)
+	host := NewPlain(t.TempDir(), "/bin/sh", nil)
+	t.Cleanup(host.CloseAll)
+
+	first, err := host.Create(80, 24)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := host.Create(80, 24)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Title != "sh · 2" {
+		t.Fatalf("second terminal title = %q", second.Title)
+	}
+	if err := host.Close(first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := host.Close(second.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := host.Create(80, 24)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reopened.Title != "sh" {
+		t.Fatalf("reopened terminal title = %q, want %q", reopened.Title, "sh")
+	}
+}
+
 func TestCloseAllReapsSessions(t *testing.T) {
 	requireUnixPTY(t)
 	workspace := t.TempDir()

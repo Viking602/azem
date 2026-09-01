@@ -3,6 +3,7 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -16,15 +17,17 @@ import (
 
 	"github.com/Viking602/azem/internal/auth"
 	"github.com/Viking602/azem/internal/auth/chatgpt"
+	providerretry "github.com/Viking602/azem/internal/provider"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 )
 
 func TestDriverRetriesConnectionResetFiveTimesThenSucceeds(t *testing.T) {
+	const maxRetries = 5
 	var requests atomic.Int32
 	var retries []hyprovider.RetryProgress
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("Content-Type", "text/event-stream")
-		if requests.Add(1) <= maxProviderStreamRetries {
+		if requests.Add(1) <= maxRetries {
 			_, _ = writer.Write([]byte("data: {\"type\":\"error\",\"code\":\"server_error\",\"message\":\"upstream connection reset\"}\n\n"))
 			return
 		}
@@ -32,11 +35,12 @@ func TestDriverRetriesConnectionResetFiveTimesThenSucceeds(t *testing.T) {
 	}))
 	defer server.Close()
 
-	driver := newTestDriver(t, server.URL)
-	driver.retryDelay = func(attempt int) time.Duration { return time.Duration(attempt) * time.Millisecond }
-	driver.SetRetryObserver(func(progress hyprovider.RetryProgress) error {
-		retries = append(retries, progress)
-		return nil
+	driver := providerretry.WithRetry(newTestDriver(t, server.URL), providerretry.RetryConfig{
+		MaxRetries: maxRetries,
+		Observer: func(progress hyprovider.RetryProgress) error {
+			retries = append(retries, progress)
+			return nil
+		},
 	})
 	stream, err := driver.Stream(context.Background(), testRequest())
 	if err != nil {
@@ -47,15 +51,15 @@ func TestDriverRetriesConnectionResetFiveTimesThenSucceeds(t *testing.T) {
 	if err != nil || event.Kind != hyprovider.EventDone {
 		t.Fatalf("event=%#v error=%v", event, err)
 	}
-	if requests.Load() != 6 {
+	if requests.Load() != maxRetries+1 {
 		t.Fatalf("requests=%d, want initial request plus five retries", requests.Load())
 	}
-	if len(retries) != maxProviderStreamRetries {
-		t.Fatalf("retry progress events=%d, want %d", len(retries), maxProviderStreamRetries)
+	if len(retries) != maxRetries {
+		t.Fatalf("retry progress events=%d, want %d", len(retries), maxRetries)
 	}
 	for index, progress := range retries {
 		attempt := index + 1
-		if progress.Attempt != attempt || progress.Max != maxProviderStreamRetries || progress.Delay != time.Duration(attempt)*time.Millisecond {
+		if progress.Attempt != attempt || progress.Max != maxRetries || progress.Delay != 0 {
 			t.Fatalf("retry %d progress=%#v", attempt, progress)
 		}
 		if progress.Cause == nil || !strings.Contains(progress.Cause.Error(), "connection reset") {
@@ -92,19 +96,26 @@ func TestDriverFastModeSendsPriorityServiceTier(t *testing.T) {
 	}
 }
 
-func TestProviderStreamRetryDelayCoversTransientOutage(t *testing.T) {
-	want := []time.Duration{
-		500 * time.Millisecond,
-		time.Second,
-		2 * time.Second,
-		4 * time.Second,
-		8 * time.Second,
-		8 * time.Second,
+func TestDriverLeavesRetryOwnershipToAzemWrapper(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = writer.Write([]byte("data: {\"type\":\"error\",\"code\":\"server_error\",\"message\":\"upstream connection reset\"}\n\n"))
+	}))
+	defer server.Close()
+
+	stream, err := newTestDriver(t, server.URL).Stream(context.Background(), testRequest())
+	if err != nil {
+		t.Fatal(err)
 	}
-	for index, expected := range want {
-		if got := providerStreamRetryDelay(index + 1); got != expected {
-			t.Fatalf("retry %d delay = %s, want %s", index+1, got, expected)
-		}
+	defer stream.Close()
+	event, err := stream.Recv()
+	if err != nil || event.Kind != hyprovider.EventError || event.Err == nil {
+		t.Fatalf("event=%#v error=%v", event, err)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("requests=%d, want exactly one physical request", requests.Load())
 	}
 }
 
@@ -117,8 +128,7 @@ func TestDriverStopsAfterFiveConnectionResetRetries(t *testing.T) {
 	}))
 	defer server.Close()
 
-	driver := newTestDriver(t, server.URL)
-	driver.retryDelay = func(int) time.Duration { return 0 }
+	driver := providerretry.WithRetry(newTestDriver(t, server.URL), providerretry.RetryConfig{MaxRetries: 5})
 	stream, err := driver.Stream(context.Background(), testRequest())
 	if err != nil {
 		t.Fatal(err)
@@ -150,12 +160,13 @@ func TestDriverRetriesOverloadedRateLimitFiveTimesThenSucceeds(t *testing.T) {
 	}))
 	defer server.Close()
 
-	driver := newTestDriver(t, server.URL)
-	driver.retryDelay = func(int) time.Duration { return 0 }
 	var progress []hyprovider.RetryProgress
-	driver.SetRetryObserver(func(retry hyprovider.RetryProgress) error {
-		progress = append(progress, retry)
-		return nil
+	driver := providerretry.WithRetry(newTestDriver(t, server.URL), providerretry.RetryConfig{
+		MaxRetries: 5,
+		Observer: func(retry hyprovider.RetryProgress) error {
+			progress = append(progress, retry)
+			return nil
+		},
 	})
 	stream, err := driver.Stream(context.Background(), testRequest())
 	if err != nil {
@@ -186,8 +197,7 @@ func TestDriverStopsAfterFiveOverloadedRateLimitRetries(t *testing.T) {
 	}))
 	defer server.Close()
 
-	driver := newTestDriver(t, server.URL)
-	driver.retryDelay = func(int) time.Duration { return 0 }
+	driver := providerretry.WithRetry(newTestDriver(t, server.URL), providerretry.RetryConfig{MaxRetries: 5})
 	stream, err := driver.Stream(context.Background(), testRequest())
 	if err != nil {
 		t.Fatal(err)
@@ -216,7 +226,6 @@ func TestDriverDoesNotRetryOtherProviderErrors(t *testing.T) {
 	defer server.Close()
 
 	driver := newTestDriver(t, server.URL)
-	driver.retryDelay = func(int) time.Duration { return 0 }
 	stream, err := driver.Stream(context.Background(), testRequest())
 	if err != nil {
 		t.Fatal(err)
@@ -238,8 +247,7 @@ func TestDriverCancelsConnectionResetBackoff(t *testing.T) {
 	}))
 	defer server.Close()
 
-	driver := newTestDriver(t, server.URL)
-	driver.retryDelay = func(int) time.Duration { return time.Minute }
+	driver := providerretry.WithRetry(newTestDriver(t, server.URL), providerretry.RetryConfig{MaxRetries: 5, BaseDelay: time.Minute})
 	ctx, cancel := context.WithCancel(context.Background())
 	stream, err := driver.Stream(ctx, testRequest())
 	if err != nil {
@@ -272,8 +280,7 @@ func TestDriverDoesNotReplayResetAfterPartialOutput(t *testing.T) {
 	}))
 	defer server.Close()
 
-	driver := newTestDriver(t, server.URL)
-	driver.retryDelay = func(int) time.Duration { return 0 }
+	driver := providerretry.WithRetry(newTestDriver(t, server.URL), providerretry.RetryConfig{MaxRetries: 5})
 	stream, err := driver.Stream(context.Background(), testRequest())
 	if err != nil {
 		t.Fatal(err)
@@ -282,9 +289,10 @@ func TestDriverDoesNotReplayResetAfterPartialOutput(t *testing.T) {
 	if event, err := stream.Recv(); err != nil || event.Kind != hyprovider.EventTextDelta {
 		t.Fatalf("partial event=%#v error=%v", event, err)
 	}
-	event, err := stream.Recv()
-	if err != nil || event.Kind != hyprovider.EventError || !strings.Contains(event.Err.Error(), "refusing unsafe replay") {
-		t.Fatalf("reset event=%#v error=%v", event, err)
+	_, err = stream.Recv()
+	var partial *hyprovider.PartialStreamError
+	if !errors.As(err, &partial) || partial.Retryable() {
+		t.Fatalf("partial reset error=%v, want non-retryable PartialStreamError", err)
 	}
 	if requests.Load() != 1 {
 		t.Fatalf("partially emitted stream replayed: requests=%d", requests.Load())
@@ -316,7 +324,7 @@ func TestDriverDoesNotReplayInterruptedToolStream(t *testing.T) {
 		_, _ = writer.Write([]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"item\",\"call_id\":\"call\",\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"a.go\\\"}\"}}\n\n"))
 	}))
 	defer server.Close()
-	driver := newTestDriver(t, server.URL)
+	driver := providerretry.WithRetry(newTestDriver(t, server.URL), providerretry.RetryConfig{MaxRetries: 5})
 	stream, err := driver.Stream(context.Background(), hyprovider.Request{Model: "gpt-test", Messages: []message.Message{message.NewText(message.RoleUser, "inspect")}})
 	if err != nil {
 		t.Fatal(err)
@@ -326,9 +334,10 @@ func TestDriverDoesNotReplayInterruptedToolStream(t *testing.T) {
 	if err != nil || first.Kind != hyprovider.EventToolCall {
 		t.Fatalf("first=%#v error=%v", first, err)
 	}
-	second, err := stream.Recv()
-	if err != nil || second.Kind != hyprovider.EventError {
-		t.Fatalf("second=%#v error=%v", second, err)
+	_, err = stream.Recv()
+	var partial *hyprovider.PartialStreamError
+	if !errors.As(err, &partial) || partial.Retryable() {
+		t.Fatalf("interrupted tool error=%v, want non-retryable PartialStreamError", err)
 	}
 	if requests.Load() != 1 {
 		t.Fatalf("interrupted tool stream replayed %d requests", requests.Load())

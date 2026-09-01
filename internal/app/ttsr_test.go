@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -12,7 +11,6 @@ import (
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/session"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
-	hyagent "github.com/Viking602/venat/agent"
 	"github.com/Viking602/venat/message"
 	hyprovider "github.com/Viking602/venat/provider"
 )
@@ -33,7 +31,7 @@ func TestTTSRMatchesCrossDeltaTextPersistsAndInjectsOnce(t *testing.T) {
 	if _, err := sessions.Ensure(ctx, session.Session{ID: "ttsr", Title: "TTSR"}); err != nil {
 		t.Fatal(err)
 	}
-	control := hyagent.NewControlQueue()
+	control := newTurnControlQueue()
 	hook, err := newTTSRHook(config.TTSRConfig{
 		Enabled: true, ContextMode: "discard", InterruptMode: "always", RepeatMode: "once", RepeatGap: 10,
 		Rules: []config.StreamRuleConfig{{Name: "forbidden-call", Content: "Use the safe call instead.", Conditions: []string{`forbidden\s+call`}, Scope: []string{"text"}}},
@@ -44,13 +42,11 @@ func TestTTSRMatchesCrossDeltaTextPersistsAndInjectsOnce(t *testing.T) {
 	if err := hook.OnEvent(ctx, hyprovider.Event{Kind: hyprovider.EventTextDelta, Text: "forbidden "}); err != nil {
 		t.Fatal(err)
 	}
-	matchErr := hook.OnEvent(ctx, hyprovider.Event{Kind: hyprovider.EventTextDelta, Text: "call"})
-	var interrupted *hyagent.StreamRuleInterruptError
-	if !errors.As(matchErr, &interrupted) || interrupted.KeepPartial {
-		t.Fatalf("TTSR interrupt = %#v", matchErr)
+	if matchErr := hook.OnEvent(ctx, hyprovider.Event{Kind: hyprovider.EventTextDelta, Text: "call"}); matchErr != nil {
+		t.Fatalf("TTSR queue = %#v", matchErr)
 	}
-	controls, err := control.Drain(ctx, hyagent.TurnBoundaryBeforeModel)
-	if err != nil || len(controls) != 1 || controls[0].Kind != hyagent.ControlSteer || controls[0].Message.Visibility != message.VisibilityPrivate ||
+	controls, err := control.Drain(ctx, turnControlBeforeModel)
+	if err != nil || len(controls) != 1 || controls[0].Kind != turnControlSteer || !isPrivateMessage(controls[0].Message) ||
 		!strings.Contains(controls[0].Message.Text, "Use the safe call instead") {
 		t.Fatalf("TTSR control = %#v, %v", controls, err)
 	}
@@ -75,7 +71,7 @@ func TestTTSRScopesDeferredToolRulesAndASTSnapshots(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer coding.Close(ctx)
-	control := hyagent.NewControlQueue()
+	control := newTurnControlQueue()
 	hook, err := newTTSRHook(config.TTSRConfig{
 		Enabled: true, ContextMode: "keep", InterruptMode: "always", RepeatMode: "once", RepeatGap: 10,
 		Rules: []config.StreamRuleConfig{
@@ -90,15 +86,15 @@ func TestTTSRScopesDeferredToolRulesAndASTSnapshots(t *testing.T) {
 	if err := hook.OnEvent(ctx, hyprovider.Event{Kind: hyprovider.EventToolCall, ToolCall: &message.ToolCall{ID: "write-1", Name: "coding.write_file", Arguments: arguments}}); err != nil {
 		t.Fatal(err)
 	}
-	if controls, err := control.Drain(ctx, hyagent.TurnBoundaryBeforeTools); err != nil || len(controls) != 0 {
+	if controls, err := control.Drain(ctx, turnControlBeforeModel); err != nil || len(controls) != 0 {
 		t.Fatalf("deferred rule interrupted tools: %#v, %v", controls, err)
 	}
-	deferred, err := control.Drain(ctx, hyagent.TurnBoundaryAfterAnswer)
-	if err != nil || len(deferred) != 1 || deferred[0].Kind != hyagent.ControlFollowUp {
+	deferred, err := control.Drain(ctx, turnControlAfterAnswer)
+	if err != nil || len(deferred) != 1 || deferred[0].Kind != turnControlFollowUp {
 		t.Fatalf("deferred TTSR control = %#v, %v", deferred, err)
 	}
 
-	astControl := hyagent.NewControlQueue()
+	astControl := newTurnControlQueue()
 	astHook, err := newTTSRHook(config.TTSRConfig{
 		Enabled: true, ContextMode: "keep", InterruptMode: "tool-only", RepeatMode: "once", RepeatGap: 10,
 		Rules: []config.StreamRuleConfig{{Name: "no-console", Content: "Use the project logger.", ASTConditions: []string{"console.log($MSG)"}, Scope: []string{"tool:coding.write_file(*.ts)"}}},
@@ -114,10 +110,12 @@ func TestTTSRScopesDeferredToolRulesAndASTSnapshots(t *testing.T) {
 		t.Fatal("AST fixture did not match")
 	}
 	arguments, _ = json.Marshal(map[string]any{"path": "main.ts", "content": `console.log("unsafe")`})
-	matchErr := astHook.OnEvent(ctx, hyprovider.Event{Kind: hyprovider.EventToolCall, ToolCall: &message.ToolCall{ID: "write-2", Name: "coding.write_file", Arguments: arguments}})
-	var interrupted *hyagent.StreamRuleInterruptError
-	if !errors.As(matchErr, &interrupted) || !interrupted.KeepPartial {
-		t.Fatalf("AST TTSR interrupt = %#v", matchErr)
+	if matchErr := astHook.OnEvent(ctx, hyprovider.Event{Kind: hyprovider.EventToolCall, ToolCall: &message.ToolCall{ID: "write-2", Name: "coding.write_file", Arguments: arguments}}); matchErr != nil {
+		t.Fatalf("AST TTSR queue = %#v", matchErr)
+	}
+	steers, err := astControl.Drain(ctx, turnControlBeforeModel)
+	if err != nil || len(steers) != 1 || steers[0].Kind != turnControlSteer {
+		t.Fatalf("AST TTSR control = %#v, %v", steers, err)
 	}
 }
 

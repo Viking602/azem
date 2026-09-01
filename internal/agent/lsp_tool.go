@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/venat/tool"
 )
 
@@ -87,23 +88,26 @@ func (driver *lspDriver) Definition() tool.Definition {
 				"payload":  {Type: "string", Description: "Raw JSON request params."},
 			},
 		},
-		EffectType: tool.EffectReadOnly, RiskLevel: "low", PolicyTags: []string{"coding", "lsp"}, Concurrency: tool.ConcurrencyParallel,
+		Concurrency: tool.ConcurrencyParallel,
 	}
 }
 
-func (driver *lspDriver) DefinitionForCall(call tool.Call) tool.Definition {
-	definition := driver.Definition()
+func (driver *lspDriver) PolicyForCall(call tool.Call) agentruntime.ToolPolicy {
+	policy := agentruntime.ToolPolicy{
+		Effect: agentruntime.ToolEffectReadOnly, RiskLevel: "low",
+		PolicyTags: []string{"coding", "lsp"}, Concurrency: tool.ConcurrencyParallel,
+	}
 	var input struct {
 		Action string `json:"action"`
 	}
 	if json.Unmarshal(call.Arguments, &input) != nil || !lspReadOnlyActions[strings.ToLower(strings.TrimSpace(input.Action))] {
-		definition.EffectType = tool.EffectWrite
-		definition.RequiresActionTask = true
-		definition.RiskLevel = "medium"
-		definition.Concurrency = tool.ConcurrencyExclusive
-		definition.ConcurrencyGroup = "workspace-files"
+		policy.Effect = agentruntime.ToolEffectWrite
+		policy.RequiresActionTask = true
+		policy.RiskLevel = "medium"
+		policy.Concurrency = tool.ConcurrencyExclusive
+		policy.ConcurrencyGroup = "workspace-files"
 	}
-	return definition
+	return policy
 }
 
 func (driver *lspDriver) Execute(ctx context.Context, call tool.Call, _ tool.UpdateSink) (tool.Result, error) {

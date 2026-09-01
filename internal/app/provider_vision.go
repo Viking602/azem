@@ -3,9 +3,11 @@ package app
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
+	hyagent "github.com/Viking602/venat/agent"
 	"github.com/Viking602/venat/message"
 	hyprovider "github.com/Viking602/venat/provider"
 
@@ -131,6 +133,7 @@ func (r *ProviderRuntime) resolveVisionAssistant(ctx context.Context, request Tu
 			kind: "vision", provider: route.Provider, model: visionModelID, transport: driver.Metadata().Name,
 		}
 	}
+	driver = retryProviderDriver(ctx, host, request.SessionID, runID, route.Provider, r.cfg.Retry, driver)
 	return visionAssistantRun{
 		route: route, modelID: visionModelID, reasoning: reasoning,
 		contextWindow: contextWindow, driver: driver, host: host,
@@ -169,21 +172,61 @@ func (r *ProviderRuntime) runVisionAssistant(ctx context.Context, assistant visi
 	if llmuxdriver.CanonicalProviderID(assistant.route.Provider) == "chatgpt" {
 		requestMaxOutput = 0
 	}
-	output, err := collectProviderText(ctx, assistant.driver, hyprovider.Request{
-		Model: assistant.modelID,
-		Messages: []message.Message{
-			message.NewText(message.RoleSystem, visionAssistantPrompt),
-			UserMessageWithAttachments(visionUserPrompt(request.Prompt), request.Images),
+	scopedDriver := &visionRequestDriver{inner: assistant.driver, reasoning: assistant.reasoning}
+	engine, err := hyagent.Build(hyagent.Spec{
+		Instructions: visionAssistantPrompt,
+		Model:        assistant.modelID,
+		MaxTokens:    requestMaxOutput,
+		LoopPolicy:   hyagent.LoopPolicy{MaxIterations: 1},
+	}, hyagent.BuildDeps{
+		Providers: hyprovider.Single(scopedDriver),
+		ContextManager: visionAssistantContext{
+			images: CloneAttachments(request.Images),
 		},
-		MaxTokens:      requestMaxOutput,
-		Metadata:       map[string]string{"reasoning_effort": assistant.reasoning},
-		PromptCacheKey: request.SessionID + ":vision:" + runID,
-		NativeToolHost: newAttachmentRequestHost(assistant.host),
-	}, "vision assistance")
+	})
 	if err != nil {
-		return "", fmt.Errorf("vision assistant failed: %w", err)
+		return "", fmt.Errorf("build vision assistant: %w", err)
 	}
-	return output, nil
+	engine.PromptCacheKey = request.SessionID + ":vision:" + runID
+	engine = bindProviderRequestScope(engine, providerAttachmentRoot(assistant.host), nil)
+	result := engine.Run(ctx, hyagent.Request{Prompt: visionUserPrompt(request.Prompt)}, hyagent.OutputPolicy{})
+	if result.Failure != nil {
+		return "", fmt.Errorf("vision assistant failed: %w", result.Failure)
+	}
+	return result.Text, nil
+}
+
+type visionAssistantContext struct {
+	images []session.Attachment
+}
+
+func (context visionAssistantContext) Build(_ context.Context, request hyagent.Request) ([]message.Message, error) {
+	return []message.Message{
+		message.NewText(message.RoleSystem, visionAssistantPrompt),
+		UserMessageWithAttachments(request.Prompt, context.images),
+	}, nil
+}
+
+func (visionAssistantContext) Compact(_ context.Context, history []message.Message) ([]message.Message, error) {
+	return message.CloneMessages(history), nil
+}
+
+type visionRequestDriver struct {
+	inner     hyprovider.Driver
+	reasoning string
+}
+
+func (driver *visionRequestDriver) Metadata() hyprovider.Metadata {
+	return driver.inner.Metadata()
+}
+
+func (driver *visionRequestDriver) Stream(ctx context.Context, request hyprovider.Request) (hyprovider.Stream, error) {
+	request.Metadata = maps.Clone(request.Metadata)
+	if request.Metadata == nil {
+		request.Metadata = make(map[string]string, 1)
+	}
+	request.Metadata["reasoning_effort"] = driver.reasoning
+	return driver.inner.Stream(ctx, request)
 }
 
 func (r *ProviderRuntime) visionMaxOutputTokens(assistant visionAssistantRun) int {

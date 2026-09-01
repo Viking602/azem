@@ -9,8 +9,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-
-	"github.com/Viking602/venat/tool"
 )
 
 // FileMutationBroker is the trusted extension seam consulted only after a
@@ -100,6 +98,6 @@ func brokerDestination(rootPath, relative string, followLeaf bool) (string, erro
 }
 
 func brokerCallerSession(ctx context.Context) string {
-	caller, _ := tool.CallerFromContext(ctx)
+	caller, _ := InvocationFromContext(ctx)
 	return caller.SessionID
 }

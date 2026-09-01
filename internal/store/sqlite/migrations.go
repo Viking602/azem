@@ -8,7 +8,7 @@ import (
 	"github.com/Viking602/azem/internal/blobstore"
 )
 
-const schemaVersion = 26
+const schemaVersion = 28
 
 var migrations = []string{
 	`CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -788,6 +788,77 @@ var migrations = []string{
 	);
 	CREATE INDEX github_webhook_deliveries_received ON github_webhook_deliveries(received_at,delivery_id);
 	CREATE INDEX github_webhook_deliveries_pr ON github_webhook_deliveries(repository,pull_request_number,received_at);`,
+	`CREATE TABLE agent_executions (
+		execution_id TEXT PRIMARY KEY,
+		spec_hash BLOB NOT NULL CHECK(length(spec_hash)=32),
+		status TEXT NOT NULL CHECK(status IN ('running','suspended','completed','failed')),
+		version INTEGER NOT NULL CHECK(version>0),
+		lease_owner TEXT NOT NULL DEFAULT '',
+		lease_claim BLOB NOT NULL DEFAULT X'',
+		lease_token INTEGER NOT NULL DEFAULT 0,
+		lease_expires_at INTEGER NOT NULL DEFAULT 0,
+		next_lease_token INTEGER NOT NULL DEFAULT 0,
+		execution_inline BLOB NOT NULL,
+		execution_digest TEXT NOT NULL DEFAULT '',
+		updated_at INTEGER NOT NULL
+	);
+	CREATE INDEX agent_executions_status ON agent_executions(status,updated_at,execution_id);
+	CREATE INDEX agent_executions_lease_expiry ON agent_executions(lease_expires_at,execution_id);
+
+	CREATE TABLE agent_effect_attempts (
+		execution_id TEXT NOT NULL REFERENCES agent_executions(execution_id) ON DELETE CASCADE,
+		operation_id TEXT NOT NULL,
+		attempt_number INTEGER NOT NULL CHECK(attempt_number>0),
+		kind TEXT NOT NULL CHECK(kind IN ('model','tool')),
+		input_hash BLOB NOT NULL CHECK(length(input_hash)=32),
+		status TEXT NOT NULL CHECK(status IN ('running','succeeded','failed','unknown','abandoned')),
+		lease_owner TEXT NOT NULL DEFAULT '',
+		lease_token INTEGER NOT NULL DEFAULT 0,
+		version INTEGER NOT NULL CHECK(version>0),
+		attempt_inline BLOB NOT NULL,
+		attempt_digest TEXT NOT NULL DEFAULT '',
+		PRIMARY KEY(execution_id,operation_id,attempt_number)
+	);
+	CREATE INDEX agent_effect_attempts_status ON agent_effect_attempts(execution_id,status,operation_id,attempt_number);
+
+	CREATE TABLE agent_execution_receipts (
+		execution_id TEXT NOT NULL REFERENCES agent_executions(execution_id) ON DELETE CASCADE,
+		command_kind TEXT NOT NULL,
+		command_key TEXT NOT NULL,
+		request_hash BLOB NOT NULL CHECK(length(request_hash)=32),
+		lease_token INTEGER NOT NULL DEFAULT 0,
+		receipt_inline BLOB NOT NULL,
+		receipt_digest TEXT NOT NULL DEFAULT '',
+		PRIMARY KEY(execution_id,command_kind,command_key)
+	);
+
+	CREATE TABLE agent_execution_bindings (
+		execution_id TEXT PRIMARY KEY,
+		session_id TEXT NOT NULL DEFAULT '',
+		run_id TEXT NOT NULL,
+		stable_id TEXT NOT NULL,
+		agent_id TEXT NOT NULL,
+		kind TEXT NOT NULL,
+		segment INTEGER NOT NULL CHECK(segment>=0),
+		manifest_inline BLOB NOT NULL,
+		manifest_digest TEXT NOT NULL DEFAULT '',
+		profile_hash TEXT NOT NULL,
+		state TEXT NOT NULL,
+		version INTEGER NOT NULL CHECK(version>0),
+		updated_at INTEGER NOT NULL
+	);
+	CREATE UNIQUE INDEX agent_execution_bindings_segment ON agent_execution_bindings(kind,stable_id,segment);
+	CREATE INDEX agent_execution_bindings_session ON agent_execution_bindings(session_id,updated_at,execution_id);`,
+	`ALTER TABLE desktop_projects ADD COLUMN visible INTEGER NOT NULL DEFAULT 1;
+	UPDATE subagent_runs
+		SET state='interrupted',
+			summary='interrupted by process restart',
+			error='interrupted by process restart',
+			finished_at=CASE
+				WHEN finished_at=0 THEN CAST((julianday('now') - 2440587.5) * 86400000000000 AS INTEGER)
+				ELSE finished_at
+			END
+		WHERE state IN ('initializing','queued','running','cancelling');`,
 }
 
 func migrate(ctx context.Context, db *sql.DB, blobs blobstore.Store) error {

@@ -20,8 +20,8 @@ func (driver dynamicToolDriver) Execute(context.Context, tool.Call, tool.UpdateS
 
 func TestDynamicToolCatalogRejectsConflictsAndFilters(t *testing.T) {
 	catalog := newDynamicToolCatalog()
-	read := dynamicToolDriver{definition: tool.Definition{Name: "read", InputSchema: tool.Schema{Type: "object"}, EffectType: tool.EffectReadOnly}}
-	write := dynamicToolDriver{definition: tool.Definition{Name: "write", InputSchema: tool.Schema{Type: "object"}, EffectType: tool.EffectWrite}}
+	read := dynamicToolDriver{definition: tool.Definition{Name: "read", InputSchema: tool.Schema{Type: "object"}}}
+	write := dynamicToolDriver{definition: tool.Definition{Name: "write", InputSchema: tool.Schema{Type: "object"}}}
 	if err := catalog.RegisterAll("builtin", []tool.Driver{write, read}); err != nil {
 		t.Fatal(err)
 	}
@@ -29,12 +29,12 @@ func TestDynamicToolCatalogRejectsConflictsAndFilters(t *testing.T) {
 		t.Fatal("duplicate dynamic tool was accepted")
 	}
 	filtered := catalog.Filter(func(definition tool.Definition) bool {
-		return definition.EffectType == tool.EffectReadOnly
+		return definition.Name == "read"
 	})
 	if got := filtered.Names(); !reflect.DeepEqual(got, []string{"read"}) {
 		t.Fatalf("filtered names = %v", got)
 	}
-	result, err := filtered.Bus().Execute(context.Background(), tool.Call{ID: "call", Name: "read", Arguments: json.RawMessage(`{}`)}, nil)
+	result, err := filtered.Bus().Execute(context.Background(), tool.Call{ID: "call", Name: "read", Arguments: json.RawMessage(`{}`)}, tool.ExecuteOptions{})
 	if err != nil || result.Content != "ok" {
 		t.Fatalf("filtered execution = %#v, %v", result, err)
 	}

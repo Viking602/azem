@@ -156,6 +156,85 @@ func TestBridgeResumeSessionReturnsDurableProjectionDirectly(t *testing.T) {
 	}
 }
 
+func TestReconnectSnapshotAllowsFreshUnpersistedSession(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "fresh.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	sessions := session.NewService(store.DB(), store.Blobs())
+	cfg := config.Default()
+	runtime := azemapp.NewService(ctx, cfg)
+	runtime.AttachDurable(sessions, nil)
+	bridge := NewBridge(ctx, azemapp.BootstrapResult{
+		Config: cfg, SessionID: "session-fresh", Service: runtime,
+		Paths: config.Paths{Workspace: t.TempDir(), StateDir: t.TempDir()},
+	}, nil, nil)
+	t.Cleanup(bridge.Close)
+	snapshot, err := bridge.ReconnectSnapshot("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Base.SessionID != "session-fresh" || snapshot.Session != nil {
+		t.Fatalf("fresh reconnect snapshot = %#v", snapshot)
+	}
+	if len(snapshot.Skills.Entries) != 0 || snapshot.Hooks != nil ||
+		snapshot.Marketplace != nil || snapshot.PullRequests != nil {
+		t.Fatalf("optional catalogs delayed first reconnect: %#v", snapshot)
+	}
+}
+
+func TestReconnectSnapshotIncludesDurableSessionAndProjectCatalogs(t *testing.T) {
+	ctx := context.Background()
+	workspace := t.TempDir()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "history.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	workspace, err = filepath.EvalSymlinks(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := session.NewService(store.DB(), store.Blobs())
+	if err := sessions.TouchProject(ctx, workspace); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sessions.Ensure(ctx, session.Session{
+		ID: "session-history", Workspace: workspace, Title: "Durable history",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.SetWorkspaceSession(ctx, workspace, "session-history"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sessions.AppendBlock(ctx, "session-history", session.Block{
+		Kind: "user", Content: "historical turn",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	runtime := azemapp.NewService(ctx, cfg)
+	runtime.AttachDurable(sessions, nil)
+	bridge := NewBridge(ctx, azemapp.BootstrapResult{
+		Config: cfg, SessionID: "session-history", Service: runtime,
+		Paths: config.Paths{Workspace: workspace, StateDir: t.TempDir()},
+	}, nil, nil)
+	t.Cleanup(bridge.Close)
+
+	snapshot, err := bridge.ReconnectSnapshot("session-history")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Sessions) != 1 || snapshot.Sessions[0].ID != "session-history" {
+		t.Fatalf("sessions = %+v", snapshot.Sessions)
+	}
+	if len(snapshot.Projects) != 1 || snapshot.Projects[0].Workspace != workspace {
+		t.Fatalf("projects = %+v", snapshot.Projects)
+	}
+}
+
 func TestBridgeSessionTreeNavigationForkLabelAndExport(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "tree.db"))

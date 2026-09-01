@@ -11,6 +11,27 @@ import (
 	"github.com/Viking602/azem/internal/config"
 )
 
+func TestListWithCodexScansConfigAndCache(t *testing.T) {
+	home := t.TempDir()
+	pluginRoot := filepath.Join(home, ".codex", "plugins", "cache", "market", "demo", "1.2.3")
+	mustWrite(t, filepath.Join(home, ".codex", "config.toml"), "[plugins.\"demo@market\"]\nenabled = true\n")
+	mustWrite(t, filepath.Join(pluginRoot, ".codex-plugin", "plugin.json"), `{"name":"demo","version":"1.2.3","description":"Demo"}`)
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", "")
+	encoded, err := listWithCodex(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var catalog installedCatalog
+	if err := json.Unmarshal(encoded, &catalog); err != nil {
+		t.Fatal(err)
+	}
+	pluginRoot, _ = filepath.EvalSymlinks(pluginRoot)
+	if len(catalog.Installed) != 1 || catalog.Installed[0].PluginID != "demo@market" || catalog.Installed[0].Version != "1.2.3" || catalog.Installed[0].Source.Path != pluginRoot {
+		t.Fatalf("scanned catalog = %#v", catalog.Installed)
+	}
+}
+
 func TestDiscoverImportsEnabledPluginCapabilities(t *testing.T) {
 	home := t.TempDir()
 	data := filepath.Join(home, "azem-data")
@@ -70,15 +91,18 @@ func assertPluginEntry(t *testing.T, result Integration) {
 	if entry.DisplayName != "Demo Plugin" {
 		t.Fatalf("display name = %q", entry.DisplayName)
 	}
-	if entry.SkillCount != 1 || entry.MCPServerCount != 3 || entry.IntegratedMCPCount != 2 {
-		t.Fatalf("model capability counts = %#v", entry)
+	capabilities := [...]int{
+		entry.SkillCount, entry.MCPServerCount, entry.IntegratedMCPCount, entry.HookCount,
+		entry.ToolCount, entry.CommandCount, entry.AgentCount, entry.ThemeCount, entry.ExtensionCount,
 	}
-	if entry.HookCount != 1 || entry.HooksTrusted || !entry.HasApp || entry.ToolCount != 1 || entry.CommandCount != 1 ||
-		entry.AgentCount != 1 || entry.ThemeCount != 1 || entry.ExtensionCount != 1 {
-		t.Fatalf("extension capability counts = %#v", entry)
+	if capabilities != [...]int{1, 3, 2, 1, 1, 1, 1, 1, 1} || entry.HooksTrusted || !entry.HasApp {
+		t.Fatalf("capabilities = %#v", entry)
 	}
-	if len(result.SkillDirs) != 1 || len(result.HookSources) != 1 || len(result.ToolPaths) != 1 || len(result.CommandDirs) != 1 ||
-		len(result.AgentDirs) != 1 || len(result.ThemeDirs) != 1 || len(result.ExtensionPaths) != 1 {
+	paths := [...]int{
+		len(result.SkillDirs), len(result.HookSources), len(result.ToolPaths), len(result.CommandDirs),
+		len(result.AgentDirs), len(result.ThemeDirs), len(result.ExtensionPaths),
+	}
+	if paths != [...]int{1, 1, 1, 1, 1, 1, 1} {
 		t.Fatalf("integration = %#v", result)
 	}
 }
@@ -205,8 +229,11 @@ func TestDiscoverKeepsAzemCopiesWhenCodexIsUnavailable(t *testing.T) {
 	if len(first.Entries) != 1 {
 		t.Fatalf("first import = %#v", first)
 	}
+	if err := os.RemoveAll(sourceRoot); err != nil {
+		t.Fatal(err)
+	}
 	second := Discover(context.Background(), Options{HomeDir: home, DataDir: data, ImportCodex: true, CodexImports: []string{"demo@market"}, ListPlugins: func(context.Context) ([]byte, error) { return nil, os.ErrNotExist }})
-	if len(second.Entries) != 1 || second.Entries[0].Origin != "codex" || len(second.Diagnostics) == 0 {
+	if len(second.Entries) != 1 || second.Entries[0].Origin != "codex" || second.Entries[0].Version != "1" || len(second.Diagnostics) == 0 {
 		t.Fatalf("Azem copy was not retained independently: %#v", second)
 	}
 }

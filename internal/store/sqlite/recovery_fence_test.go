@@ -86,3 +86,19 @@ func TestRecoveryFenceRetriesWhenOwnerExitsBeforeReady(t *testing.T) {
 		t.Fatal("waiter did not retry crash recovery")
 	}
 }
+
+func TestRecoveryFenceSkipsCrashRecoveryAfterCleanLastShutdown(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "azem.db")
+	first := requireRecoveryFence(t, acquireFence(path), true)
+	if err := first.FinishRecovery(); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.CloseClean(); err != nil {
+		t.Fatal(err)
+	}
+
+	second := requireRecoveryFence(t, acquireFence(path), false)
+	if err := second.CloseClean(); err != nil {
+		t.Fatal(err)
+	}
+}

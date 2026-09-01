@@ -15,8 +15,7 @@ import (
 	"time"
 
 	"github.com/Viking602/venat/message"
-	mcpclient "github.com/Viking602/venat/transport/mcp/client"
-	"github.com/Viking602/venat/transport/mcpcontract"
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 
 	agentservice "github.com/Viking602/azem/internal/agent"
 	"github.com/Viking602/azem/internal/auth"
@@ -34,43 +33,43 @@ type appFakeMCPClient struct {
 	calls     atomic.Int32
 	lastTool  string
 	callErr   error
-	resources []mcpcontract.Resource
-	content   []mcpcontract.ResourceContent
-	prompts   []mcpcontract.Prompt
-	messages  []mcpcontract.PromptMessage
+	resources []mcpruntime.Resource
+	content   []mcpruntime.ResourceContent
+	prompts   []mcpruntime.Prompt
+	messages  []mcpruntime.PromptMessage
 }
 
-func (c *appFakeMCPClient) Initialize(context.Context, string, string) (mcpcontract.InitializeResult, error) {
-	return mcpcontract.InitializeResult{ProtocolVersion: "2025-06-18"}, nil
+func (c *appFakeMCPClient) Initialize(context.Context, string, string) (mcpruntime.InitializeResult, error) {
+	return mcpruntime.InitializeResult{ProtocolVersion: "2025-06-18"}, nil
 }
 
 func (c *appFakeMCPClient) ListTools(context.Context) ([]message.ToolDefinition, error) {
 	return []message.ToolDefinition{{Name: "status", Description: "return status", InputSchema: message.JSONSchema{Type: "object"}}}, nil
 }
 
-func (c *appFakeMCPClient) CallTool(_ context.Context, name string, _ map[string]any) (mcpcontract.CallToolResult, error) {
+func (c *appFakeMCPClient) CallTool(_ context.Context, name string, _ map[string]any) (mcpruntime.CallToolResult, error) {
 	c.calls.Add(1)
 	c.lastTool = name
 	if c.callErr != nil {
-		return mcpcontract.CallToolResult{}, c.callErr
+		return mcpruntime.CallToolResult{}, c.callErr
 	}
-	return mcpcontract.CallToolResult{Content: []mcpcontract.ContentBlock{{Type: "text", Text: "remote ok"}}}, nil
+	return mcpruntime.CallToolResult{Content: []mcpruntime.ContentBlock{{Type: "text", Text: "remote ok"}}}, nil
 }
 
-func (c *appFakeMCPClient) ListResources(context.Context) ([]mcpcontract.Resource, error) {
-	return append([]mcpcontract.Resource(nil), c.resources...), nil
+func (c *appFakeMCPClient) ListResources(context.Context) ([]mcpruntime.Resource, error) {
+	return append([]mcpruntime.Resource(nil), c.resources...), nil
 }
 
-func (c *appFakeMCPClient) ReadResource(context.Context, string) ([]mcpcontract.ResourceContent, error) {
-	return append([]mcpcontract.ResourceContent(nil), c.content...), nil
+func (c *appFakeMCPClient) ReadResource(context.Context, string) ([]mcpruntime.ResourceContent, error) {
+	return append([]mcpruntime.ResourceContent(nil), c.content...), nil
 }
 
-func (c *appFakeMCPClient) ListPrompts(context.Context) ([]mcpcontract.Prompt, error) {
-	return append([]mcpcontract.Prompt(nil), c.prompts...), nil
+func (c *appFakeMCPClient) ListPrompts(context.Context) ([]mcpruntime.Prompt, error) {
+	return append([]mcpruntime.Prompt(nil), c.prompts...), nil
 }
 
-func (c *appFakeMCPClient) GetPrompt(context.Context, string, map[string]string) ([]mcpcontract.PromptMessage, error) {
-	return append([]mcpcontract.PromptMessage(nil), c.messages...), nil
+func (c *appFakeMCPClient) GetPrompt(context.Context, string, map[string]string) ([]mcpruntime.PromptMessage, error) {
+	return append([]mcpruntime.PromptMessage(nil), c.messages...), nil
 }
 func (c *appFakeMCPClient) Close() error { return nil }
 
@@ -80,7 +79,7 @@ func TestRefreshMCPActionWithoutTargetRefreshesConnectedServers(t *testing.T) {
 	manager := mcpruntime.NewManager(map[string]config.MCPServerConfig{
 		"demo": {Enabled: true, Transport: "stdio", Command: "fake", ConnectTimeout: "1s", CallTimeout: "1s", MaxConcurrency: 1},
 	}, "test", nil, mcpruntime.Options{
-		Dial: func(context.Context, string, config.MCPServerConfig, map[string]string, http.Header) (mcpcontract.Client, error) {
+		Dial: func(context.Context, string, config.MCPServerConfig, map[string]string, http.Header) (mcpruntime.Client, error) {
 			return client, nil
 		},
 		Sleep: func(context.Context, time.Duration) error { return nil },
@@ -107,14 +106,14 @@ func TestRefreshMCPActionWithoutTargetRefreshesConnectedServers(t *testing.T) {
 func TestMCPResourcesAndPromptsReachResourceRouterAndActions(t *testing.T) {
 	ctx := context.Background()
 	client := &appFakeMCPClient{
-		resources: []mcpcontract.Resource{{URI: "file:///guide.md", Name: "Guide", MimeType: "text/markdown"}},
-		content:   []mcpcontract.ResourceContent{{URI: "file:///guide.md", MimeType: "text/markdown", Text: "# Guide"}},
-		prompts:   []mcpcontract.Prompt{{Name: "summarize", Description: "Summarize"}},
-		messages:  []mcpcontract.PromptMessage{{Role: "user", Content: mcpcontract.ContentBlock{Type: "text", Text: "Summarize this"}}},
+		resources: []mcpruntime.Resource{{URI: "file:///guide.md", Name: "Guide", MimeType: "text/markdown"}},
+		content:   []mcpruntime.ResourceContent{{URI: "file:///guide.md", MimeType: "text/markdown", Text: "# Guide"}},
+		prompts:   []mcpruntime.Prompt{{Name: "summarize", Description: "Summarize"}},
+		messages:  []mcpruntime.PromptMessage{{Role: "user", Content: mcpruntime.ContentBlock{Type: "text", Text: "Summarize this"}}},
 	}
 	manager := mcpruntime.NewManager(map[string]config.MCPServerConfig{
 		"demo": {Enabled: true, Transport: "stdio", Command: "fake", ConnectTimeout: "1s", CallTimeout: "1s", MaxConcurrency: 1},
-	}, "test", nil, mcpruntime.Options{Dial: func(context.Context, string, config.MCPServerConfig, map[string]string, http.Header) (mcpcontract.Client, error) {
+	}, "test", nil, mcpruntime.Options{Dial: func(context.Context, string, config.MCPServerConfig, map[string]string, http.Header) (mcpruntime.Client, error) {
 		return client, nil
 	}})
 	if err := manager.Start(ctx); err != nil {
@@ -149,7 +148,7 @@ func TestConfiguredTurnSnapshotsAndGovernsMCPTool(t *testing.T) {
 }
 
 func TestConfiguredTurnSurvivesMCPTransportRejection(t *testing.T) {
-	testConfiguredTurnMCP(t, &mcpclient.RPCError{Code: -32005, Message: "rejected by transport"}, "Remote status unavailable; the run continued.", "jsonrpc error -32005: rejected by transport")
+	testConfiguredTurnMCP(t, &jsonrpc.Error{Code: -32005, Message: "rejected by transport"}, "Remote status unavailable; the run continued.", "jsonrpc error -32005: rejected by transport")
 }
 
 func testConfiguredTurnMCP(t *testing.T, callErr error, expectedAnswer, expectedToolResult string) {
@@ -220,7 +219,7 @@ func testConfiguredTurnMCP(t *testing.T, callErr error, expectedAnswer, expected
 	manager := mcpruntime.NewManager(map[string]config.MCPServerConfig{
 		"demo": {Enabled: true, Transport: "stdio", Command: "fake", ConnectTimeout: "1s", CallTimeout: "1s", MaxConcurrency: 1, Approval: "always"},
 	}, "test", nil, mcpruntime.Options{
-		Dial: func(context.Context, string, config.MCPServerConfig, map[string]string, http.Header) (mcpcontract.Client, error) {
+		Dial: func(context.Context, string, config.MCPServerConfig, map[string]string, http.Header) (mcpruntime.Client, error) {
 			return client, nil
 		},
 		Sleep: func(context.Context, time.Duration) error { return nil },

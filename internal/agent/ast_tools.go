@@ -13,7 +13,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/Viking602/azem/internal/resource"
-	"github.com/Viking602/venat/coding"
 	"github.com/Viking602/venat/tool"
 )
 
@@ -64,6 +63,19 @@ func newASTGrepDriver(root string, bridge *astBridge, snapshotRead tool.Driver, 
 	return &astGrepDriver{root: root, bridge: bridge, snapshotRead: snapshotRead, resources: resources}
 }
 
+// MatchASTSnapshot evaluates bounded structural patterns against one in-memory
+// source snapshot without exposing a provider or filesystem execution path.
+func (s *Service) MatchASTSnapshot(ctx context.Context, source, language string, patterns []string) (bool, error) {
+	if s == nil || s.ast == nil {
+		return false, errors.New("AST bridge is unavailable")
+	}
+	result, err := s.ast.match(ctx, source, language, patterns)
+	if err != nil {
+		return false, err
+	}
+	return result.TotalMatches > 0 || len(result.Matches) > 0, nil
+}
+
 func (driver *astGrepDriver) Definition() tool.Definition {
 	additional := false
 	return tool.Definition{
@@ -77,7 +89,7 @@ func (driver *astGrepDriver) Definition() tool.Definition {
 				"skip": {Type: "integer", Description: "Matches to skip."},
 			},
 		},
-		EffectType: tool.EffectReadOnly, RiskLevel: "low", PolicyTags: []string{"coding", "search", "ast"}, Concurrency: tool.ConcurrencyParallel,
+		Concurrency: tool.ConcurrencyParallel,
 	}
 }
 
@@ -99,7 +111,7 @@ func (driver *astGrepDriver) Execute(ctx context.Context, call tool.Call, _ tool
 	if input.Skip < 0 || input.Skip > 100_000 {
 		return astToolError(call, errors.New("skip must be between 0 and 100000")), nil
 	}
-	caller, _ := tool.CallerFromContext(ctx)
+	caller, _ := InvocationFromContext(ctx)
 	targets, err := resolveASTSearchTargets(ctx, driver.root, driver.resources, resource.Scope{
 		SessionID: caller.SessionID, RunID: caller.TeamRunID, Workspace: driver.root,
 	}, input.Path)
@@ -328,11 +340,11 @@ func (driver *astGrepDriver) astSnapshotHeader(ctx context.Context, callID, path
 		return "[" + path + "#0000]"
 	}
 	arguments, _ := json.Marshal(map[string]any{"path": path, "startLine": 1, "endLine": 1})
-	result, err := driver.snapshotRead.Execute(ctx, tool.Call{ID: callID + "-snapshot", Name: coding.ToolReadFile, Arguments: arguments}, nil)
+	result, err := driver.snapshotRead.Execute(ctx, tool.Call{ID: callID + "-snapshot", Name: ToolReadFile, Arguments: arguments}, nil)
 	if err != nil || result.IsError {
 		return "[" + path + "#0000]"
 	}
-	var observed coding.ReadFileToolResult
+	var observed ReadFileToolResult
 	if json.Unmarshal(result.Structured, &observed) != nil || observed.Tag == "" {
 		return "[" + path + "#0000]"
 	}

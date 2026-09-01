@@ -1,5 +1,5 @@
 // Package toolview is the single source of truth for projecting file-change
-// tool activity into structured UI summaries. The desktop frontend and the
+// tool activity into structured UI summaries. The desktop renderer and the
 // TUI previously parsed hashline/write-file payloads independently; both now
 // consume this projection (live via the tool_finished event `fileChange`
 // payload and durable replay via the session tool records), so a semantic
