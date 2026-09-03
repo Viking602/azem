@@ -289,6 +289,30 @@ func TestShellRejectsBackgroundOperator(t *testing.T) {
 	}
 }
 
+func TestShellRejectsHereDocumentScripts(t *testing.T) {
+	driver := newShellDriver(t.TempDir(), "allow", "deny")
+	arguments, _ := json.Marshal(shellInput{
+		Command: "python3 - <<'PY'\nfrom pathlib import Path\nprint(Path.cwd())\nPY",
+	})
+	result, err := driver.Execute(
+		context.Background(),
+		tool.Call{ID: "inline-script", Name: ToolShell, Arguments: arguments},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError || !strings.Contains(result.Content, "use coding.eval for inline code") {
+		t.Fatalf("here-document result=%+v", result)
+	}
+	if hasHereDocumentOperator(`printf '%s\n' '<<not-an-operator'`) {
+		t.Fatal("quoted text was classified as a here-document")
+	}
+	if !strings.Contains(driver.Definition().Description, "shell here-documents") {
+		t.Fatalf("shell definition omitted here-document boundary: %s", driver.Definition().Description)
+	}
+}
+
 func TestShellRejectsBoundedBackground(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("uses a POSIX background operator")

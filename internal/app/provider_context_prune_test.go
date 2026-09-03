@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -99,5 +100,62 @@ func TestPruneStaleToolResultsSkipsSmallAndRecentResults(t *testing.T) {
 	underTarget := pruneTestHistory(64<<10, 2048)
 	if _, changed, err = manager.pruneStaleToolResults(context.Background(), underTarget, 1_000_000); err != nil || changed {
 		t.Fatalf("under-target history was pruned: changed=%v err=%v", changed, err)
+	}
+}
+
+// TestPruneStaleToolResultsInsideOneLongTask guards Subagent runs that have one
+// durable user instruction followed by many assistant/tool cycles. Older
+// results may be offloaded, but the user instruction, message order, tool
+// pairing, and the latest atomic groups must remain intact.
+func TestPruneStaleToolResultsInsideOneLongTask(t *testing.T) {
+	history := []message.Message{
+		message.NewText(message.RoleSystem, "rules"),
+		message.NewText(message.RoleUser, "audit the complete repository"),
+	}
+	for index := range 20 {
+		id := fmt.Sprintf("call-%02d", index)
+		history = append(
+			history,
+			message.Message{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{{ID: id, Name: "coding.read_file"}}},
+			message.NewToolResult(message.ToolResult{
+				ToolCallID: id,
+				Name:       "coding.read_file",
+				Content:    strings.Repeat(string(rune('a'+index%26)), 16<<10),
+			}),
+		)
+	}
+	stored := 0
+	manager := turnContext{
+		largeToolTokens: disableNormalizeThreshold,
+		putArtifact: func(_ context.Context, kind string, payload []byte, _ string) (session.ContextArtifact, error) {
+			stored++
+			return session.ContextArtifact{
+				ID:     fmt.Sprintf("artifact-%02d", stored),
+				SHA256: fmt.Sprintf("digest-%02d", stored),
+			}, nil
+		},
+	}
+
+	result, changed, err := manager.pruneStaleToolResults(context.Background(), history, 40_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed || stored == 0 {
+		t.Fatalf("single-turn tool history was not pruned: changed=%v stored=%d", changed, stored)
+	}
+	if result[1].Text != history[1].Text {
+		t.Fatalf("user instruction changed: %q", result[1].Text)
+	}
+	if err := message.ValidateCompleteTurns(result); err != nil {
+		t.Fatalf("single-turn pruning broke tool pairing: %v", err)
+	}
+	protectedStart := len(result) - pruneRecentAtomicGroups*2
+	for index := protectedStart; index < len(result); index++ {
+		if current := result[index].ToolResult; current != nil && strings.Contains(current.Content, "context_artifact") {
+			t.Fatalf("recent tool result at %d was pruned: %#v", index, current)
+		}
+	}
+	if estimateContextTokens(result) > 40_000 {
+		t.Fatalf("pruned single-turn history still exceeds target: %d", estimateContextTokens(result))
 	}
 }

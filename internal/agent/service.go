@@ -103,7 +103,7 @@ type Service struct {
 	externalClosers    []func(context.Context) error
 }
 
-const hashlineEditToolDescription = `Apply an OMP Hashline patch to existing files. Reuse exact [PATH#TAG] headers and N:TEXT anchors from the latest read/search/edit result. Input is:
+const hashlineEditToolDescription = `Apply a Hashline patch to existing files. Reuse exact [PATH#TAG] headers and N:TEXT anchors from the latest read/search/edit result. Input is:
 *** Begin Patch
 [path#ABCD]
 PUT N.=M:
@@ -113,7 +113,7 @@ PUT <N: or PUT >N: for insertion; PUT >$: for tail insertion; PUT N*: or CUT N* 
 *** End Patch
 All line numbers name the original snapshot. Colon PUT body rows each start with + and contain final content only. Register PUT/CUT/REM/MV have no body. Never send unified @@ hunks, -old/context rows, or widen ranges over lines that remain unchanged. Re-read only unseen or renumbered lines, stale/conflicting tags, or surprising results.`
 
-const hashlineRetryGuidance = `Required OMP Hashline retry format:
+const hashlineRetryGuidance = `Required Hashline retry format:
 *** Begin Patch
 [PATH#TAG]
 PUT N.=M:
@@ -192,7 +192,7 @@ func (recovery *EditRecovery) BlockedEdit(call tool.Call) (tool.Result, bool) {
 }
 
 func addHashlineRetryGuidance(call tool.Call, result tool.Result) tool.Result {
-	if call.Name != ToolEditHashline || !result.IsError || strings.Contains(result.Content, "Required OMP Hashline retry format:") {
+	if call.Name != ToolEditHashline || !result.IsError || strings.Contains(result.Content, "Required Hashline retry format:") {
 		return result
 	}
 	result.Content = strings.TrimSpace(result.Content) + "\n\n" + hashlineRetryGuidance
@@ -231,7 +231,7 @@ func (recovery *EditRecovery) Observe(call tool.Call, result tool.Result, execut
 }
 
 func hashlineFailureRequiresRead(content string) bool {
-	if index := strings.Index(content, "Required OMP Hashline retry format:"); index >= 0 {
+	if index := strings.Index(content, "Required Hashline retry format:"); index >= 0 {
 		content = content[:index]
 	}
 	content = strings.ToLower(content)
@@ -1829,16 +1829,16 @@ func (s *Service) WorkspaceDrivers(ctx context.Context, root string) ([]tool.Dri
 	workspace := NewLocalWorkspace(absoluteRoot)
 	isGitRepo := workspaceIsGitRepo(ctx, absoluteRoot)
 	snapshotDriver := snapshotReadDriver{workspace: workspace}
-	readDriver := newOMPReadDriver(absoluteRoot, snapshotDriver, s.resources, s.allowNetwork)
+	readDriver := newReadDriver(absoluteRoot, snapshotDriver, s.resources, s.allowNetwork)
 	drivers := make([]tool.Driver, 0, 24)
 	drivers = append(drivers, listFilesDriver{workspace: workspace}, readDriver)
 
 	var editDriver tool.Driver
 	if s.allowWrite {
-		editDriver = newOMPHashlineDriver(absoluteRoot, snapshotDriver, s.hashlineClipboard, s.fileBroker)
+		editDriver = newHashlineDriver(absoluteRoot, snapshotDriver, s.hashlineClipboard, s.fileBroker)
 		drivers = append(drivers,
 			editDriver,
-			newOMPWriteDriver(absoluteRoot, snapshotDriver, s.resources, s.fileBroker),
+			newWriteDriver(absoluteRoot, snapshotDriver, s.resources, s.fileBroker),
 			gofmtDriver{workspace: workspace},
 		)
 	}
@@ -1936,6 +1936,69 @@ func (s *Service) CancelTrackedRun(ctx context.Context, runID string) (bool, err
 		active.cancel(context.Canceled)
 	}
 	return true, errors.Join(loadErr, bindingErr, runErr)
+}
+
+// CancelRunByID cancels either a locally executing run or a persisted
+// pending/suspended run. Session ownership prevents a stale renderer from
+// cancelling a run that belongs to another conversation.
+func (s *Service) CancelRunByID(ctx context.Context, sessionID, runID string) (bool, error) {
+	if s == nil || ctx == nil {
+		return false, fmt.Errorf("cancel run: service and context are required")
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return false, nil
+	}
+
+	s.singleRunMu.Lock()
+	active, activeNow := s.singleRuns[runID]
+	s.singleRunMu.Unlock()
+	if activeNow {
+		binding, err := s.store.LoadExecutionBinding(ctx, active.executionID)
+		if err != nil {
+			return false, err
+		}
+		if sessionID != "" && binding.SessionID != sessionID {
+			return false, fmt.Errorf("run %s does not belong to session %s", runID, sessionID)
+		}
+		return s.CancelTrackedRun(ctx, runID)
+	}
+
+	runRecord, task, _, err := s.loadRunAggregate(ctx, runID)
+	if errors.Is(err, agentruntime.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	agentID := strings.TrimSpace(runRecord.Metadata[singleRunMetadataAgentID])
+	if agentID == "" {
+		agentID = mainAgentID
+	}
+	binding, err := s.store.LoadLatestExecutionBinding(
+		ctx,
+		runID,
+		agentID,
+		executionKind(agentID, runRecord.Metadata),
+	)
+	if errors.Is(err, agentruntime.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if sessionID != "" && binding.SessionID != sessionID {
+		return false, fmt.Errorf("run %s does not belong to session %s", runID, sessionID)
+	}
+	if binding.State == agentruntime.ExecutionBindingCompleted ||
+		binding.State == agentruntime.ExecutionBindingFailed ||
+		binding.State == agentruntime.ExecutionBindingCancelled {
+		return false, nil
+	}
+	bindingErr := s.finishExecutionBinding(ctx, binding.ExecutionID, agentruntime.ExecutionBindingCancelled)
+	runErr := s.markRunCancelled(ctx, runID, task.ID, context.Canceled)
+	return true, errors.Join(bindingErr, runErr)
 }
 
 func (s *Service) Recover(ctx context.Context, runID string) (agentruntime.Projection, error) {

@@ -591,15 +591,22 @@ func recentUserIndexes(history []message.Message, prefixEnd, count int) []int {
 // re-externalized.
 const pruneToolResultMinBytes = 1 << 10
 
+// pruneRecentAtomicGroups keeps the active evidence tail verbatim even when a
+// single Subagent task has no later user turn to create an archive boundary.
+const pruneRecentAtomicGroups = 8
+
 // pruneStaleToolResults is the model-free pruning layer that runs before
-// archival compaction. It rewrites large tool-result bodies that precede the
-// preserved recent user turns into durable context-artifact locators, oldest
-// first, stopping as soon as the history fits the target. Only result content
-// is replaced in place, so tool call/result pairing and message order are
-// preserved and ValidateCompleteTurns semantics cannot change.
+// archival compaction. It rewrites large old tool-result bodies into durable
+// context-artifact locators, oldest first, stopping as soon as the history fits
+// the target. The latest atomic groups stay verbatim; the user instruction,
+// tool call/result pairing, message order, and ValidateCompleteTurns semantics
+// never change.
 func (c turnContext) pruneStaleToolResults(ctx context.Context, history []message.Message, targetTokens int) ([]message.Message, bool, error) {
 	if targetTokens <= 0 || c.putArtifact == nil || estimateContextTokens(history) <= targetTokens {
 		return history, false, nil
+	}
+	if err := message.ValidateCompleteTurns(history); err != nil {
+		return history, false, err
 	}
 	prefixEnd := 0
 	for prefixEnd < len(history) && history[prefixEnd].Role == message.RoleSystem {
@@ -609,10 +616,22 @@ func (c turnContext) pruneStaleToolResults(ctx context.Context, history []messag
 	if len(recentUsers) == 0 {
 		return history, false, nil
 	}
-	boundary := recentUsers[0]
+	pruneBefore := recentUsers[0]
+	if len(recentUsers) == 1 {
+		groups, err := compactionAtomicGroups(history)
+		if err != nil {
+			return history, false, err
+		}
+		if len(groups) > pruneRecentAtomicGroups {
+			pruneBefore = max(
+				pruneBefore,
+				groups[len(groups)-pruneRecentAtomicGroups].start,
+			)
+		}
+	}
 	result := append([]message.Message(nil), history...)
 	changed := false
-	for index := prefixEnd; index < boundary; index++ {
+	for index := prefixEnd; index < pruneBefore; index++ {
 		current := result[index].ToolResult
 		if current == nil {
 			continue

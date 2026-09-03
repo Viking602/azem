@@ -16,7 +16,7 @@ import (
 	"github.com/Viking602/venat/tool"
 )
 
-func TestOMPReadDriverCoversStructureArchiveSQLiteNotebookImageAndDirectory(t *testing.T) {
+func TestReadDriverCoversStructureArchiveSQLiteNotebookImageAndDirectory(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "runtime.db"))
@@ -71,14 +71,14 @@ func TestSplitReadSelectorHandlesSSHPathsWithoutConfusingPorts(t *testing.T) {
 	}
 }
 
-func TestOMPReadDriverReadsAllowedWebContent(t *testing.T) {
+func TestReadDriverReadsAllowedWebContent(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
 		response.Header().Set("Content-Type", "text/html")
 		_, _ = response.Write([]byte("<html><head><style>hidden</style></head><body><h1>Hello</h1><script>hidden()</script><p>world</p></body></html>"))
 	}))
 	defer server.Close()
 
-	driver := newOMPReadDriver(t.TempDir(), nil, nil, "allow")
+	driver := newReadDriver(t.TempDir(), nil, nil, "allow")
 	result, err := driver.Execute(context.Background(), tool.Call{
 		ID:        "web",
 		Name:      ToolReadFile,

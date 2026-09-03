@@ -14,7 +14,7 @@ import (
 	"github.com/Viking602/venat/tool"
 )
 
-func TestOMPWriteDriverCreatesOverwritesStripsHashlinesAndMarksScriptsExecutable(t *testing.T) {
+func TestWriteDriverCreatesOverwritesStripsHashlinesAndMarksScriptsExecutable(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	service := newWriteTestService(t, ctx, root)
@@ -57,7 +57,7 @@ func TestOMPWriteDriverCreatesOverwritesStripsHashlinesAndMarksScriptsExecutable
 	assertFileContent(t, filepath.Join(outside, "secret.txt"), "safe")
 }
 
-func TestOMPWriteDriverUpdatesArchivesAndSQLiteRows(t *testing.T) {
+func TestWriteDriverUpdatesArchivesAndSQLiteRows(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	service := newWriteTestService(t, ctx, root)
@@ -98,7 +98,7 @@ func TestOMPWriteDriverUpdatesArchivesAndSQLiteRows(t *testing.T) {
 	}
 }
 
-func TestOMPWriteDriverRoutesWritableInternalResources(t *testing.T) {
+func TestWriteDriverRoutesWritableInternalResources(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	router := resource.NewRouter(1024)

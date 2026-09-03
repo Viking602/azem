@@ -1351,6 +1351,82 @@ func (s *Service) CancelActiveWithChildren(children bool) bool {
 	return true
 }
 
+// CancelRunWithChildren extends process-local cancellation to a persisted
+// pending or suspended main run selected by the desktop renderer.
+func (s *Service) CancelRunWithChildren(sessionID, runID string, children bool) (bool, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	runID = strings.TrimSpace(runID)
+	s.mu.Lock()
+	activeSession, activeRun, cancel := s.activeSession, s.activeRun, s.activeEnd
+	providers, coding, sessions := s.providers, s.coding, s.sessions
+	s.mu.Unlock()
+
+	if cancel != nil {
+		if sessionID != "" && activeSession != "" && sessionID != activeSession {
+			return false, fmt.Errorf("active run belongs to session %s", activeSession)
+		}
+		if runID != "" && activeRun != "" && activeRun != "starting" && runID != activeRun {
+			return false, fmt.Errorf("active run is %s", activeRun)
+		}
+		return s.CancelActiveWithChildren(children), nil
+	}
+	if sessionID == "" || runID == "" || coding == nil {
+		return false, nil
+	}
+
+	cancelCtx, cancelWait := context.WithTimeout(context.Background(), 5*time.Second)
+	cancelled, err := coding.CancelRunByID(cancelCtx, sessionID, runID)
+	if !cancelled {
+		cancelWait()
+		return false, err
+	}
+	if children && providers != nil {
+		providers.CancelParentSubagents(sessionID, runID)
+	}
+	convergenceErr := err
+	if sessions != nil {
+		convergenceErr = errors.Join(convergenceErr, sessions.InterruptRunningToolRecordsForRun(cancelCtx, runID, time.Now().UTC()))
+		if projection, loadErr := sessions.LoadProjection(cancelCtx, sessionID); loadErr != nil {
+			convergenceErr = errors.Join(convergenceErr, loadErr)
+		} else {
+			for _, block := range projection.Blocks {
+				if block.RunID != runID || block.Kind != "question" ||
+					(block.State != "pending" && block.State != "interrupted") {
+					continue
+				}
+				userInputID := strings.TrimSpace(block.Data["userInputId"])
+				if userInputID == "" {
+					continue
+				}
+				if _, updateErr := sessions.UpdateLatestBlockState(
+					cancelCtx,
+					sessionID,
+					"question",
+					"userInputId",
+					userInputID,
+					block.State,
+					"cancelled",
+					nil,
+				); updateErr != nil {
+					convergenceErr = errors.Join(convergenceErr, updateErr)
+				} else {
+					s.emit(cancelCtx, Event{
+						Kind: EventUserInputResolved, SessionID: sessionID, RunID: runID,
+						UserInputID: userInputID, State: "cancelled",
+					})
+				}
+			}
+		}
+		convergenceErr = errors.Join(convergenceErr, pauseSessionGoal(cancelCtx, sessions, sessionID, runID))
+	}
+	cancelWait()
+	s.emitTerminal(s.ctx, Event{
+		Kind: EventRunCancelled, SessionID: sessionID, RunID: runID,
+		State: "cancelled",
+	})
+	return true, convergenceErr
+}
+
 func (s *Service) ActiveShellExecutions() []agentservice.ShellExecutionSnapshot {
 	if s == nil || s.coding == nil {
 		return nil

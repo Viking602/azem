@@ -220,7 +220,7 @@ func snapcompactArchiveCutPoint(history []message.Message, prefixEnd, keepRecent
 		}
 	}
 	if recentStart <= prefixEnd || recentStart >= len(history) {
-		return 0, fmt.Errorf("archive context: no safe OMP cut point preserves the latest %d user turns", archiveRecentUserTurns)
+		return 0, fmt.Errorf("archive context: no safe history cut point preserves the latest %d user turns", archiveRecentUserTurns)
 	}
 	return recentStart, nil
 }

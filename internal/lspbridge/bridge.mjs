@@ -38,7 +38,7 @@ const launchClientPath = process.env.AZEM_CODING_AGENT_LAUNCH_CLIENT;
 const imageGenPath = process.env.AZEM_CODING_AGENT_IMAGE_GEN;
 const ttsPath = process.env.AZEM_CODING_AGENT_TTS;
 if (!modulePath || !clientPath || !debugPath || !dapPath || !evalPath || !evalJsPath || !evalPyPath || !browserPath || !browserTabsPath || !computerPath || !webSearchPath || !githubPath || !sshPath || !internalUrlPath || !sshConnectionsPath || !hubPath || !launchClientPath || !imageGenPath || !ttsPath) {
-  throw new Error("OMP runtime module paths are required");
+  throw new Error("runtime module paths are required");
 }
 const [
   { LspTool }, { shutdownAll }, { DebugTool }, { dapSessionManager },

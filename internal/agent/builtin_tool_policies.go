@@ -53,7 +53,7 @@ func (globDriver) ToolPolicy() agentruntime.ToolPolicy {
 	return readOnlyPolicy("coding", "read")
 }
 
-func (*ompHashlineDriver) ToolPolicy() agentruntime.ToolPolicy {
+func (*hashlineDriver) ToolPolicy() agentruntime.ToolPolicy {
 	policy := workspaceWritePolicy("coding", "edit", "hashline", "workspace")
 	policy.Concurrency = tool.ConcurrencyExclusive
 	policy.ConcurrencyGroup = "workspace-files"
@@ -87,7 +87,7 @@ func (driver *memoryToolDriver) ToolPolicy() agentruntime.ToolPolicy {
 	return policy
 }
 
-func (*ompReadDriver) ToolPolicy() agentruntime.ToolPolicy {
+func (*readDriver) ToolPolicy() agentruntime.ToolPolicy {
 	return readOnlyPolicy("coding", "read")
 }
 
@@ -117,7 +117,7 @@ func (*webSearchDriver) ToolPolicy() agentruntime.ToolPolicy {
 	return policy
 }
 
-func (*ompWriteDriver) ToolPolicy() agentruntime.ToolPolicy {
+func (*writeDriver) ToolPolicy() agentruntime.ToolPolicy {
 	policy := workspaceWritePolicy("coding", "write", "workspace")
 	policy.Concurrency = tool.ConcurrencyExclusive
 	policy.ConcurrencyGroup = "workspace-files"

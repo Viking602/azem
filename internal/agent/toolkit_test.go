@@ -84,7 +84,7 @@ func TestSearchSkipsIgnoredTreesInsteadOfTruncatingBeforeSource(t *testing.T) {
 		t.Fatalf("structured search result=%+v", searchResult)
 	}
 	patch, _ := json.Marshal(map[string]string{
-		"input": ompTestPatch(searchResult.Files[0].Header, "PUT 3.=3:\n+const ReliableSearchNeedle = false"),
+		"input": hashlineTestPatch(searchResult.Files[0].Header, "PUT 3.=3:\n+const ReliableSearchNeedle = false"),
 	})
 	edited, err := editDriver.Execute(context.Background(), tool.Call{ID: "edit", Name: ToolEditHashline, Arguments: patch}, nil)
 	if err != nil || edited.IsError {
@@ -155,8 +155,8 @@ func testReplaceDriver(t *testing.T, dir string) tool.Driver {
 	if snapshotRead == nil {
 		t.Fatal("read driver unavailable")
 	}
-	readDriver := newOMPReadDriver(dir, snapshotRead, nil, "deny")
-	editDriver := newOMPHashlineDriver(dir, snapshotRead, newHashlineClipboard(), nil)
+	readDriver := newReadDriver(dir, snapshotRead, nil, "deny")
+	editDriver := newHashlineDriver(dir, snapshotRead, newHashlineClipboard(), nil)
 	return newReplaceDriver(readDriver, editDriver)
 }
 

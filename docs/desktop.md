@@ -51,6 +51,13 @@ SQLite. Closing a renderer does not stop an active run. Reopening the project
 authenticates to the existing endpoint and restores the durable snapshot plus
 bounded event and terminal replay.
 
+The Stop control sends the selected session and run identity to the daemon.
+Process-local active work keeps the non-blocking coordinator-signal path;
+persisted pending or suspended work is cancelled through its durable binding.
+The renderer shows `stopping`, reports rejected requests, clears pending
+controls on the terminal event, and never silently treats `cancelled=false` as
+success.
+
 The endpoint lives below
 `~/.azem/gpui-daemons/<workspace-hash>/`. Endpoint metadata and socket
 permissions are owner-only. The client rejects an unexpected peer identity,
@@ -105,15 +112,20 @@ Final output renders once. Reasoning never impersonates commentary. Live
 transcript following uses bounded frame-paced rendering and respects reduced
 motion.
 
-Tool activity is rendered as one compact, flat activity tree per commentary
-step. The header summarizes thinking and each tool family with real counts;
-active trees open by default, use a quiet vertical rail and inline action/target
-rows, and show the live processing clock below the tree. Once commentary or a
-final answer settles the step, it folds to the same count header unless the
-user explicitly chose otherwise. Thinking-only work remains visible before the
-first tool call. Subagent calls use the same inline row density and open the
-existing child transcript instead of introducing a nested card or scroll pane.
-All activity motion is suppressed by the reduced-motion preference.
+Tool activity is rendered as one compact fold per model step. It starts
+collapsed; opening it restores the complete body to transcript flow with all
+reasoning prose first and de-duplicated tool rows after it. Starting later text
+or a tool settles prior streaming prose, so one run has only one live activity
+status. Tool labels contain only the action and target; a spinner, check, alert,
+or hollow mark carries state without repeating 「正在运行」 in every row.
+Multiline command arguments reduce to one executable preview. Any tool with
+bounded details is a keyboard-focusable disclosure: failures show the recorded
+reason, successful calls show their result, and edits prefer the structured
+compact diff. Clickable tool lines remain visually flat with no full-row hover
+capsule, so their text keeps the native selection treatment. Details remain in
+transcript flow without a nested scroller. Subagent batches keep one click
+disclosure per parent call. Reduced motion suppresses status and disclosure
+animation without hiding state.
 
 ## Desktop surfaces
 

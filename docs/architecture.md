@@ -83,6 +83,27 @@ Dependencies flow from entry points and presentation into orchestration, then
 into focused runtime and storage packages. Cycles are forbidden by
 `.sentrux/rules.toml`.
 
+The native renderer keeps the binary entry point thin and groups code by
+responsibility:
+
+- `gpui/crates/azem-gpui/src/main.rs` owns shared window state, layout helpers,
+  and application startup. `window_runtime.rs`, `window_actions.rs`,
+  `window_controls.rs`, `window_model_picker.rs`, `window_settings.rs`,
+  `window_composer.rs`, `window_terminal.rs`, and `window_render.rs` contain
+  focused `AzemWindow` implementation blocks.
+- `gpui/crates/azem-gpui/src/surfaces.rs` owns shared presentation primitives
+  and the narrow exports used by the window. Domain surfaces live under
+  `surfaces/`; Settings categories live under `surfaces/settings/`; process
+  trail rendering lives under `surfaces/timeline/`.
+- `gpui/crates/azem-gpui/src/state.rs` remains the projection model and reducer.
+  Large regression suites live beside their modules in `state/tests.rs`,
+  `surfaces/tests.rs`, and `composer_tests.rs` instead of inflating production
+  modules.
+
+Keep new rendering behavior in its owning surface or window responsibility.
+Do not grow `main.rs` or `surfaces.rs` back into cross-domain implementation
+files.
+
 ## Turn and event flow
 
 ```text

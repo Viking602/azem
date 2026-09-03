@@ -333,12 +333,8 @@ mod tests {
             .keys()
             .filter_map(|key| key.split_once('.').map(|(prefix, _)| prefix))
             .collect::<BTreeSet<_>>();
-        for source in [
-            include_str!("main.rs"),
-            include_str!("surfaces.rs"),
-            include_str!("localization.rs"),
-        ] {
-            for key in source.split("#[cfg(test)]").next().unwrap().split('"') {
+        let assert_source_keys = |source: &str| {
+            for key in source.split('"') {
                 if let Some((prefix, _)) = key.split_once('.')
                     && prefixes.contains(prefix)
                     && key
@@ -351,7 +347,12 @@ mod tests {
                     );
                 }
             }
+        };
+        for source in [crate::MAIN_SOURCE, crate::SURFACES_SOURCE] {
+            assert_source_keys(source);
         }
+        let localization_source = include_str!("localization.rs");
+        assert_source_keys(localization_source.split("#[cfg(test)]").next().unwrap());
     }
     #[test]
     fn new_translation_files_are_discovered_without_a_language_enum() {

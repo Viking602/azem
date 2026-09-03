@@ -133,7 +133,7 @@ func (client *Client) Share(ctx context.Context, sessionID string, options Optio
 		return client.uploadBlob(ctx, serverURL, sealed, key, truncated)
 	}
 	if store == StoreGist && client.Gists != nil {
-		gistURL, gistID, gistErr := client.Gists.Publish(ctx, "session.ompshare.txt", base64.StdEncoding.EncodeToString(sealed))
+		gistURL, gistID, gistErr := client.Gists.Publish(ctx, "session.azemshare.txt", base64.StdEncoding.EncodeToString(sealed))
 		if gistErr == nil {
 			if !validGistID(gistID) {
 				return Result{}, errors.New("gist publisher returned an invalid id")

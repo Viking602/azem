@@ -456,8 +456,8 @@ func (b *Bridge) FollowUp(sessionID, runID, text string, attachments []Attachmen
 	return b.runtime.FollowUpActiveTurnWithAttachments(sessionID, runID, text, attachmentsToSession(attachments))
 }
 
-func (b *Bridge) CancelActive(includeChildren bool) bool {
-	return b.runtime.CancelActiveWithChildren(includeChildren)
+func (b *Bridge) CancelActive(sessionID, runID string, includeChildren bool) (bool, error) {
+	return b.runtime.CancelRunWithChildren(sessionID, runID, includeChildren)
 }
 
 func (b *Bridge) Execute(request ActionRequest) error {

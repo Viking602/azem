@@ -51,7 +51,7 @@ func TestWriteUsesExtensionBrokerOnlyAfterPermissionFailure(t *testing.T) {
 	broker := &recordingFileBroker{}
 	ref := &fileMutationBrokerRef{}
 	ref.set(broker)
-	driver := newOMPWriteDriver(workspace, nil, nil, ref)
+	driver := newWriteDriver(workspace, nil, nil, ref)
 	arguments, _ := json.Marshal(map[string]any{"path": "locked/brokered.txt", "content": "brokered"})
 	result, err := driver.Execute(context.Background(), tool.Call{ID: "write", Name: ToolWriteFile, Arguments: arguments}, nil)
 	expectedDestination, resolveErr := brokerDestination(workspace, "locked/brokered.txt", true)
@@ -89,18 +89,18 @@ func TestHashlineCommitBrokersWritesAndDeletesAfterPermissionFailure(t *testing.
 	broker := &recordingFileBroker{}
 	ref := &fileMutationBrokerRef{}
 	ref.set(broker)
-	driver := &ompHashlineDriver{root: workspace, clipboard: newHashlineClipboard(), broker: ref}
+	driver := &hashlineDriver{root: workspace, clipboard: newHashlineClipboard(), broker: ref}
 	root, err := os.OpenRoot(workspace)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	prepared := []*ompPreparedFile{{source: "locked/file.txt", destination: "locked/file.txt", rawOriginal: []byte("old\n"), final: "new\n", mode: 0o600}}
+	prepared := []*hashlinePreparedFile{{source: "locked/file.txt", destination: "locked/file.txt", rawOriginal: []byte("old\n"), final: "new\n", mode: 0o600}}
 	if err := driver.commitPatch(context.Background(), root, prepared); err != nil || len(broker.writes) != 1 || broker.writes[0].content != "new\n" {
 		t.Fatalf("brokered edit error=%v writes=%#v", err, broker.writes)
 	}
 	broker.writes = nil
-	prepared = []*ompPreparedFile{{source: "locked/file.txt", destination: "locked/file.txt", rawOriginal: []byte("old\n"), mode: 0o600, remove: true}}
+	prepared = []*hashlinePreparedFile{{source: "locked/file.txt", destination: "locked/file.txt", rawOriginal: []byte("old\n"), mode: 0o600, remove: true}}
 	expectedDestination, resolveErr := brokerDestination(workspace, "locked/file.txt", false)
 	if resolveErr != nil {
 		t.Fatal(resolveErr)

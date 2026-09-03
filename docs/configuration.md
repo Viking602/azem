@@ -36,16 +36,20 @@ command (default `10m`). The model chooses a shorter deadline with
 `wall_clock_seconds`. `timeout_seconds` remains the no-output watchdog and
 cannot exceed that ceiling. Omitting `timeout_seconds` after setting
 `wall_clock_seconds` lets a silent command run until the chosen wall clock.
-`stdin` is optional UTF-8 fed to the process for scripted keystrokes or piped
-input.
+`stdin` is optional UTF-8 for ordinary command input. Inline Python,
+JavaScript, Ruby, and shell programs belong in the persistent `eval` kernels,
+whose default cell deadline is 30 seconds. Shell here-documents and
+here-strings are rejected before execution so multiline program bodies cannot
+silently consume the much larger shell wall-clock allowance.
 
 On POSIX, descriptor and pipeline syntax such as `2>&1`, `<&`, `&>`, `|&`,
 and `&&` remain foreground syntax. Real `&` background operators are rejected:
 a descendant can create another session and escape process-group cleanup even
 when the original shell has a wall-clock limit. Known detachment primitives
 (`setsid`, `daemonize`, `nohup`, and `disown`) are rejected after conservative
-quote/backslash normalization as defense in depth. Use a foreground command or
-an explicitly supervised Azem background process instead.
+quote/backslash normalization as defense in depth. Use a foreground command,
+an `eval` cell for inline code, or an explicitly supervised Azem background
+process instead.
 
 The desktop Subagents settings surface groups capacity and isolation controls,
 shows parallel dispatch as a read-only product invariant, and lists

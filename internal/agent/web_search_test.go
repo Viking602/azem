@@ -14,6 +14,9 @@ func TestWebSearchForwardsConstraintsAndProviderOptions(t *testing.T) {
 	zero := 0.0
 	var captured map[string]any
 	driver := &webSearchDriver{root: t.TempDir(), networkPolicy: "allow"}
+	if !strings.Contains(driver.Definition().Description, "configured provider fallback chain") {
+		t.Fatalf("web search definition is not product-neutral: %q", driver.Definition().Description)
+	}
 	driver.execute = func(_ context.Context, _, _ string, params map[string]any) (lspBridgeResponse, error) {
 		captured = params
 		details := json.RawMessage(`{"response":{"provider":"fixture","sources":[{"title":"Official","url":"https://example.com/docs"}]}}`)

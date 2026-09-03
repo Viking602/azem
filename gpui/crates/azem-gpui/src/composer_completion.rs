@@ -912,7 +912,7 @@ mod tests {
 
     #[test]
     fn composer_shortcuts_capture_bound_actions_before_the_text_input() {
-        let source = include_str!("main.rs");
+        let source = crate::MAIN_SOURCE;
         let composer = source.split("fn composer_view(").nth(1).unwrap();
         assert!(composer.contains(".capture_key_down(cx.listener(Self::completion_key))"));
         for handler in ["submit_completion", "backspace_completion"] {

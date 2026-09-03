@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	maxOMPWriteBytes      = 16 << 20
+	maxWriteBytes         = 16 << 20
 	maxArchiveRewriteSize = 256 << 20
 	maxArchiveEntries     = 10000
 )
@@ -34,19 +34,19 @@ var (
 	writeTempCounter    atomic.Uint64
 )
 
-type ompWriteDriver struct {
+type writeDriver struct {
 	root         string
 	snapshotRead tool.Driver
 	resources    *resource.Router
 	broker       *fileMutationBrokerRef
 }
 
-type ompWriteInput struct {
+type writeInput struct {
 	Path    string `json:"path"`
 	Content string `json:"content"`
 }
 
-type ompWriteResult struct {
+type writeResult struct {
 	Path           string `json:"path"`
 	Header         string `json:"header,omitempty"`
 	Bytes          int    `json:"bytes"`
@@ -57,11 +57,11 @@ type ompWriteResult struct {
 	Content        string `json:"content"`
 }
 
-func newOMPWriteDriver(root string, snapshotRead tool.Driver, resources *resource.Router, broker *fileMutationBrokerRef) tool.Driver {
-	return &ompWriteDriver{root: root, snapshotRead: snapshotRead, resources: resources, broker: broker}
+func newWriteDriver(root string, snapshotRead tool.Driver, resources *resource.Router, broker *fileMutationBrokerRef) tool.Driver {
+	return &writeDriver{root: root, snapshotRead: snapshotRead, resources: resources, broker: broker}
 }
 
-func (driver *ompWriteDriver) Definition() tool.Definition {
+func (driver *writeDriver) Definition() tool.Definition {
 	additional := false
 	return tool.Definition{
 		Name:        ToolWriteFile,
@@ -77,8 +77,8 @@ func (driver *ompWriteDriver) Definition() tool.Definition {
 	}
 }
 
-func (driver *ompWriteDriver) Execute(ctx context.Context, call tool.Call, _ tool.UpdateSink) (tool.Result, error) {
-	var input ompWriteInput
+func (driver *writeDriver) Execute(ctx context.Context, call tool.Call, _ tool.UpdateSink) (tool.Result, error) {
+	var input writeInput
 	if err := json.Unmarshal(call.Arguments, &input); err != nil {
 		return writeError(call, fmt.Errorf("decode write arguments: %w", err)), nil
 	}
@@ -86,8 +86,8 @@ func (driver *ompWriteDriver) Execute(ctx context.Context, call tool.Call, _ too
 	if input.Path == "" {
 		return writeError(call, errors.New("path is required")), nil
 	}
-	if len(input.Content) > maxOMPWriteBytes {
-		return writeError(call, fmt.Errorf("content exceeds %d bytes", maxOMPWriteBytes)), nil
+	if len(input.Content) > maxWriteBytes {
+		return writeError(call, fmt.Errorf("content exceeds %d bytes", maxWriteBytes)), nil
 	}
 	cleanContent, stripped := stripCopiedHashlines(input.Content)
 	var result tool.Result
@@ -107,7 +107,7 @@ func (driver *ompWriteDriver) Execute(ctx context.Context, call tool.Call, _ too
 	return result, nil
 }
 
-func (driver *ompWriteDriver) writeURI(ctx context.Context, call tool.Call, path, content string, stripped bool) (tool.Result, error) {
+func (driver *writeDriver) writeURI(ctx context.Context, call tool.Call, path, content string, stripped bool) (tool.Result, error) {
 	if driver.resources == nil {
 		return tool.Result{}, errors.New("internal resources are unavailable")
 	}
@@ -134,7 +134,7 @@ func (driver *ompWriteDriver) writeURI(ctx context.Context, call tool.Call, path
 	return writeSuccess(call, outputPath, "resource", len(content), false, true, false, "", metadata, ""), nil
 }
 
-func (driver *ompWriteDriver) writeLocal(ctx context.Context, call tool.Call, path, content string, stripped bool) (tool.Result, error) {
+func (driver *writeDriver) writeLocal(ctx context.Context, call tool.Call, path, content string, stripped bool) (tool.Result, error) {
 	if err := rejectWriteSelectorMisfire(driver.root, path, content); err != nil {
 		return tool.Result{}, err
 	}
@@ -182,7 +182,7 @@ func (driver *ompWriteDriver) writeLocal(ctx context.Context, call tool.Call, pa
 	return writeSuccess(call, relative, "file", len(content), !exists, exists, madeExecutable, header, metadata, ""), nil
 }
 
-func (driver *ompWriteDriver) recordWriteSnapshot(ctx context.Context, relative string) string {
+func (driver *writeDriver) recordWriteSnapshot(ctx context.Context, relative string) string {
 	if driver.snapshotRead == nil {
 		return ""
 	}
@@ -198,7 +198,7 @@ func (driver *ompWriteDriver) recordWriteSnapshot(ctx context.Context, relative 
 	return ""
 }
 
-func (driver *ompWriteDriver) writeArchive(ctx context.Context, call tool.Call, archivePath, member, content string, stripped bool) (tool.Result, error) {
+func (driver *writeDriver) writeArchive(ctx context.Context, call tool.Call, archivePath, member, content string, stripped bool) (tool.Result, error) {
 	member, err := normalizeArchiveMember(member)
 	if err != nil {
 		return tool.Result{}, err
@@ -234,7 +234,7 @@ func (driver *ompWriteDriver) writeArchive(ctx context.Context, call tool.Call, 
 	return writeSuccess(call, relative+":"+member, "archive", len(content), !exists, exists, false, "", metadata, ""), nil
 }
 
-func (driver *ompWriteDriver) writeSQLite(ctx context.Context, call tool.Call, databasePath, selector, content string, stripped bool) (tool.Result, error) {
+func (driver *writeDriver) writeSQLite(ctx context.Context, call tool.Call, databasePath, selector, content string, stripped bool) (tool.Result, error) {
 	absolute, relative, _, err := secureReadPath(driver.root, databasePath)
 	if err != nil {
 		return tool.Result{}, err
@@ -318,7 +318,7 @@ func writeSuccess(call tool.Call, path, kind string, bytes int, created, overwri
 	if executable {
 		line += "\n[Notice: Made executable via chmod +x]"
 	}
-	structured, _ := json.Marshal(ompWriteResult{Path: path, Header: header, Bytes: bytes, Created: created, Overwritten: overwritten, MadeExecutable: executable, Kind: kind, Content: line})
+	structured, _ := json.Marshal(writeResult{Path: path, Header: header, Bytes: bytes, Created: created, Overwritten: overwritten, MadeExecutable: executable, Kind: kind, Content: line})
 	return tool.Result{ToolCallID: call.ID, Name: call.Name, Content: line, Structured: structured}
 }
 

@@ -49,7 +49,7 @@ func (handler *sshResourceHandler) Read(ctx context.Context, request resource.Re
 	}
 	content := details.Resource.Content
 	if request.Selector != "" {
-		content = applyTextSelector(content, ompReadInput{Selector: request.Selector})
+		content = applyTextSelector(content, readInput{Selector: request.Selector})
 	}
 	metadata := map[string]string{}
 	if details.Resource.IsDirectory {

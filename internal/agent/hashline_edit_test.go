@@ -11,7 +11,7 @@ import (
 	"github.com/Viking602/venat/tool"
 )
 
-func TestOMPHashlineAppliesBlocksRegistersMovesAndRemovals(t *testing.T) {
+func TestHashlineAppliesBlocksRegistersMovesAndRemovals(t *testing.T) {
 	ctx := WithInvocation(context.Background(), Invocation{SessionID: "hashline-session"})
 	root := t.TempDir()
 	service := newWriteTestService(t, ctx, root)
@@ -51,7 +51,7 @@ func TestOMPHashlineAppliesBlocksRegistersMovesAndRemovals(t *testing.T) {
 	assertFileContent(t, filepath.Join(root, "later.py"), "def greet():\n    return 'hi'\n")
 }
 
-func TestOMPHashlineSupportsOriginalLineGapsAndMarkdownBlocks(t *testing.T) {
+func TestHashlineSupportsOriginalLineGapsAndMarkdownBlocks(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	service := newWriteTestService(t, ctx, root)
@@ -66,7 +66,7 @@ func TestOMPHashlineSupportsOriginalLineGapsAndMarkdownBlocks(t *testing.T) {
 	assertFileContent(t, filepath.Join(root, "notes.md"), "# First\nx\n\n# Two\nbetween\nc\n")
 }
 
-func TestOMPHashlineSupportsAnonymousMovesAndAfterBlockInsertion(t *testing.T) {
+func TestHashlineSupportsAnonymousMovesAndAfterBlockInsertion(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	service := newWriteTestService(t, ctx, root)
@@ -82,7 +82,7 @@ func TestOMPHashlineSupportsAnonymousMovesAndAfterBlockInsertion(t *testing.T) {
 	assertFileContent(t, filepath.Join(root, "after.md"), "# A\na\nbetween\n\n# B\nb\n")
 }
 
-func TestOMPHashlineRejectsStaleTagsOverlapAndExistingMoveDestinationWithoutMutation(t *testing.T) {
+func TestHashlineRejectsStaleTagsOverlapAndExistingMoveDestinationWithoutMutation(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	service := newWriteTestService(t, ctx, root)
@@ -128,6 +128,6 @@ func callHashline(ctx context.Context, driver tool.Driver, patch string) tool.Re
 	return result
 }
 
-func ompTestPatch(header, hunks string) string {
+func hashlineTestPatch(header, hunks string) string {
 	return "*** Begin Patch\n" + header + "\n" + hunks + "\n*** End Patch\n"
 }
