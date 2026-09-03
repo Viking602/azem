@@ -184,13 +184,8 @@ pub(in crate::surfaces) fn thinking_process_entry(
     let elapsed_ms = process_number(block, "elapsedMs").unwrap_or(live_elapsed_ms);
     let label = if active {
         processing_status(elapsed_ms, locale)
-    } else if elapsed_ms > 0 {
-        locale.format(
-            "process.thinkingDuration",
-            &[("duration", format_usage_duration(elapsed_ms, locale))],
-        )
     } else {
-        locale.text("ui.thinking").to_string()
+        locale.text("ui.thought").to_string()
     };
     let activity = if active {
         animated_activity_label(index, label.clone(), palette, reduced_motion)
@@ -224,8 +219,6 @@ pub(in crate::surfaces) fn thinking_process_entry(
                         .h(px(36.))
                         .flex()
                         .items_center()
-                        .gap_2()
-                        .child(icon("lightbulb", 14., palette.faint))
                         .child(activity),
                 ),
         )
@@ -449,7 +442,7 @@ fn is_active_process_state(state: &str) -> bool {
 }
 
 pub(in crate::surfaces) fn running_tool_summary(block: &Block, locale: Locale) -> String {
-    let (action, _) = tool_action(block.title.as_ref(), locale);
+    let (action, _) = tool_action(tool_name(block), locale);
     let preview = truncate_label(&tool_preview(block), 42);
     if preview.is_empty() {
         action.to_string()
@@ -682,7 +675,7 @@ fn process_activity_counts(group: &[Block]) -> ProcessActivityCounts {
         match tool_activity_kind(block) {
             ToolActivityKind::Read => counts.read += 1,
             ToolActivityKind::Edit => counts.edit += 1,
-            ToolActivityKind::Command => counts.command += 1,
+            ToolActivityKind::Command | ToolActivityKind::Test => counts.command += 1,
             ToolActivityKind::Search => counts.search += 1,
             ToolActivityKind::WebSearch => counts.web_search += 1,
             ToolActivityKind::Fetch => counts.fetch += 1,
@@ -1192,6 +1185,7 @@ pub(in crate::surfaces) fn process_step_row(
         failed.then(|| ToolStepDetail {
             content: locale.text("ui.noFailureDetails").to_string(),
             is_diff: false,
+            is_code: false,
         })
     });
     let can_expand = detail.is_some();
@@ -1328,7 +1322,9 @@ pub(in crate::surfaces) fn process_step_row(
         .child(row)
         .when_some(expanded.then_some(detail).flatten(), |entry, detail| {
             let content = if detail.is_diff {
-                format!("```diff\n{}\n```", detail.content.trim())
+                fenced_tool_detail(&detail.content, "diff")
+            } else if detail.is_code {
+                fenced_tool_detail(&detail.content, "text")
             } else {
                 detail.content
             };
@@ -1390,6 +1386,7 @@ fn process_tool_state_mark(
 pub(in crate::surfaces) struct ToolStepDetail {
     pub(in crate::surfaces) content: String,
     pub(in crate::surfaces) is_diff: bool,
+    pub(in crate::surfaces) is_code: bool,
 }
 
 pub(in crate::surfaces) fn tool_step_detail(
@@ -1402,6 +1399,7 @@ pub(in crate::surfaces) fn tool_step_detail(
                 return Some(ToolStepDetail {
                     content,
                     is_diff: false,
+                    is_code: is_code_output_tool(tool_name(block)),
                 });
             }
         }
@@ -1416,6 +1414,7 @@ pub(in crate::surfaces) fn tool_step_detail(
                     return Some(ToolStepDetail {
                         content: content.to_string(),
                         is_diff: false,
+                        is_code: is_code_output_tool(tool_name(block)),
                     });
                 }
             }
@@ -1433,22 +1432,40 @@ pub(in crate::surfaces) fn tool_step_detail(
                 return Some(ToolStepDetail {
                     content,
                     is_diff: true,
+                    is_code: false,
                 });
             }
             if candidate.kind.as_ref() == "diff" && !candidate.content.trim().is_empty() {
                 return Some(ToolStepDetail {
                     content: candidate.content.trim().to_string(),
                     is_diff: true,
+                    is_code: false,
                 });
             }
         }
     }
 
     let content = block.content.trim();
-    (!content.is_empty()).then(|| ToolStepDetail {
+    (!content.is_empty() && !is_bare_tool_status(block, content)).then(|| ToolStepDetail {
         content: content.to_string(),
         is_diff: false,
+        is_code: is_code_output_tool(tool_name(block)),
     })
+}
+
+fn fenced_tool_detail(content: &str, language: &str) -> String {
+    let mut current = 0;
+    let mut longest = 0;
+    for byte in content.bytes() {
+        if byte == b'`' {
+            current += 1;
+            longest = longest.max(current);
+        } else {
+            current = 0;
+        }
+    }
+    let fence = "`".repeat((longest + 1).max(3));
+    format!("{fence}{language}\n{}\n{fence}", content.trim())
 }
 
 fn tool_detail_field(block: &Block, key: &str) -> Option<String> {
@@ -1519,12 +1536,12 @@ pub(in crate::surfaces) fn process_step_label(block: &Block, locale: Locale) -> 
         return running_tool_summary(block, locale);
     }
     let preview = truncate_label(&tool_preview(block), 52);
+    let name = tool_name(block);
     let target = if preview.is_empty() {
-        tool_action(block.title.as_ref(), locale).0.to_string()
+        tool_action(name, locale).0.to_string()
     } else {
         preview
     };
-    let name = block.title.as_ref();
     if is_edit_tool(block) {
         let mut label = locale.format("process.editedFile", &[("target", target)]);
         if let Some((additions, deletions)) = tool_file_change_counts(block) {
@@ -1534,6 +1551,9 @@ pub(in crate::surfaces) fn process_step_label(block: &Block, locale: Locale) -> 
     }
     if is_read_tool(name) {
         return locale.format("process.readFile", &[("target", target)]);
+    }
+    if tool_activity_kind_from_name(name) == ToolActivityKind::Test {
+        return locale.format("process.ranTests", &[("target", target)]);
     }
     if is_shell_tool(name) {
         if let Some(elapsed_ms) = process_number(block, "elapsedMs").filter(|value| *value > 0) {
@@ -1637,6 +1657,7 @@ pub(in crate::surfaces) enum ToolActivityKind {
     Read,
     Edit,
     Command,
+    Test,
     Search,
     WebSearch,
     Fetch,
@@ -1652,6 +1673,7 @@ impl ToolActivityKind {
             Self::Read => "ui.readFile",
             Self::Edit => "ui.editFile",
             Self::Command => "ui.ranCommand",
+            Self::Test => "ui.ranTests",
             Self::Search => "ui.searchedCode",
             Self::WebSearch => "ui.search",
             Self::Fetch => "ui.fetchPage",
@@ -1667,6 +1689,7 @@ impl ToolActivityKind {
             Self::Read => "file-code",
             Self::Edit => "pencil",
             Self::Command => "terminal",
+            Self::Test => "check",
             Self::Search => "search",
             Self::WebSearch => "globe",
             Self::Fetch => "link",
@@ -1678,8 +1701,21 @@ impl ToolActivityKind {
     }
 }
 
+fn tool_name(block: &Block) -> &str {
+    let title = block.title.trim();
+    if !title.is_empty() {
+        title
+    } else {
+        block_data_value(block, "name")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default()
+    }
+}
+
 pub(in crate::surfaces) fn tool_activity_kind(block: &Block) -> ToolActivityKind {
-    if block.title.contains("gofmt") {
+    let name = tool_name(block);
+    if name.contains("gofmt") {
         return if is_edit_tool(block) {
             ToolActivityKind::Edit
         } else {
@@ -1689,7 +1725,7 @@ pub(in crate::surfaces) fn tool_activity_kind(block: &Block) -> ToolActivityKind
     if is_edit_tool(block) {
         ToolActivityKind::Edit
     } else {
-        tool_activity_kind_from_name(block.title.as_ref())
+        tool_activity_kind_from_name(name)
     }
 }
 
@@ -1710,6 +1746,8 @@ fn tool_activity_kind_from_name(name: &str) -> ToolActivityKind {
     .any(|part| normalized.contains(part))
     {
         ToolActivityKind::Edit
+    } else if normalized.contains("go_test") || normalized.contains("go-test") {
+        ToolActivityKind::Test
     } else if normalized.contains("shell")
         || normalized.contains("command")
         || normalized.ends_with(".exec")
@@ -1759,14 +1797,21 @@ fn is_shell_tool(name: &str) -> bool {
     tool_activity_kind_from_name(name) == ToolActivityKind::Command
 }
 
+fn is_code_output_tool(name: &str) -> bool {
+    matches!(
+        tool_activity_kind_from_name(name),
+        ToolActivityKind::Command | ToolActivityKind::Test
+    )
+}
+
 pub(in crate::surfaces) fn is_edit_tool(block: &Block) -> bool {
-    let normalized = block.title.to_ascii_lowercase();
+    let name = tool_name(block);
+    let normalized = name.to_ascii_lowercase();
     if normalized.contains("gofmt") {
         return formatter_changed(block)
             .unwrap_or_else(|| block_data_value(block, "fileChange").is_some());
     }
-    is_file_change(block)
-        || tool_activity_kind_from_name(block.title.as_ref()) == ToolActivityKind::Edit
+    is_file_change(block) || tool_activity_kind_from_name(name) == ToolActivityKind::Edit
 }
 
 fn formatter_changed(block: &Block) -> Option<bool> {
@@ -1807,7 +1852,7 @@ fn tool_preview(block: &Block) -> String {
         })
         .or_else(|| {
             let content = block.content.trim();
-            (!content.starts_with(['{', '[']))
+            (!content.starts_with(['{', '[']) && !is_bare_tool_status(block, content))
                 .then(|| content.lines().find(|line| !line.trim().is_empty()))
                 .flatten()
                 .map(str::trim)
@@ -1826,6 +1871,20 @@ fn compact_tool_preview(value: &str) -> String {
         return command.trim().trim_end_matches('-').trim_end().to_string();
     }
     value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn is_bare_tool_status(block: &Block, content: &str) -> bool {
+    is_active_process_block(block)
+        && [
+            "running",
+            "queued",
+            "pending",
+            "started",
+            "progress",
+            "arguments",
+        ]
+        .iter()
+        .any(|status| content.eq_ignore_ascii_case(status))
 }
 
 fn decoded_tool_arguments(value: &serde_json::Value) -> Option<String> {
@@ -1849,6 +1908,7 @@ fn decoded_tool_arguments(value: &serde_json::Value) -> Option<String> {
                 "pattern",
                 "command",
                 "cmd",
+                "package",
                 "goal",
                 "url",
                 "task",

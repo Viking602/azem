@@ -29,6 +29,12 @@
   disclosures stay visually flat without a full-row hover capsule around
   selectable text.
 
+- Limited copy, feedback, and fork controls to the last completed
+  `final_answer` of a run. Command and test results now render as one fenced
+  code block; late tool-start metadata repairs unnamed progress rows, bare
+  `running` transport messages stay hidden, and `coding.go_test` rows use a
+  localized test action plus their package argument.
+
 - Kept expanded tool steps readable by placing all reasoning prose before tool
   rows and reducing multiline command bodies to a single-line executable
   preview. Shell here-document scripts now fail before execution and direct

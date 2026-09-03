@@ -548,6 +548,40 @@ fn tool_activity_settles_prior_streaming_thinking() {
             .all(|block| block.state.as_ref() == "completed")
     );
 }
+
+#[test]
+fn late_tool_start_repairs_an_unnamed_progress_row() {
+    let mut state = AppState::default();
+    state.navigation.current_session_id = "session".into();
+    state.apply_direct_event(json!({
+        "kind": "tool_update",
+        "sessionId": "session",
+        "runId": "run",
+        "toolCallId": "call",
+        "state": "running",
+        "text": "running"
+    }));
+    assert!(state.transcript.blocks.borrow()[0].title.is_empty());
+
+    state.apply_direct_event(json!({
+        "kind": "tool_started",
+        "sessionId": "session",
+        "runId": "run",
+        "toolCallId": "call",
+        "state": "running",
+        "data": {
+            "name": "coding.go_test",
+            "arguments": "{\"package\":\"./internal/agent\"}"
+        }
+    }));
+    let blocks = state.transcript.blocks.borrow();
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0].title.as_ref(), "coding.go_test");
+    assert_eq!(
+        blocks[0].extra["arguments"].as_str(),
+        Some("{\"package\":\"./internal/agent\"}")
+    );
+}
 #[test]
 fn child_activity_coalesces_and_stays_bounded() {
     let mut state = AppState::default();

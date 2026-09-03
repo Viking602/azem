@@ -340,16 +340,17 @@ use super::ReplyForkAnchor;
 use super::{
     ToolActivityKind, agent_belongs_to_run, agent_matches_group, animate_submitted_user,
     archived_session_groups, extension_confirmation, extension_items, extension_matches,
-    format_usage_count, format_usage_exact, is_agent_block, is_core_settings_route, is_edit_tool,
-    is_file_change, is_host_tool_announcement, is_open_agent_state, is_process_tool_block,
-    is_thinking_text, marketplace_action, marketplace_entries, model_capability_label,
-    model_discovery_request, model_matches_query, model_provider_action, needs_pending_process,
-    plugin_import_action, process_step_indexes, process_step_label, processing_status,
-    provider_matches_query, recap_copy, resolved_agent_state, run_process_summary,
-    running_tool_summary, session_entry_id, settings_route_model_name, settings_route_title,
-    settings_section_parts, thinking_belongs_to_tool_group, todo_status_mark, tool_action,
-    tool_activity_kind, tool_group_key, tool_group_range, tool_step_detail, turn_process_range,
-    usage_activity_level, usage_heatmap, visible_assistant_content,
+    final_reply_footer_target, format_usage_count, format_usage_exact, is_agent_block,
+    is_core_settings_route, is_edit_tool, is_file_change, is_host_tool_announcement,
+    is_open_agent_state, is_process_tool_block, is_thinking_text, marketplace_action,
+    marketplace_entries, model_capability_label, model_discovery_request, model_matches_query,
+    model_provider_action, needs_pending_process, plugin_import_action, process_step_indexes,
+    process_step_label, processing_status, provider_matches_query, recap_copy,
+    resolved_agent_state, run_process_summary, running_tool_summary, session_entry_id,
+    settings_route_model_name, settings_route_title, settings_section_parts,
+    thinking_belongs_to_tool_group, todo_status_mark, tool_action, tool_activity_kind,
+    tool_group_key, tool_group_range, tool_step_detail, turn_process_range, usage_activity_level,
+    usage_heatmap, visible_assistant_content,
 };
 use crate::state::{Block, SessionSummary};
 
@@ -855,6 +856,48 @@ fn only_thinking_blocks_use_the_thinking_tone() {
         text_phase: Arc::from("commentary"),
         ..Default::default()
     }));
+}
+
+#[test]
+fn reply_footer_only_follows_the_terminal_final_answer() {
+    let intermediate = Block {
+        kind: Arc::from("assistant"),
+        run_id: Arc::from("run"),
+        text_phase: Arc::from("final_answer"),
+        state: Arc::from("completed"),
+        content: "provisional answer".to_string(),
+        ..Default::default()
+    };
+    let blocks = vec![
+        Block {
+            kind: Arc::from("assistant"),
+            run_id: Arc::from("run"),
+            state: Arc::from("completed"),
+            content: "unphased progress".to_string(),
+            ..Default::default()
+        },
+        intermediate,
+        Block {
+            kind: Arc::from("tool"),
+            run_id: Arc::from("run"),
+            state: Arc::from("completed"),
+            ..Default::default()
+        },
+        Block {
+            kind: Arc::from("assistant"),
+            run_id: Arc::from("run"),
+            text_phase: Arc::from("final_answer"),
+            state: Arc::from("complete"),
+            content: "terminal answer".to_string(),
+            ..Default::default()
+        },
+    ];
+    assert!(!final_reply_footer_target(0, &blocks));
+    assert!(!final_reply_footer_target(1, &blocks));
+    assert!(final_reply_footer_target(3, &blocks));
+    let mut streaming = blocks.clone();
+    streaming[3].state = "streaming".into();
+    assert!(!final_reply_footer_target(3, &streaming));
 }
 
 #[test]
@@ -1521,6 +1564,36 @@ fn successful_tools_expose_results_and_edit_diffs() {
     let read_detail = tool_step_detail(&read, std::slice::from_ref(&read)).unwrap();
     assert_eq!(read_detail.content, "README contents");
     assert!(!read_detail.is_diff);
+    let shell = Block {
+        kind: Arc::from("tool"),
+        title: Arc::from("coding.shell"),
+        state: Arc::from("completed"),
+        content: "if err != nil {\n    return err\n}".to_string(),
+        ..Default::default()
+    };
+    let shell_detail = tool_step_detail(&shell, std::slice::from_ref(&shell)).unwrap();
+    assert!(shell_detail.is_code);
+    assert!(!shell_detail.is_diff);
+
+    let running_test = Block {
+        kind: Arc::from("tool"),
+        state: Arc::from("running"),
+        content: "running".to_string(),
+        extra: HashMap::from([
+            ("name".to_string(), json!("coding.go_test")),
+            (
+                "arguments".to_string(),
+                json!({"package": "./internal/agent"}),
+            ),
+        ]),
+        ..Default::default()
+    };
+    assert_eq!(tool_activity_kind(&running_test), ToolActivityKind::Test);
+    assert_eq!(
+        running_tool_summary(&running_test, Locale::resolve("zh-CN")),
+        "运行测试 ./internal/agent"
+    );
+    assert!(tool_step_detail(&running_test, std::slice::from_ref(&running_test)).is_none());
 
     let edit = Block {
         kind: Arc::from("tool"),
@@ -1551,7 +1624,8 @@ fn successful_tools_expose_results_and_edit_diffs() {
         .next()
         .unwrap();
     assert!(renderer.contains("let can_expand = detail.is_some()"));
-    assert!(renderer.contains("format!(\"```diff"));
+    assert!(renderer.contains("fenced_tool_detail(&detail.content, \"diff\")"));
+    assert!(renderer.contains("fenced_tool_detail(&detail.content, \"text\")"));
 }
 
 #[test]

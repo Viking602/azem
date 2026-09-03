@@ -88,7 +88,7 @@ use timeline::process::{
     tool_group_range, tool_step_detail, turn_process_range,
 };
 #[cfg(test)]
-use timeline::{message_time, timeline_message_key};
+use timeline::{final_reply_footer_target, message_time, timeline_message_key};
 
 #[cfg(test)]
 mod tests;

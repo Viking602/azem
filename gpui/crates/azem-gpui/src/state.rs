@@ -1129,6 +1129,9 @@ impl AppState {
         if let Some(index) = self.transcript.index_by_id.get(&id).copied()
             && let Some(block) = blocks.get_mut(index)
         {
+            if !title.is_empty() {
+                block.title = title.into();
+            }
             block.content = event.text;
             block.state = event.state.into();
             block.extra.extend(extra);

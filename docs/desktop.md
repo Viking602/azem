@@ -118,14 +118,17 @@ reasoning prose first and de-duplicated tool rows after it. Starting later text
 or a tool settles prior streaming prose, so one run has only one live activity
 status. Tool labels contain only the action and target; a spinner, check, alert,
 or hollow mark carries state without repeating 「正在运行」 in every row.
-Multiline command arguments reduce to one executable preview. Any tool with
+Multiline command arguments reduce to one executable preview. Command and test
+output render as one safely fenced code block rather than arbitrary Markdown.
+Late start metadata repairs unnamed progress rows; bare transport states such
+as `running` never become user-visible targets or details. Any tool with
 bounded details is a keyboard-focusable disclosure: failures show the recorded
 reason, successful calls show their result, and edits prefer the structured
 compact diff. Clickable tool lines remain visually flat with no full-row hover
-capsule, so their text keeps the native selection treatment. Details remain in
-transcript flow without a nested scroller. Subagent batches keep one click
-disclosure per parent call. Reduced motion suppresses status and disclosure
-animation without hiding state.
+capsule. Details stay in transcript flow without a nested scroller. Copy,
+feedback, and fork controls appear once, after the run's last completed
+`final_answer`, never after intermediate or unphased prose. Reduced motion
+suppresses status and disclosure animation without hiding state.
 
 ## Desktop surfaces
 
