@@ -118,6 +118,9 @@ reasoning prose first and de-duplicated tool rows after it. Starting later text
 or a tool settles prior streaming prose, so one run has only one live activity
 status. Tool labels contain only the action and target; a spinner, check, alert,
 or hollow mark carries state without repeating 「正在运行」 in every row.
+A standalone live thinking row uses the ordinary processing status. Once
+settled it becomes plain 「思考」, without a dedicated icon or a one-off
+completed-thinking duration.
 Multiline command arguments reduce to one executable preview. Command and test
 output render as one safely fenced code block rather than arbitrary Markdown.
 Late start metadata repairs unnamed progress rows; bare transport states such

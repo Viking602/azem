@@ -214,13 +214,7 @@ pub(in crate::surfaces) fn thinking_process_entry(
                 .max_w(px(CHAT_COLUMN_MAX_WIDTH))
                 .flex()
                 .flex_col()
-                .child(
-                    div()
-                        .h(px(36.))
-                        .flex()
-                        .items_center()
-                        .child(activity),
-                ),
+                .child(div().h(px(36.)).flex().items_center().child(activity)),
         )
         .into_any_element()
 }

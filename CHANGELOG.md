@@ -35,6 +35,10 @@
   `running` transport messages stay hidden, and `coding.go_test` rows use a
   localized test action plus their package argument.
 
+- Removed the standalone completed-thinking lightbulb and its one-off elapsed
+  label. Live thinking still uses the ordinary processing status; settled
+  thinking now renders as plain 「思考」 while tool/run summaries retain timing.
+
 - Kept expanded tool steps readable by placing all reasoning prose before tool
   rows and reducing multiline command bodies to a single-line executable
   preview. Shell here-document scripts now fail before execution and direct
