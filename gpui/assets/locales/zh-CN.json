@@ -527,7 +527,6 @@
     "duration.processingSeconds": "正在处理 · {seconds}秒",
     "duration.stoppedMinutes": "你在 {minutes}分钟 {seconds}秒 后停止了",
     "duration.stoppedSeconds": "你在 {seconds}秒 后停止了",
-    "process.thinkingDuration": "思考了 {duration}",
     "process.editedFiles": "编辑了文件",
     "process.readFiles": "读取文件",
     "process.ranCommands": "运行了命令",

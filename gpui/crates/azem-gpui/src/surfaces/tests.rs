@@ -1198,7 +1198,7 @@ fn completed_run_uses_durable_elapsed_time() {
 }
 
 #[test]
-fn active_thinking_uses_one_processing_row() {
+fn thinking_row_has_no_unique_icon_or_completed_duration() {
     let source = crate::SURFACES_SOURCE
         .split("fn thinking_process_entry")
         .nth(1)
@@ -1208,7 +1208,9 @@ fn active_thinking_uses_one_processing_row() {
         .unwrap();
     assert!(source.contains("processing_status(elapsed_ms, locale)"));
     assert_eq!(source.matches("processing_status(").count(), 1);
-    assert!(!source.contains(".when(active"));
+    assert!(source.contains("locale.text(\"ui.thought\")"));
+    assert!(!source.contains("process.thinkingDuration"));
+    assert!(!source.contains("icon(\"lightbulb\""));
 }
 
 #[test]

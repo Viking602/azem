@@ -527,7 +527,6 @@
     "duration.processingSeconds": "Processing · {seconds}s",
     "duration.stoppedMinutes": "You stopped after {minutes}m {seconds}s",
     "duration.stoppedSeconds": "You stopped after {seconds}s",
-    "process.thinkingDuration": "Thought for {duration}",
     "process.editedFiles": "Edited files",
     "process.readFiles": "Read files",
     "process.ranCommands": "Ran commands",
