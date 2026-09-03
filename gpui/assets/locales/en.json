@@ -402,6 +402,7 @@
     "ui.closeSubagentConversation": "Close subagent conversation",
     "ui.team2": "Team",
     "ui.waitingForSubagentOutput": "Waiting for subagent output…",
+    "ui.noSearchMatches": "No matches found.",
     "ui.noTranscriptIsAvailableForThisSubagent": "No transcript is available for this subagent.",
     "ui.noFailureDetails": "No failure details were reported.",
     "ui.system2": "SYSTEM",

@@ -81,7 +81,7 @@ use settings::{
 #[cfg(test)]
 use timeline::process::{
     ToolActivityKind, agent_belongs_to_run, agent_matches_group, completed_tool_group_summary,
-    is_agent_block, is_edit_tool, is_file_change, is_hidden_process_block,
+    is_agent_block, is_edit_tool, is_empty_search_result, is_file_change, is_hidden_process_block,
     is_host_tool_announcement, process_step_indexes, process_step_label, processing_status,
     resolved_agent_state, run_process_summary, running_tool_summary,
     thinking_belongs_to_tool_group, tool_action, tool_activity_kind, tool_group_key,

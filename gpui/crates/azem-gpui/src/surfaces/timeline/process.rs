@@ -1175,13 +1175,21 @@ pub(in crate::surfaces) fn process_step_row(
     let row_id = group_index * 1000 + row_index;
     let active = is_active_process_block(block);
     let failed = block.state.as_ref() == "failed";
-    let detail = tool_step_detail(block, group).or_else(|| {
-        failed.then(|| ToolStepDetail {
-            content: locale.text("ui.noFailureDetails").to_string(),
+    let detail = if is_empty_search_result(block) {
+        Some(ToolStepDetail {
+            content: locale.text("ui.noSearchMatches").to_string(),
             is_diff: false,
             is_code: false,
         })
-    });
+    } else {
+        tool_step_detail(block, group).or_else(|| {
+            failed.then(|| ToolStepDetail {
+                content: locale.text("ui.noFailureDetails").to_string(),
+                is_diff: false,
+                is_code: false,
+            })
+        })
+    };
     let can_expand = detail.is_some();
     let detail_identity = if !block.tool_call_id.is_empty() {
         block.tool_call_id.to_string()
@@ -1445,6 +1453,23 @@ pub(in crate::surfaces) fn tool_step_detail(
         is_diff: false,
         is_code: is_code_output_tool(tool_name(block)),
     })
+}
+
+pub(in crate::surfaces) fn is_empty_search_result(block: &Block) -> bool {
+    if !matches!(block.state.as_ref(), "completed" | "complete")
+        || tool_activity_kind(block) != ToolActivityKind::Search
+    {
+        return false;
+    }
+    if let Some(files) = structured_tool_value(block)
+        .as_ref()
+        .and_then(|value| value.get("files"))
+        .and_then(serde_json::Value::as_array)
+    {
+        return files.is_empty();
+    }
+    let content = block.content.trim();
+    content.is_empty() || content.eq_ignore_ascii_case("no matches found.")
 }
 
 fn fenced_tool_detail(content: &str, language: &str) -> String {

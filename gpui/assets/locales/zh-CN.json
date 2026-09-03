@@ -402,6 +402,7 @@
     "ui.closeSubagentConversation": "关闭子智能体会话",
     "ui.team2": "协作成员",
     "ui.waitingForSubagentOutput": "等待子智能体输出…",
+    "ui.noSearchMatches": "未找到匹配结果。",
     "ui.noTranscriptIsAvailableForThisSubagent": "这名子智能体没有可显示的会话记录。",
     "ui.noFailureDetails": "未报告具体失败原因。",
     "ui.system2": "系统",

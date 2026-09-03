@@ -3,8 +3,9 @@ VERSION ?= dev
 GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || printf unknown)
 BUILD_TIME := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -X 'main.version=$(VERSION)' -X 'main.gitCommit=$(GIT_COMMIT)' -X 'main.buildTime=$(BUILD_TIME)'
+RIPGREP ?= $(shell command -v rg 2>/dev/null)
 
-.PHONY: build azem-eval azem-eval-linux daemon runtime-js gpui gui test test-gpui test-gui sqlc architecture-check contracts contracts-check
+.PHONY: build azem-eval azem-eval-linux bundle-ripgrep daemon runtime-js gpui gui test test-gpui test-gui sqlc architecture-check contracts contracts-check
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/azem
@@ -17,7 +18,13 @@ azem-eval-linux: azem-eval
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o dist/eval/azem-eval-linux-amd64 ./cmd/azem-eval
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o dist/eval/azem-eval-linux-arm64 ./cmd/azem-eval
 
-daemon:
+bundle-ripgrep:
+	@test -n "$(RIPGREP)" || (printf '%s\n' 'ripgrep is required to build Azem distributions' >&2; exit 1)
+	mkdir -p dist/bin
+	cp "$(RIPGREP)" dist/bin/rg
+	chmod 755 dist/bin/rg
+
+daemon: bundle-ripgrep
 	mkdir -p dist/bin
 	GOWORK=off go build -ldflags "$(LDFLAGS)" -o dist/bin/azem-daemon ./cmd/azem-daemon
 
@@ -39,7 +46,9 @@ ifeq ($(shell uname -s),Darwin)
 	cp gpui/THIRD_PARTY_NOTICES dist/Azem-GPUI.app/Contents/Resources/THIRD_PARTY_NOTICES
 	cp gpui/target/release/azem-gpui dist/Azem-GPUI.app/Contents/MacOS/Azem
 	cp dist/bin/azem-daemon dist/Azem-GPUI.app/Contents/MacOS/azem-daemon
+	cp dist/bin/rg dist/Azem-GPUI.app/Contents/MacOS/rg
 	codesign --force --sign - --timestamp=none dist/Azem-GPUI.app/Contents/MacOS/azem-daemon
+	codesign --force --sign - --timestamp=none dist/Azem-GPUI.app/Contents/MacOS/rg
 	codesign --force --sign - --timestamp=none dist/Azem-GPUI.app/Contents/MacOS/Azem
 	codesign --force --sign - --timestamp=none dist/Azem-GPUI.app
 	codesign --verify --deep --strict --verbose=2 dist/Azem-GPUI.app
@@ -47,6 +56,7 @@ else
 	mkdir -p dist/gpui
 	cp gpui/target/release/azem-gpui dist/gpui/azem-gpui
 	cp dist/bin/azem-daemon dist/gpui/azem-daemon
+	cp dist/bin/rg dist/gpui/rg
 	mkdir -p dist/gpui/icons
 	cp gpui/assets/icons/*.svg dist/gpui/icons/
 	cp gpui/THIRD_PARTY_NOTICES dist/gpui/THIRD_PARTY_NOTICES

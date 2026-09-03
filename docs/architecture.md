@@ -339,13 +339,17 @@ an error result. Successful `coding.replace` and `coding.delete_file` calls
 produce the same durable file observations and completed-change projections as
 the corresponding hashline edit and write paths.
 
-`coding.search` enumerates Git-tracked and unignored untracked files with an
-argv-only `git ls-files -co --exclude-standard -z` boundary. Its result limit
-caps matched lines, not files scanned, so dependency/build trees cannot
-truncate source discovery. A matched path is reread through the shared
-`coding.read_file` driver before projection; the returned `¶PATH#TAG` therefore
-names the exact snapshot available to a following Hashline edit. Non-Git
-workspaces use a bounded walker with common dependency/build trees excluded.
+`coding.search` invokes the bundled ripgrep executable once through an
+argv-only `--json` boundary. Literal search uses `--fixed-strings`; regexp and
+glob inputs use ripgrep syntax. The process respects ignore files, includes
+non-ignored hidden files, skips `.git` and files larger than 1 MiB, and is
+cancelled as soon as the global 200-line result cap is reached. Azem sorts the
+bounded matched paths and rereads only those files through the shared
+`coding.read_file` driver; every returned `¶PATH#TAG` names the exact snapshot
+available to a following Hashline edit. There is no workspace walker or
+Go-regexp fallback. Missing bundled ripgrep and invalid expressions fail
+explicitly. Exact internal resource URIs remain in-process because they are not
+filesystem paths.
 For a completed delete, path absence is the captured postcondition rather than
 a read failure. Continuity marks continued absence `verified_unchanged` and a
 recreated path `stale`.

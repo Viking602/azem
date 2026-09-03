@@ -38,6 +38,9 @@ Requirements:
 - Go 1.25.8 or later; the project recommends the Go 1.25.12 toolchain
 - A supported ChatGPT or Grok account or existing credential
 - Git when using subagent worktree isolation
+- ripgrep 15 or later when building a distribution; `make gpui` embeds the
+  selected binary beside the daemon, so packaged desktop users do not need a
+  system installation
 - Rust 1.97.1 when building the native GPUI desktop client; `gpui/rust-toolchain.toml` selects it automatically
 
 ```bash

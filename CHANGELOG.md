@@ -39,6 +39,13 @@
   label. Live thinking still uses the ordinary processing status; settled
   thinking now renders as plain 「思考」 while tool/run summaries retain timing.
 
+- Replaced workspace-wide Go file scanning in `coding.search` with one bounded
+  ripgrep `--json` process. Literal, regexp, path, glob, ignore, hidden-file,
+  1 MiB file, and global 200-line limits are explicit; only matched files enter
+  the Hashline snapshot path. Zero matches return an expandable localized
+  result. GPUI distributions bundle and sign ripgrep beside the daemon, so
+  packaged search does not depend on the user's `PATH` or system installation.
+
 - Kept expanded tool steps readable by placing all reasoning prose before tool
   rows and reducing multiline command bodies to a single-line executable
   preview. Shell here-document scripts now fail before execution and direct

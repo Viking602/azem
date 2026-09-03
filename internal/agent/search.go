@@ -1,14 +1,17 @@
 package agent
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -17,9 +20,9 @@ import (
 )
 
 const (
-	reliableSearchMaxResults    = 200
-	reliableSearchFileListLimit = 100_000
-	reliableSearchGitOutputMax  = 16 << 20
+	reliableSearchMaxResults     = 200
+	reliableSearchJSONLineMax    = 2 << 20
+	reliableSearchMaxFileSizeArg = "1M"
 )
 
 type reliableSearchInput struct {
@@ -32,20 +35,19 @@ type reliableSearchInput struct {
 
 type reliableSearchDriver struct {
 	root      string
-	ws        Workspace
 	read      tool.Driver
 	resources *resource.Router
 }
 
-func newReliableSearchDriver(root string, ws Workspace, read tool.Driver, resources *resource.Router) tool.Driver {
-	return reliableSearchDriver{root: root, ws: ws, read: read, resources: resources}
+func newReliableSearchDriver(root string, read tool.Driver, resources *resource.Router) tool.Driver {
+	return reliableSearchDriver{root: root, read: read, resources: resources}
 }
 
 func (d reliableSearchDriver) Definition() tool.Definition {
 	additional := false
 	return tool.Definition{
 		Name:        ToolSearch,
-		Description: "Search Git-tracked/unignored workspace text or one exact internal resource URI (including ssh://) for a case-sensitive substring or Go regexp. Returns grouped [PATH#TAG] matches; maxResults caps matched lines, not files scanned.",
+		Description: "Search workspace text with ripgrep or one exact internal resource URI (including ssh://). Workspace search is case-sensitive, literal by default, supports ripgrep regex and glob syntax, respects ignore files, and returns grouped [PATH#TAG] matches. maxResults caps matched lines, not files scanned.",
 		InputSchema: tool.Schema{
 			Type: "object",
 			Properties: map[string]tool.Schema{
@@ -69,62 +71,232 @@ func (d reliableSearchDriver) Execute(ctx context.Context, call tool.Call, _ too
 	if strings.TrimSpace(input.Query) == "" {
 		return reliableSearchError(call, "query must not be empty"), nil
 	}
-	var expression *regexp.Regexp
-	if input.Regexp {
-		compiled, err := regexp.Compile(input.Query)
-		if err != nil {
-			return reliableSearchError(call, "invalid regexp: "+err.Error()), nil
-		}
-		expression = compiled
-	}
 	maxResults := input.MaxResults
 	if maxResults <= 0 || maxResults > reliableSearchMaxResults {
 		maxResults = reliableSearchMaxResults
 	}
 	if strings.Contains(input.Path, "://") {
+		var expression *regexp.Regexp
+		if input.Regexp {
+			compiled, err := regexp.Compile(input.Query)
+			if err != nil {
+				return reliableSearchError(call, "invalid regexp: "+err.Error()), nil
+			}
+			expression = compiled
+		}
 		return d.searchInternalResource(ctx, call, input, expression, maxResults), nil
 	}
-	paths, listedTruncated, err := d.searchPaths(ctx, input.Glob)
+	return d.searchWorkspace(ctx, call, input, maxResults)
+}
+
+type ripgrepJSONEvent struct {
+	Type string `json:"type"`
+	Data struct {
+		Path struct {
+			Text string `json:"text"`
+		} `json:"path"`
+		Lines struct {
+			Text string `json:"text"`
+		} `json:"lines"`
+		LineNumber int `json:"line_number"`
+	} `json:"data"`
+}
+
+func (d reliableSearchDriver) searchWorkspace(ctx context.Context, call tool.Call, input reliableSearchInput, maxResults int) (tool.Result, error) {
+	ripgrep, err := resolveRipgrepExecutable()
 	if err != nil {
 		return reliableSearchError(call, err.Error()), nil
 	}
-
-	result := SearchToolResult{Truncated: listedTruncated}
-	total := 0
-	for _, path := range paths {
-		if err := ctx.Err(); err != nil {
-			return tool.Result{}, err
+	target := "."
+	if strings.TrimSpace(input.Path) != "" {
+		_, relative, info, pathErr := secureReadPath(d.root, input.Path)
+		if pathErr != nil {
+			return reliableSearchError(call, pathErr.Error()), nil
 		}
-		candidate, err := d.ws.ReadFile(ctx, ReadFileRequest{Path: path})
-		if err != nil || strings.IndexByte(candidate.Text, 0) >= 0 || !searchTextMatches(candidate.Text, input.Query, expression) {
+		if !info.IsDir() && !info.Mode().IsRegular() {
+			return reliableSearchError(call, "path must be a regular file or directory"), nil
+		}
+		target = filepath.ToSlash(relative)
+		if target == "" {
+			target = "."
+		}
+	}
+	args := []string{
+		"--json",
+		"--line-number",
+		"--color=never",
+		"--no-config",
+		"--no-messages",
+		"--hidden",
+		"--glob",
+		"!.git/**",
+		"--max-filesize",
+		reliableSearchMaxFileSizeArg,
+		"--case-sensitive",
+	}
+	if !input.Regexp {
+		args = append(args, "--fixed-strings")
+	}
+	if glob := strings.TrimSpace(strings.ReplaceAll(input.Glob, "\\", "/")); glob != "" {
+		args = append(args, "--glob", glob)
+	}
+	args = append(args, "--", input.Query, target)
+
+	searchCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	command := exec.CommandContext(searchCtx, ripgrep, args...)
+	command.Dir = d.root
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		return reliableSearchError(call, "open ripgrep output: "+err.Error()), nil
+	}
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	if err := command.Start(); err != nil {
+		return reliableSearchError(call, "start ripgrep: "+err.Error()), nil
+	}
+
+	matchesByPath := make(map[string][]SearchMatch)
+	total := 0
+	truncated := false
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 64<<10), reliableSearchJSONLineMax)
+	for scanner.Scan() {
+		var event ripgrepJSONEvent
+		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+			cancel()
+			_ = command.Wait()
+			return reliableSearchError(call, "decode ripgrep output: "+err.Error()), nil
+		}
+		if event.Type != "match" || event.Data.LineNumber < 1 || event.Data.Path.Text == "" {
 			continue
 		}
+		path, ok := normalizeRipgrepPath(d.root, event.Data.Path.Text)
+		if !ok {
+			continue
+		}
+		line := strings.TrimSuffix(strings.TrimSuffix(event.Data.Lines.Text, "\n"), "\r")
+		matchesByPath[path] = append(matchesByPath[path], SearchMatch{
+			LineNumber: event.Data.LineNumber,
+			Line:       line,
+		})
+		total++
+		if total >= maxResults {
+			truncated = true
+			cancel()
+			break
+		}
+	}
+	scanErr := scanner.Err()
+	waitErr := command.Wait()
+	if ctx.Err() != nil {
+		return tool.Result{}, ctx.Err()
+	}
+	if !truncated && scanErr != nil {
+		return reliableSearchError(call, "read ripgrep output: "+scanErr.Error()), nil
+	}
+	if !truncated && waitErr != nil {
+		if exit, ok := waitErr.(*exec.ExitError); !ok || exit.ExitCode() != 1 {
+			message := strings.TrimSpace(stderr.String())
+			if message == "" {
+				message = waitErr.Error()
+			}
+			return reliableSearchError(call, message), nil
+		}
+	}
+
+	paths := make([]string, 0, len(matchesByPath))
+	for path := range matchesByPath {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	result := SearchToolResult{Truncated: truncated}
+	for _, path := range paths {
 		arguments, _ := json.Marshal(map[string]string{"path": path})
-		readResult, err := d.read.Execute(ctx, tool.Call{ID: call.ID + "-read", Name: ToolReadFile, Arguments: arguments}, nil)
+		readResult, err := d.read.Execute(ctx, tool.Call{
+			ID: call.ID + "-read", Name: ToolReadFile, Arguments: arguments,
+		}, nil)
 		if err != nil {
 			return tool.Result{}, err
 		}
 		if readResult.IsError {
-			continue
+			return reliableSearchError(call, "snapshot "+path+": "+readResult.Content), nil
 		}
 		var read ReadFileToolResult
-		if json.Unmarshal(readResult.Structured, &read) != nil {
-			continue
+		if err := json.Unmarshal(readResult.Structured, &read); err != nil {
+			return reliableSearchError(call, "decode snapshot "+path+": "+err.Error()), nil
 		}
-		matches := searchNumberedContent(read.Content, input.Query, expression, maxResults-total)
-		if len(matches) == 0 {
-			continue
-		}
-		result.Files = append(result.Files, SearchToolFile{Path: read.Path, Tag: read.Tag, Header: "[" + read.Path + "#" + read.Tag + "]", Matches: matches})
-		total += len(matches)
-		if total >= maxResults {
-			result.Truncated = true
-			break
-		}
+		result.Files = append(result.Files, SearchToolFile{
+			Path: read.Path, Tag: read.Tag, Header: "[" + read.Path + "#" + read.Tag + "]",
+			Matches: matchesByPath[path],
+		})
 	}
 	result.Content = renderReliableSearch(result.Files)
 	structured, _ := json.Marshal(result)
-	return tool.Result{ToolCallID: call.ID, Name: call.Name, Content: result.Content, Structured: structured}, nil
+	return tool.Result{
+		ToolCallID: call.ID, Name: call.Name, Content: result.Content, Structured: structured,
+	}, nil
+}
+
+func resolveRipgrepExecutable() (string, error) {
+	name := "rg"
+	if runtime.GOOS == "windows" {
+		name = "rg.exe"
+	}
+	if executable, err := os.Executable(); err == nil {
+		if bundled, ok := bundledRipgrepPath(executable, name); ok {
+			return bundled, nil
+		}
+		if packagedRuntimeRequiresBundledRipgrep(executable) {
+			return "", fmt.Errorf("bundled ripgrep executable is unavailable")
+		}
+	}
+	if path, err := exec.LookPath(name); err == nil {
+		return path, nil
+	}
+	return "", fmt.Errorf("bundled ripgrep executable is unavailable")
+}
+
+func bundledRipgrepPath(executable, name string) (string, bool) {
+	candidate := filepath.Join(filepath.Dir(executable), name)
+	info, err := os.Stat(candidate)
+	if err != nil || !info.Mode().IsRegular() {
+		return "", false
+	}
+	if runtime.GOOS != "windows" && info.Mode()&0o111 == 0 {
+		return "", false
+	}
+	return candidate, true
+}
+
+func packagedRuntimeRequiresBundledRipgrep(executable string) bool {
+	directory := filepath.Dir(executable)
+	if filepath.Base(directory) == "MacOS" &&
+		filepath.Base(filepath.Dir(directory)) == "Contents" {
+		return true
+	}
+	for _, renderer := range []string{"azem-gpui", "azem-gpui.exe"} {
+		if info, err := os.Stat(filepath.Join(directory, renderer)); err == nil &&
+			info.Mode().IsRegular() {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeRipgrepPath(root, path string) (string, bool) {
+	if filepath.IsAbs(path) {
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return "", false
+		}
+		path = relative
+	}
+	path = filepath.ToSlash(filepath.Clean(path))
+	if path == "" || path == "." || path == ".." || strings.HasPrefix(path, "../") {
+		return "", false
+	}
+	return path, true
 }
 
 func (d reliableSearchDriver) searchInternalResource(ctx context.Context, call tool.Call, input reliableSearchInput, expression *regexp.Regexp, maxResults int) tool.Result {
@@ -165,98 +337,10 @@ func (d reliableSearchDriver) searchInternalResource(ctx context.Context, call t
 	return tool.Result{ToolCallID: call.ID, Name: call.Name, Content: output.Content, Structured: structured}
 }
 
-func (d reliableSearchDriver) searchPaths(ctx context.Context, pattern string) ([]string, bool, error) {
-	paths, err := gitSearchPaths(ctx, d.root)
-	truncated := false
-	if err != nil {
-		listed, listErr := d.ws.ListFiles(ctx, ListFilesRequest{
-			Ignore: []string{"node_modules", "*/node_modules", "vendor", "*/vendor", "dist", "*/dist", "build", "*/build"},
-			Limit:  reliableSearchFileListLimit,
-		})
-		if listErr != nil {
-			return nil, false, listErr
-		}
-		paths, truncated = listed.Files, listed.Truncated
-	}
-	pattern = strings.TrimSpace(strings.ReplaceAll(pattern, "\\", "/"))
-	if pattern == "" {
-		return paths, truncated, nil
-	}
-	filtered := make([]string, 0, len(paths))
-	for _, path := range paths {
-		matched, matchErr := filepath.Match(filepath.FromSlash(pattern), filepath.FromSlash(path))
-		if matchErr != nil {
-			return nil, false, fmt.Errorf("invalid glob %q: %w", pattern, matchErr)
-		}
-		if matched {
-			filtered = append(filtered, path)
-		}
-	}
-	return filtered, truncated, nil
-}
-
-func gitSearchPaths(ctx context.Context, root string) ([]string, error) {
-	command := exec.CommandContext(ctx, "git", "-C", root, "ls-files", "-co", "--exclude-standard", "-z", "--")
-	output, err := command.Output()
-	if err != nil {
-		return nil, err
-	}
-	if len(output) > reliableSearchGitOutputMax {
-		return nil, fmt.Errorf("git file list exceeds %d bytes", reliableSearchGitOutputMax)
-	}
-	seen := make(map[string]struct{})
-	paths := make([]string, 0)
-	for _, raw := range strings.Split(string(output), "\x00") {
-		path := filepath.ToSlash(filepath.Clean(raw))
-		if path == "" || path == "." || filepath.IsAbs(path) || path == ".." || strings.HasPrefix(path, "../") {
-			continue
-		}
-		if _, duplicate := seen[path]; duplicate {
-			continue
-		}
-		seen[path] = struct{}{}
-		paths = append(paths, path)
-	}
-	sort.Strings(paths)
-	return paths, nil
-}
-
-func searchTextMatches(text, query string, expression *regexp.Regexp) bool {
-	if expression != nil {
-		return expression.MatchString(text)
-	}
-	return strings.Contains(text, query)
-}
-
-func searchNumberedContent(content, query string, expression *regexp.Regexp, remaining int) []SearchMatch {
-	if remaining <= 0 {
-		return nil
-	}
-	lines := strings.Split(content, "\n")
-	matches := make([]SearchMatch, 0)
-	for _, line := range lines[1:] {
-		separator := strings.IndexByte(line, ':')
-		if separator <= 0 {
-			continue
-		}
-		lineNumber, err := strconv.Atoi(line[:separator])
-		if err != nil {
-			continue
-		}
-		text := line[separator+1:]
-		matched := (expression != nil && expression.MatchString(text)) || (expression == nil && strings.Contains(text, query))
-		if !matched {
-			continue
-		}
-		matches = append(matches, SearchMatch{LineNumber: lineNumber, Line: text})
-		if len(matches) >= remaining {
-			break
-		}
-	}
-	return matches
-}
-
 func renderReliableSearch(files []SearchToolFile) string {
+	if len(files) == 0 {
+		return "No matches found."
+	}
 	var output strings.Builder
 	for index, file := range files {
 		if index > 0 {

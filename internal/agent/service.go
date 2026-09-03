@@ -1846,7 +1846,7 @@ func (s *Service) WorkspaceDrivers(ctx context.Context, root string) ([]tool.Dri
 	if isGitRepo {
 		drivers = append(drivers, gitDiffDriver{root: absoluteRoot})
 	}
-	drivers = append(drivers, newReliableSearchDriver(absoluteRoot, workspace, snapshotDriver, s.resources))
+	drivers = append(drivers, newReliableSearchDriver(absoluteRoot, snapshotDriver, s.resources))
 	drivers = append(drivers, newASTGrepDriver(absoluteRoot, s.ast, snapshotDriver, s.resources))
 	drivers = append(drivers, newGlobDriver(workspace))
 	drivers = append(drivers, newLSPDriver(absoluteRoot, s.lsp, false))

@@ -341,12 +341,12 @@ use super::{
     ToolActivityKind, agent_belongs_to_run, agent_matches_group, animate_submitted_user,
     archived_session_groups, extension_confirmation, extension_items, extension_matches,
     final_reply_footer_target, format_usage_count, format_usage_exact, is_agent_block,
-    is_core_settings_route, is_edit_tool, is_file_change, is_host_tool_announcement,
-    is_open_agent_state, is_process_tool_block, is_thinking_text, marketplace_action,
-    marketplace_entries, model_capability_label, model_discovery_request, model_matches_query,
-    model_provider_action, needs_pending_process, plugin_import_action, process_step_indexes,
-    process_step_label, processing_status, provider_matches_query, recap_copy,
-    resolved_agent_state, run_process_summary, running_tool_summary, session_entry_id,
+    is_core_settings_route, is_edit_tool, is_empty_search_result, is_file_change,
+    is_host_tool_announcement, is_open_agent_state, is_process_tool_block, is_thinking_text,
+    marketplace_action, marketplace_entries, model_capability_label, model_discovery_request,
+    model_matches_query, model_provider_action, needs_pending_process, plugin_import_action,
+    process_step_indexes, process_step_label, processing_status, provider_matches_query,
+    recap_copy, resolved_agent_state, run_process_summary, running_tool_summary, session_entry_id,
     settings_route_model_name, settings_route_title, settings_section_parts,
     thinking_belongs_to_tool_group, todo_status_mark, tool_action, tool_activity_kind,
     tool_group_key, tool_group_range, tool_step_detail, turn_process_range, usage_activity_level,
@@ -1628,6 +1628,27 @@ fn successful_tools_expose_results_and_edit_diffs() {
     assert!(renderer.contains("let can_expand = detail.is_some()"));
     assert!(renderer.contains("fenced_tool_detail(&detail.content, \"diff\")"));
     assert!(renderer.contains("fenced_tool_detail(&detail.content, \"text\")"));
+}
+
+#[test]
+fn empty_search_result_still_has_a_disclosure_detail() {
+    let empty = Block {
+        kind: Arc::from("tool"),
+        title: Arc::from("coding.search"),
+        state: Arc::from("completed"),
+        extra: HashMap::from([("structured".to_string(), json!({"files": []}))]),
+        ..Default::default()
+    };
+    assert!(is_empty_search_result(&empty));
+    let renderer = crate::SURFACES_SOURCE
+        .split("fn process_step_row(")
+        .nth(1)
+        .unwrap()
+        .split("fn process_tool_state_mark")
+        .next()
+        .unwrap();
+    assert!(renderer.contains("locale.text(\"ui.noSearchMatches\")"));
+    assert!(renderer.contains("let can_expand = detail.is_some()"));
 }
 
 #[test]
