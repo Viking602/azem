@@ -66,7 +66,7 @@ func (d replaceDriver) Execute(ctx context.Context, call tool.Call, sink tool.Up
 	if err := json.Unmarshal(call.Arguments, &in); err != nil || strings.TrimSpace(in.Path) == "" || len(in.Edits) == 0 {
 		return replaceError(call, "path and edits are required"), nil
 	}
-	readArgs, _ := json.Marshal(map[string]string{"path": in.Path})
+	readArgs, _ := json.Marshal(map[string]any{"path": in.Path, "startLine": 1})
 	read, err := d.read.Execute(ctx, tool.Call{ID: call.ID + "-read", Name: ToolReadFile, Arguments: readArgs}, nil)
 	if err != nil {
 		return replaceError(call, err.Error()), nil

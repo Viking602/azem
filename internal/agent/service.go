@@ -782,27 +782,24 @@ func (s *Service) ClassifyRunRecovery(ctx context.Context, runID string) (kind s
 	if binding.State == agentruntime.ExecutionBindingPending {
 		return kind, true, nil
 	}
-	execution, err := s.store.DurableBackend().LoadExecution(ctx, durable.ExecutionID(binding.ExecutionID))
+	status, err := peekExecutionStatus(ctx, s.store.DurableBackend(), durable.ExecutionID(binding.ExecutionID))
 	if errors.Is(err, durable.ErrNotFound) {
 		return reconcile("durable execution state is missing")
 	}
 	if err != nil {
 		return kind, false, err
 	}
-	if execution.ID != durable.ExecutionID(binding.ExecutionID) {
-		return reconcile("durable execution identity changed")
-	}
 	switch binding.State {
 	case agentruntime.ExecutionBindingRunning, agentruntime.ExecutionBindingSuspended:
-		if execution.Status != durable.ExecutionStatusRunning && execution.Status != durable.ExecutionStatusSuspended {
+		if status != durable.ExecutionStatusRunning && status != durable.ExecutionStatusSuspended {
 			return reconcile("durable execution state disagrees with the recoverable run")
 		}
 	case agentruntime.ExecutionBindingCompleted:
-		if execution.Status != durable.ExecutionStatusCompleted {
+		if status != durable.ExecutionStatusCompleted {
 			return reconcile("durable terminal state disagrees with the completed binding")
 		}
 	case agentruntime.ExecutionBindingFailed:
-		if execution.Status != durable.ExecutionStatusFailed {
+		if status != durable.ExecutionStatusFailed {
 			return reconcile("durable terminal state disagrees with the failed binding")
 		}
 	case agentruntime.ExecutionBindingCancelled:
@@ -811,6 +808,32 @@ func (s *Service) ClassifyRunRecovery(ctx context.Context, runID string) (kind s
 		return reconcile(fmt.Sprintf("durable execution has unsupported binding state %q", binding.State))
 	}
 	return kind, true, nil
+}
+
+type executionStatusPeeker interface {
+	PeekExecutionStatus(context.Context, durable.ExecutionID) (durable.ExecutionStatus, error)
+}
+
+func peekExecutionStatus(ctx context.Context, backend durable.Backend, executionID durable.ExecutionID) (durable.ExecutionStatus, error) {
+	if peeker, ok := backend.(executionStatusPeeker); ok {
+		return peeker.PeekExecutionStatus(ctx, executionID)
+	}
+	execution, err := backend.LoadExecution(ctx, executionID)
+	if err != nil {
+		return "", err
+	}
+	return execution.Status, nil
+}
+
+type executionStateLoader interface {
+	LoadExecutionState(context.Context, durable.ExecutionID) (durable.Execution, error)
+}
+
+func loadExecutionState(ctx context.Context, backend durable.Backend, executionID durable.ExecutionID) (durable.Execution, error) {
+	if loader, ok := backend.(executionStateLoader); ok {
+		return loader.LoadExecutionState(ctx, executionID)
+	}
+	return backend.LoadExecution(ctx, executionID)
 }
 
 // ResumeChildRun rebuilds an app-owned child execution. A child that has not
@@ -832,7 +855,7 @@ func (s *Service) ResumeChildRun(ctx context.Context, runID string) (*Run, error
 	if binding.State == agentruntime.ExecutionBindingPending {
 		return s.ResumeRun(ctx, runID)
 	}
-	execution, err := s.store.DurableBackend().LoadExecution(ctx, durable.ExecutionID(binding.ExecutionID))
+	execution, err := loadExecutionState(ctx, s.store.DurableBackend(), durable.ExecutionID(binding.ExecutionID))
 	if err != nil {
 		return nil, err
 	}
@@ -877,7 +900,7 @@ func (s *Service) ResumeRunAfterApproval(ctx context.Context, runID string) (*Ru
 	if err != nil {
 		return nil, err
 	}
-	execution, err := s.store.DurableBackend().LoadExecution(ctx, durable.ExecutionID(binding.ExecutionID))
+	execution, err := loadExecutionState(ctx, s.store.DurableBackend(), durable.ExecutionID(binding.ExecutionID))
 	if err != nil {
 		return nil, err
 	}
@@ -916,7 +939,7 @@ func (s *Service) resumeRun(ctx context.Context, runID, operationID string) (*Ru
 		}
 		return resumed, nil
 	}
-	execution, err := s.store.DurableBackend().LoadExecution(ctx, durable.ExecutionID(binding.ExecutionID))
+	execution, err := loadExecutionState(ctx, s.store.DurableBackend(), durable.ExecutionID(binding.ExecutionID))
 	if err != nil {
 		return nil, err
 	}

@@ -8,6 +8,7 @@ package dbgen
 import (
 	"context"
 	"database/sql"
+	"strings"
 )
 
 const advanceCacheEpochCAS = `-- name: AdvanceCacheEpochCAS :execresult
@@ -1108,6 +1109,33 @@ func (q *Queries) GetProjectionHistory(ctx context.Context, sessionID string) ([
 	return model_history, err
 }
 
+const getPromptQueue = `-- name: GetPromptQueue :one
+SELECT revision,state,pause_reason,items_inline,items_digest,updated_at FROM session_prompt_queues WHERE session_id=?
+`
+
+type GetPromptQueueRow struct {
+	Revision    int64  `db:"revision"`
+	State       string `db:"state"`
+	PauseReason string `db:"pause_reason"`
+	ItemsInline []byte `db:"items_inline"`
+	ItemsDigest string `db:"items_digest"`
+	UpdatedAt   int64  `db:"updated_at"`
+}
+
+func (q *Queries) GetPromptQueue(ctx context.Context, sessionID string) (GetPromptQueueRow, error) {
+	row := q.db.QueryRowContext(ctx, getPromptQueue, sessionID)
+	var i GetPromptQueueRow
+	err := row.Scan(
+		&i.Revision,
+		&i.State,
+		&i.PauseReason,
+		&i.ItemsInline,
+		&i.ItemsDigest,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getRecap = `-- name: GetRecap :one
 SELECT session_id,anchor,covered_boundary,revision,goal,summary,open_items,updated_at FROM recaps WHERE session_id=? AND anchor=?
 `
@@ -1649,6 +1677,32 @@ func (q *Queries) InsertMemory(ctx context.Context, arg InsertMemoryParams) erro
 		arg.UpdatedAt,
 	)
 	return err
+}
+
+const insertPromptQueue = `-- name: InsertPromptQueue :execresult
+INSERT INTO session_prompt_queues(session_id,revision,state,pause_reason,items_inline,items_digest,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(session_id) DO NOTHING
+`
+
+type InsertPromptQueueParams struct {
+	SessionID   string `db:"session_id"`
+	Revision    int64  `db:"revision"`
+	State       string `db:"state"`
+	PauseReason string `db:"pause_reason"`
+	ItemsInline []byte `db:"items_inline"`
+	ItemsDigest string `db:"items_digest"`
+	UpdatedAt   int64  `db:"updated_at"`
+}
+
+func (q *Queries) InsertPromptQueue(ctx context.Context, arg InsertPromptQueueParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, insertPromptQueue,
+		arg.SessionID,
+		arg.Revision,
+		arg.State,
+		arg.PauseReason,
+		arg.ItemsInline,
+		arg.ItemsDigest,
+		arg.UpdatedAt,
+	)
 }
 
 const insertRecord = `-- name: InsertRecord :exec
@@ -2384,6 +2438,33 @@ func (q *Queries) ListMemoriesByContent(ctx context.Context, arg ListMemoriesByC
 	return items, nil
 }
 
+const listPromptQueueSessionIDs = `-- name: ListPromptQueueSessionIDs :many
+SELECT session_id FROM session_prompt_queues ORDER BY session_id
+`
+
+func (q *Queries) ListPromptQueueSessionIDs(ctx context.Context) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, listPromptQueueSessionIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var session_id string
+		if err := rows.Scan(&session_id); err != nil {
+			return nil, err
+		}
+		items = append(items, session_id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listRecentMemories = `-- name: ListRecentMemories :many
 SELECT id,content,anchor,session_id,provenance,status,importance,created_at,updated_at FROM memories WHERE anchor=? AND status='active' ORDER BY importance DESC,updated_at DESC LIMIT ?
 `
@@ -2676,6 +2757,81 @@ func (q *Queries) ListSessionToolRecords(ctx context.Context, sessionID string) 
 	var items []ListSessionToolRecordsRow
 	for rows.Next() {
 		var i ListSessionToolRecordsRow
+		if err := rows.Scan(
+			&i.RunID,
+			&i.ToolCallID,
+			&i.AnchorSequence,
+			&i.Name,
+			&i.Arguments,
+			&i.State,
+			&i.Content,
+			&i.Structured,
+			&i.ArtifactID,
+			&i.Observations,
+			&i.StartedAt,
+			&i.CompletedAt,
+			&i.ContentSha256,
+			&i.StructuredSha256,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listSessionToolRecordsForRuns = `-- name: ListSessionToolRecordsForRuns :many
+SELECT run_id,tool_call_id,anchor_sequence,name,arguments,state,content,structured,artifact_id,observations,started_at,completed_at,content_sha256,structured_sha256 FROM session_tool_records WHERE session_id=? AND run_id IN (/*SLICE:run_ids*/?) ORDER BY started_at,run_id,tool_call_id
+`
+
+type ListSessionToolRecordsForRunsParams struct {
+	SessionID string   `db:"session_id"`
+	RunIds    []string `db:"run_ids"`
+}
+
+type ListSessionToolRecordsForRunsRow struct {
+	RunID            string `db:"run_id"`
+	ToolCallID       string `db:"tool_call_id"`
+	AnchorSequence   int64  `db:"anchor_sequence"`
+	Name             string `db:"name"`
+	Arguments        []byte `db:"arguments"`
+	State            string `db:"state"`
+	Content          string `db:"content"`
+	Structured       []byte `db:"structured"`
+	ArtifactID       string `db:"artifact_id"`
+	Observations     []byte `db:"observations"`
+	StartedAt        int64  `db:"started_at"`
+	CompletedAt      int64  `db:"completed_at"`
+	ContentSha256    string `db:"content_sha256"`
+	StructuredSha256 string `db:"structured_sha256"`
+}
+
+func (q *Queries) ListSessionToolRecordsForRuns(ctx context.Context, arg ListSessionToolRecordsForRunsParams) ([]ListSessionToolRecordsForRunsRow, error) {
+	query := listSessionToolRecordsForRuns
+	var queryParams []interface{}
+	queryParams = append(queryParams, arg.SessionID)
+	if len(arg.RunIds) > 0 {
+		for _, v := range arg.RunIds {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:run_ids*/?", strings.Repeat(",?", len(arg.RunIds))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:run_ids*/?", "NULL", 1)
+	}
+	rows, err := q.db.QueryContext(ctx, query, queryParams...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListSessionToolRecordsForRunsRow
+	for rows.Next() {
+		var i ListSessionToolRecordsForRunsRow
 		if err := rows.Scan(
 			&i.RunID,
 			&i.ToolCallID,
@@ -3364,6 +3520,34 @@ func (q *Queries) UpdateProjectionRunAfterAssistantMutation(ctx context.Context,
 		arg.SessionID,
 	)
 	return err
+}
+
+const updatePromptQueueCAS = `-- name: UpdatePromptQueueCAS :execresult
+UPDATE session_prompt_queues SET revision=?1,state=?2,pause_reason=?3,items_inline=?4,items_digest=?5,updated_at=?6 WHERE session_id=?7 AND revision=?8
+`
+
+type UpdatePromptQueueCASParams struct {
+	NextRevision     int64  `db:"next_revision"`
+	State            string `db:"state"`
+	PauseReason      string `db:"pause_reason"`
+	ItemsInline      []byte `db:"items_inline"`
+	ItemsDigest      string `db:"items_digest"`
+	UpdatedAt        int64  `db:"updated_at"`
+	SessionID        string `db:"session_id"`
+	ExpectedRevision int64  `db:"expected_revision"`
+}
+
+func (q *Queries) UpdatePromptQueueCAS(ctx context.Context, arg UpdatePromptQueueCASParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, updatePromptQueueCAS,
+		arg.NextRevision,
+		arg.State,
+		arg.PauseReason,
+		arg.ItemsInline,
+		arg.ItemsDigest,
+		arg.UpdatedAt,
+		arg.SessionID,
+		arg.ExpectedRevision,
+	)
 }
 
 const updateResourceClaimCAS = `-- name: UpdateResourceClaimCAS :execresult

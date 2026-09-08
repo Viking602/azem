@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,7 +24,9 @@ const (
 	DefaultChatGPTCatalogURL     = "https://chatgpt.com/backend-api/codex/models"
 	DefaultGrokCatalogURL        = "https://cli-chat-proxy.grok.com/v1/models"
 	DefaultGrokLanguageModelsURL = "https://cli-chat-proxy.grok.com/v1/language-models"
-	DefaultChatGPTClientVersion  = "0.144.3"
+	DefaultChatGPTClientVersion  = "0.153.4"
+	DefaultChatGPTUserAgent      = "codex_cli_rs/" + DefaultChatGPTClientVersion
+	chatgptCatalogBodyLimit      = 32 << 20
 )
 
 type Model struct {
@@ -190,7 +193,7 @@ func (s *Service) List(ctx context.Context, provider string, accountID string, f
 	if found && !force && time.Now().Before(cached.ExpiresAt) {
 		return cached, nil
 	}
-	fresh, err := s.fetch(ctx, provider, accountID, cached)
+	fresh, err := s.fetch(ctx, provider, accountID, cached, force)
 	if err != nil {
 		if found {
 			cached.Stale = true
@@ -215,7 +218,7 @@ func (s *Service) ValidateSelection(ctx context.Context, provider string, accoun
 	return fmt.Errorf("model %q is not present in the %s catalog for account %s", modelID, provider, accountID)
 }
 
-func (s *Service) fetch(ctx context.Context, provider string, accountID string, cached Result) (Result, error) {
+func (s *Service) fetch(ctx context.Context, provider string, accountID string, cached Result, force bool) (Result, error) {
 	if fetch := s.Fetchers[provider]; fetch != nil {
 		models, err := fetch(ctx, accountID)
 		if err != nil {
@@ -251,7 +254,7 @@ func (s *Service) fetch(ctx context.Context, provider string, accountID string, 
 	endpoints := append([]string{primary}, s.AdditionalEndpoints[provider]...)
 	models := make([]Model, 0, 16)
 	etag := ""
-	if provider == "chatgpt" && len(cached.Models) > 0 {
+	if provider == "chatgpt" && len(cached.Models) > 0 && !force {
 		etag = s.cachedETag(ctx, provider, accountID)
 	}
 	for sourceIndex, endpoint := range endpoints {
@@ -265,10 +268,11 @@ func (s *Service) fetch(ctx context.Context, provider string, accountID string, 
 				resty.MethodGet,
 				currentURL,
 				func(request *resty.Request) {
-					request.SetResponseBodyLimit(4 << 20)
+					request.SetResponseBodyLimit(chatgptCatalogBodyLimit)
 					if provider == "chatgpt" {
 						request.SetHeader("originator", "codex_cli_rs")
-						request.SetHeader("User-Agent", "azem/1")
+						request.SetHeader("Version", DefaultChatGPTClientVersion)
+						request.SetHeader("User-Agent", DefaultChatGPTUserAgent)
 					}
 					if provider == "grok" {
 						request.SetHeader("X-XAI-Token-Auth", "xai-grok-cli")
@@ -355,9 +359,19 @@ func catalogHTTPError(provider string, status int, body []byte) error {
 type reasoningLevels []string
 
 func (levels *reasoningLevels) UnmarshalJSON(data []byte) error {
+	if len(data) == 0 || string(data) == "null" {
+		*levels = nil
+		return nil
+	}
 	var values []json.RawMessage
 	if err := json.Unmarshal(data, &values); err != nil {
-		return err
+		var name string
+		if json.Unmarshal(data, &name) == nil && name != "" {
+			*levels = reasoningLevels{name}
+			return nil
+		}
+		*levels = nil
+		return nil
 	}
 	result := make([]string, 0, len(values))
 	for _, value := range values {
@@ -369,14 +383,34 @@ func (levels *reasoningLevels) UnmarshalJSON(data []byte) error {
 		var preset struct {
 			Effort string `json:"effort"`
 		}
-		if err := json.Unmarshal(value, &preset); err != nil {
-			return err
-		}
-		if preset.Effort != "" {
+		if json.Unmarshal(value, &preset) == nil && preset.Effort != "" {
 			result = append(result, preset.Effort)
 		}
 	}
 	*levels = result
+	return nil
+}
+
+type defaultReasoning string
+
+func (value *defaultReasoning) UnmarshalJSON(data []byte) error {
+	if len(data) == 0 || string(data) == "null" {
+		*value = ""
+		return nil
+	}
+	var name string
+	if json.Unmarshal(data, &name) == nil {
+		*value = defaultReasoning(name)
+		return nil
+	}
+	var preset struct {
+		Effort string `json:"effort"`
+	}
+	if json.Unmarshal(data, &preset) == nil {
+		*value = defaultReasoning(preset.Effort)
+		return nil
+	}
+	*value = ""
 	return nil
 }
 
@@ -415,60 +449,7 @@ func (pricing *catalogPricing) UnmarshalJSON(data []byte) error {
 func decode(provider string, data []byte) ([]Model, bool, string, error) {
 	switch provider {
 	case "chatgpt":
-		var payload struct {
-			Models []struct {
-				ID                   string          `json:"id"`
-				Slug                 string          `json:"slug"`
-				Name                 string          `json:"name"`
-				Title                string          `json:"title"`
-				DisplayName          string          `json:"display_name"`
-				Description          string          `json:"description"`
-				ContextWindow        int             `json:"context_window"`
-				DefaultReasoning     string          `json:"default_reasoning_level"`
-				ReasoningLevels      reasoningLevels `json:"supported_reasoning_levels"`
-				SupportsTools        *bool           `json:"supports_tools"`
-				SupportsParallel     *bool           `json:"supports_parallel_tool_calls"`
-				InputModalities      []string        `json:"input_modalities"`
-				ServiceTiers         []ServiceTier   `json:"service_tiers"`
-				AdditionalSpeedTiers []string        `json:"additional_speed_tiers"`
-			} `json:"models"`
-			Data    json.RawMessage `json:"data"`
-			HasMore bool            `json:"has_more"`
-			After   string          `json:"after"`
-			LastID  string          `json:"last_id"`
-		}
-		if err := json.Unmarshal(data, &payload); err != nil {
-			return nil, false, "", err
-		}
-		if len(payload.Models) == 0 && len(payload.Data) > 0 {
-			_ = json.Unmarshal(payload.Data, &payload.Models)
-		}
-		models := make([]Model, 0, len(payload.Models))
-		for _, item := range payload.Models {
-			id := first(item.ID, item.Slug)
-			if id == "" {
-				continue
-			}
-			aliases := make([]string, 0, 1)
-			if item.ID != "" && item.ID != id {
-				aliases = append(aliases, item.ID)
-			}
-			if item.Slug != "" && item.Slug != id {
-				aliases = append(aliases, item.Slug)
-			}
-			model := Model{
-				ID: id, Name: first(item.Name, item.DisplayName, item.Title, id),
-				Aliases: aliases, Description: item.Description, ContextWindow: item.ContextWindow,
-				ReasoningLevels: []string(item.ReasoningLevels), DefaultReasoning: item.DefaultReasoning,
-				SupportsReasoning: len(item.ReasoningLevels) > 0 || item.DefaultReasoning != "",
-				InputModalities:   item.InputModalities, ServiceTiers: item.ServiceTiers,
-				AdditionalSpeedTiers: item.AdditionalSpeedTiers,
-			}
-			model.SupportsTools = item.SupportsTools == nil || *item.SupportsTools
-			model.SupportsParallel = item.SupportsParallel != nil && *item.SupportsParallel
-			models = append(models, model)
-		}
-		return models, payload.HasMore, first(payload.After, payload.LastID), nil
+		return decodeChatGPTCatalog(data)
 	case "grok":
 		var payload struct {
 			Data    []grokCatalogModel `json:"data"`
@@ -510,6 +491,181 @@ func decode(provider string, data []byte) ([]Model, bool, string, error) {
 	default:
 		return nil, false, "", fmt.Errorf("unsupported provider %q", provider)
 	}
+}
+
+func decodeChatGPTCatalog(data []byte) ([]Model, bool, string, error) {
+	var payload struct {
+		Models  json.RawMessage `json:"models"`
+		Data    json.RawMessage `json:"data"`
+		HasMore bool            `json:"has_more"`
+		After   string          `json:"after"`
+		LastID  string          `json:"last_id"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil, false, "", err
+	}
+	rawModels := payload.Models
+	hasMore := payload.HasMore
+	after := first(payload.After, payload.LastID)
+	if len(rawModels) == 0 && len(payload.Data) > 0 {
+		if jsonLooksLikeArray(payload.Data) {
+			rawModels = payload.Data
+		} else {
+			var wrapped struct {
+				Models  json.RawMessage `json:"models"`
+				Items   json.RawMessage `json:"items"`
+				HasMore bool            `json:"has_more"`
+				After   string          `json:"after"`
+				LastID  string          `json:"last_id"`
+			}
+			if json.Unmarshal(payload.Data, &wrapped) == nil {
+				rawModels = wrapped.Models
+				if len(rawModels) == 0 {
+					rawModels = wrapped.Items
+				}
+				hasMore = hasMore || wrapped.HasMore
+				after = first(after, wrapped.After, wrapped.LastID)
+			}
+		}
+	}
+	var items []json.RawMessage
+	if len(rawModels) > 0 {
+		if err := json.Unmarshal(rawModels, &items); err != nil {
+			return nil, false, "", err
+		}
+	}
+	models := make([]Model, 0, len(items))
+	for _, item := range items {
+		model, ok := decodeChatGPTModel(item)
+		if ok {
+			models = append(models, model)
+		}
+	}
+	return models, hasMore, after, nil
+}
+
+func decodeChatGPTModel(data []byte) (Model, bool) {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(data, &fields) != nil {
+		return Model{}, false
+	}
+	id := first(jsonString(fields["slug"]), jsonString(fields["id"]))
+	if id == "" {
+		return Model{}, false
+	}
+	aliases := make([]string, 0, 1)
+	if rawID := jsonString(fields["id"]); rawID != "" && rawID != id {
+		aliases = append(aliases, rawID)
+	}
+	if slug := jsonString(fields["slug"]); slug != "" && slug != id {
+		aliases = append(aliases, slug)
+	}
+	var defaultReasoning defaultReasoning
+	_ = defaultReasoning.UnmarshalJSON(fields["default_reasoning_level"])
+	var levels reasoningLevels
+	_ = levels.UnmarshalJSON(fields["supported_reasoning_levels"])
+	model := Model{
+		ID: id, Name: first(jsonString(fields["name"]), jsonString(fields["display_name"]), jsonString(fields["title"]), id),
+		Aliases: aliases, Description: jsonString(fields["description"]), ContextWindow: flexibleInt(fields["context_window"]),
+		ReasoningLevels: []string(levels), DefaultReasoning: string(defaultReasoning),
+		SupportsReasoning: len(levels) > 0 || string(defaultReasoning) != "",
+		InputModalities:   jsonStringSlice(fields["input_modalities"]), ServiceTiers: decodeServiceTiers(fields["service_tiers"]),
+		AdditionalSpeedTiers: jsonStringSlice(fields["additional_speed_tiers"]),
+		SupportsTools:        jsonBool(fields["supports_tools"], true),
+		SupportsParallel:     jsonBool(fields["supports_parallel_tool_calls"], false),
+	}
+	return model, true
+}
+
+func jsonString(data json.RawMessage) string {
+	if len(data) == 0 || string(data) == "null" {
+		return ""
+	}
+	var value string
+	if json.Unmarshal(data, &value) == nil {
+		return value
+	}
+	return ""
+}
+
+func jsonStringSlice(data json.RawMessage) []string {
+	if len(data) == 0 || string(data) == "null" {
+		return nil
+	}
+	var values []json.RawMessage
+	if json.Unmarshal(data, &values) != nil {
+		if value := jsonString(data); value != "" {
+			return []string{value}
+		}
+		return nil
+	}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if name := jsonString(value); name != "" {
+			result = append(result, name)
+			continue
+		}
+		var object struct {
+			ID     string `json:"id"`
+			Effort string `json:"effort"`
+		}
+		if json.Unmarshal(value, &object) != nil {
+			continue
+		}
+		if name := first(object.ID, object.Effort); name != "" {
+			result = append(result, name)
+		}
+	}
+	return result
+}
+
+func jsonBool(data json.RawMessage, fallback bool) bool {
+	if len(data) == 0 || string(data) == "null" {
+		return fallback
+	}
+	var value bool
+	if json.Unmarshal(data, &value) == nil {
+		return value
+	}
+	return fallback
+}
+
+func jsonLooksLikeArray(data json.RawMessage) bool {
+	for _, b := range data {
+		switch b {
+		case ' ', '\n', '\r', '\t':
+			continue
+		}
+		return b == '['
+	}
+	return false
+}
+
+func flexibleInt(data json.RawMessage) int {
+	if len(data) == 0 || string(data) == "null" {
+		return 0
+	}
+	var n int
+	if json.Unmarshal(data, &n) == nil {
+		return n
+	}
+	var s string
+	if json.Unmarshal(data, &s) == nil {
+		parsed, _ := strconv.Atoi(strings.TrimSpace(s))
+		return parsed
+	}
+	return 0
+}
+
+func decodeServiceTiers(data json.RawMessage) []ServiceTier {
+	if len(data) == 0 || string(data) == "null" {
+		return nil
+	}
+	var tiers []ServiceTier
+	if json.Unmarshal(data, &tiers) != nil {
+		return nil
+	}
+	return tiers
 }
 
 func (s *Service) load(ctx context.Context, provider string, accountID string) (Result, bool, error) {

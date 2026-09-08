@@ -29,13 +29,7 @@ func (m *AppModel) attachImagePath(path string) error {
 	if len(m.pendingImages) >= maxPendingImages {
 		return fmt.Errorf("%s", m.tr("attachment.limit", map[string]string{"count": fmt.Sprint(maxPendingImages)}))
 	}
-	importer, ok := m.runtime.(interface {
-		ImportImage(string, string) (session.Attachment, error)
-	})
-	if !ok {
-		return fmt.Errorf("%s", m.tr("attachment.unavailable"))
-	}
-	att, err := importer.ImportImage(m.sessionID, path)
+	att, err := m.runtime.ImportImage(m.sessionID, path)
 	if err != nil {
 		return err
 	}
@@ -46,13 +40,7 @@ func (m *AppModel) attachImageBytes(name, mimeType string, data []byte) error {
 	if len(m.pendingImages) >= maxPendingImages {
 		return fmt.Errorf("%s", m.tr("attachment.limit", map[string]string{"count": fmt.Sprint(maxPendingImages)}))
 	}
-	importer, ok := m.runtime.(interface {
-		ImportImageBytes(string, string, string, []byte) (session.Attachment, error)
-	})
-	if !ok {
-		return fmt.Errorf("%s", m.tr("attachment.unavailable"))
-	}
-	att, err := importer.ImportImageBytes(m.sessionID, name, mimeType, data)
+	att, err := m.runtime.ImportImageBytes(m.sessionID, name, mimeType, data)
 	if err != nil {
 		return err
 	}
@@ -90,14 +78,8 @@ func pasteClipboardImage(runtime Runtime, sessionID, unavailable string) tea.Cmd
 		if len(data) == 0 {
 			return clipboardImageResultMsg{empty: true}
 		}
-		importer, ok := runtime.(interface {
-			ImportImageBytes(string, string, string, []byte) (session.Attachment, error)
-		})
-		if !ok {
-			return clipboardImageResultMsg{err: fmt.Errorf("%s", unavailable)}
-		}
 		name := fmt.Sprintf("clipboard-%s%s", time.Now().Format("150405"), extForMIME(mimeType))
-		att, err := importer.ImportImageBytes(sessionID, name, mimeType, data)
+		att, err := runtime.ImportImageBytes(sessionID, name, mimeType, data)
 		if err != nil {
 			return clipboardImageResultMsg{err: err}
 		}

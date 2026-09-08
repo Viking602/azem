@@ -231,23 +231,27 @@ func (s *Service) refreshSubscriptionCatalog(ctx context.Context, providerID str
 	if s.catalog == nil || s.authentication == nil {
 		return fmt.Errorf("subscription catalog is unavailable")
 	}
-	accounts, err := s.authentication.Accounts(ctx, providerID)
-	if err != nil {
-		return err
-	}
-	accountID := ""
-	for _, account := range accounts {
-		if account.Status == "active" {
-			accountID = account.ID
-			break
-		}
-	}
-	if accountID == "" {
+	account, ok := s.activeSubscriptionAccount(ctx, providerID)
+	if !ok {
 		return fmt.Errorf("%s is not signed in", providerID)
 	}
+	if err := s.refreshOneSubscriptionCatalog(ctx, providerID, account.ID); err != nil {
+		return err
+	}
+	return s.emitUpdatedModelProviders(ctx)
+}
+
+func (s *Service) refreshOneSubscriptionCatalog(ctx context.Context, providerID, accountID string) error {
 	models, err := s.catalog.List(ctx, providerID, accountID, true)
 	if err != nil {
 		return err
+	}
+	if models.Stale {
+		warning := strings.TrimSpace(models.Warning)
+		if warning == "" {
+			warning = providerID + " catalog refresh did not replace the cached models"
+		}
+		return fmt.Errorf("%s", warning)
 	}
 	models = s.catalog.EnrichWithModelsDev(ctx, models)
 	models.Models = s.catalogModelsWithAvailability(providerID, models.Models)
@@ -255,13 +259,20 @@ func (s *Service) refreshSubscriptionCatalog(ctx context.Context, providerID str
 	if err != nil {
 		return err
 	}
-	state := "fresh"
-	if models.Stale {
-		state = "stale"
-	}
-	s.emit(ctx, Event{Kind: EventModelCatalog, State: state, Text: models.Warning, Data: map[string]string{
+	s.emit(ctx, Event{Kind: EventModelCatalog, State: "fresh", Text: models.Warning, Data: map[string]string{
 		"provider": providerID, "accountID": accountID, "models": string(encoded),
 	}})
+	return nil
+}
+
+func (s *Service) emitUpdatedModelProviders(ctx context.Context) error {
+	entries, err := s.modelProviderEntries(ctx)
+	if err != nil {
+		return err
+	}
+	s.applySubscriptionQuotas(entries)
+	s.rememberModelProviderEntries(entries)
+	s.emit(ctx, Event{Kind: EventModelProviders, State: "catalog_updated", ModelProviders: entries})
 	return nil
 }
 
@@ -274,6 +285,7 @@ func (s *Service) emitModelProviders(ctx context.Context, state string) error {
 		return err
 	}
 	s.applySubscriptionQuotas(entries)
+	s.rememberModelProviderEntries(entries)
 	s.emit(ctx, Event{Kind: EventModelProviders, State: state, ModelProviders: entries})
 	for _, entry := range entries {
 		if entry.Enabled && !entry.Subscription {
@@ -357,34 +369,15 @@ func (s *Service) refreshSubscriptionCatalogs(targets []ModelProviderEntry) {
 	}
 	changed := false
 	for _, target := range targets {
-		models, err := s.catalog.List(ctx, target.ID, target.AccountID, true)
-		if err != nil {
+		if err := s.refreshOneSubscriptionCatalog(ctx, target.ID, target.AccountID); err != nil {
 			continue
 		}
-		models = s.catalog.EnrichWithModelsDev(ctx, models)
-		models.Models = s.catalogModelsWithAvailability(target.ID, models.Models)
-		encoded, encodeErr := json.Marshal(models.Models)
-		if encodeErr != nil {
-			continue
-		}
-		state := "fresh"
-		if models.Stale {
-			state = "stale"
-		}
-		s.emit(ctx, Event{Kind: EventModelCatalog, State: state, Text: models.Warning, Data: map[string]string{
-			"provider": target.ID, "accountID": target.AccountID, "models": string(encoded),
-		}})
 		changed = true
 	}
 	if !changed {
 		return
 	}
-	entries, err := s.modelProviderEntries(ctx)
-	if err != nil {
-		return
-	}
-	s.applySubscriptionQuotas(entries)
-	s.emit(ctx, Event{Kind: EventModelProviders, State: "catalog_updated", ModelProviders: entries})
+	_ = s.emitUpdatedModelProviders(ctx)
 }
 
 func (s *Service) scheduleSubscriptionQuotaRefresh(entries []ModelProviderEntry) {
@@ -457,9 +450,14 @@ func (s *Service) loadSubscriptionQuota(ctx context.Context, providerID, account
 }
 
 func (s *Service) emitSubscriptionQuotaState(ctx context.Context, target ModelProviderEntry, state string) bool {
-	entries, err := s.modelProviderEntries(ctx)
-	if err != nil {
-		return false
+	entries := s.clonedModelProviderEntries()
+	if len(entries) == 0 {
+		listed, err := s.modelProviderEntries(ctx)
+		if err != nil {
+			return false
+		}
+		s.rememberModelProviderEntries(listed)
+		entries = listed
 	}
 	found := false
 	for index := range entries {
@@ -474,6 +472,37 @@ func (s *Service) emitSubscriptionQuotaState(ctx context.Context, target ModelPr
 	s.applySubscriptionQuotas(entries)
 	s.emit(ctx, Event{Kind: EventModelProviders, State: state, ModelProviders: entries})
 	return true
+}
+
+func (s *Service) rememberModelProviderEntries(entries []ModelProviderEntry) {
+	if s == nil {
+		return
+	}
+	s.quotaMu.Lock()
+	defer s.quotaMu.Unlock()
+	s.modelProviderSnapshot = cloneModelProviderEntries(entries)
+}
+
+func (s *Service) clonedModelProviderEntries() []ModelProviderEntry {
+	if s == nil {
+		return nil
+	}
+	s.quotaMu.Lock()
+	defer s.quotaMu.Unlock()
+	return cloneModelProviderEntries(s.modelProviderSnapshot)
+}
+
+func cloneModelProviderEntries(entries []ModelProviderEntry) []ModelProviderEntry {
+	if len(entries) == 0 {
+		return nil
+	}
+	cloned := make([]ModelProviderEntry, len(entries))
+	for index, entry := range entries {
+		entry.Models = cloneLLMuxModels(entry.Models)
+		entry.QuotaBreakdown = append([]ModelProviderQuotaBreakdown(nil), entry.QuotaBreakdown...)
+		cloned[index] = entry
+	}
+	return cloned
 }
 
 func (s *Service) markSubscriptionQuotaRefreshing(providerID, accountID string) bool {

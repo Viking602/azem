@@ -206,6 +206,10 @@ func ParseCompactEditOutput(output string) []FileChange {
 			inDiff = true
 			continue
 		}
+		if line == "--- current source ---" {
+			inDiff = false
+			continue
+		}
 		if inDiff {
 			diffLines = append(diffLines, line)
 		}

@@ -89,6 +89,7 @@ func referencedBlobs(ctx context.Context, db *sql.DB) (map[string]struct{}, erro
 		UNION SELECT structured_sha256 FROM session_tool_records WHERE structured_sha256<>''
 		UNION SELECT transcript_sha256 FROM subagent_runs WHERE transcript_sha256<>''
 		UNION SELECT output_sha256 FROM subagent_runs WHERE output_sha256<>''
+		UNION SELECT items_digest FROM session_prompt_queues WHERE items_digest<>''
 	`)
 	if err != nil {
 		return nil, err

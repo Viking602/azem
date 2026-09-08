@@ -88,7 +88,7 @@ shutdown, or an optional configured `idle_timeout`. Provider context windows
 still require deterministic archive compaction, but that is not a cumulative
 task-size ceiling and does not depend on the semantic-index model.
 
-## OMP-compatible modes and extension host
+## Modes and extension host
 
 ```yaml
 ttsr:
@@ -393,10 +393,12 @@ API keys are resolved in this order:
 2. The environment variable declared by the llmux provider profile.
 3. No key, only for profiles that explicitly permit anonymous local access.
 
-The UI sends a new API key only in the typed provider update or model-discovery
-action. Discovery can use that pending value without storing it. Backend events
-return `CredentialConfigured` and `CredentialSource`, never secret material.
-An empty API-key field preserves and reuses the existing credential.
+Desktop Settings sends a new API key only in the typed provider update or
+model-discovery action. Discovery can use that pending value without storing
+it. Backend events return `CredentialConfigured` and `CredentialSource`, never
+secret material. TUI and GPUI consume those same daemon events and
+the same account-scoped catalogs; none keeps a client-local credential copy. An
+empty API-key field preserves and reuses the existing credential.
 
 OpenAI/ChatGPT, Grok, and Cursor subscription entries reuse the existing
 credential service and live subscription catalogs. They do not accept an API
@@ -418,6 +420,13 @@ settings page. Disabled subscription IDs persist in
 `providers.cursor.disabled_models` and follow the same picker/runtime rules as
 llmux models.
 
+A successful Grok catalog refresh treats the account's combined model API
+response as complete. Settings and runtime retain only returned chat-capable
+IDs; the refresh transaction removes previously cached IDs that the API omits.
+Azem does not merge a curated Grok list. Network/authentication/decode failure
+may show the last successful account catalog only with an explicit stale
+warning.
+
 ### Auth broker
 
 ```yaml
@@ -432,7 +441,7 @@ auth:
 
 `auth.broker.url` requires HTTPS except for loopback HTTP. The token is omitted
 from runtime JSON/events and may also come from `AZEM_AUTH_BROKER_TOKEN` or its
-OMP-compatible alias `OMP_AUTH_BROKER_TOKEN`. Relative cache/pool paths resolve
+legacy alias `OMP_AUTH_BROKER_TOKEN`. Relative cache/pool paths resolve
 from the config directory. The encrypted snapshot TTL defaults to `1h`; zero
 forces a remote refresh. Broker-backed runtimes are read-only for credential
 mutations and do not import local Codex/Grok credentials.
@@ -492,7 +501,7 @@ metadata fails explicitly.
 |`reserve_tokens`|`16384`|Minimum headroom removed from the model context window before computing the archive trigger. The effective reserve is the larger of this value and 15% of the context window. Tool-definition tokens are removed separately.|
 |`keep_recent_tokens`|`20000`|Preferred verbatim hot-tail floor. If that optional floor prevents the carrier from fitting, Azem relaxes it but still preserves the latest three complete shared user turns.|
 |`large_tool_result_tokens`|`12000`|Artifact-offload threshold for large tool results.|
-|`history_retrieval_tokens`|`4096`|Private session-history FTS evidence budget.|
+|`history_retrieval_tokens`|`4096`|On-demand context.search_history evidence budget; no automatic send-time retrieval.|
 
 Automatic archiving uses `effective_reserve = max(reserve_tokens,
 floor(context_window * 0.15))` and runs when the larger of the local history

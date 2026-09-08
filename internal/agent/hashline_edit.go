@@ -867,6 +867,20 @@ func (driver *hashlineDriver) buildHashlineResult(ctx context.Context, prepared 
 		if file.diff != "" {
 			content.WriteString("\n\n--- compact diff ---\n" + file.diff)
 		}
+		if !file.remove && newTag == computeHashlineTag(file.final) {
+			lines := strings.Split(normalizeHashlineText([]byte(file.final)), "\n")
+			start := max(1, file.firstChanged-3)
+			end := min(len(lines), start+19)
+			content.WriteString("\n\n--- current source ---")
+			bytes := 0
+			for line := start; line <= end; line++ {
+				bytes += len(lines[line-1]) + 16
+				if bytes > 8192 {
+					break
+				}
+				fmt.Fprintf(&content, "\n%d:%s", line, lines[line-1])
+			}
+		}
 		sections = append(sections, EditSectionResult{Path: path, Op: operation, OldTag: file.tag, NewTag: newTag, Header: header, FirstChangedLine: file.firstChanged, Diff: file.diff})
 	}
 	result := EditHashlineResult{Sections: sections, Content: content.String()}

@@ -199,7 +199,7 @@ pub(super) fn settings_extensions_body(
             .into_any_element(),
         );
     }
-    let mut body = div().flex().flex_col().gap_4();
+    let mut body = div().flex().flex_col().gap_6();
     if selected_tab == "marketplace" {
         body = body.child(settings_marketplace_body(
             state, controls, &query, enabled, palette, locale, cx,
@@ -285,7 +285,7 @@ pub(super) fn settings_extensions_body(
             div()
                 .id("extensions-tab-list")
                 .role(Role::TabList)
-                .h(px(42.))
+                .min_h(px(42.))
                 .p(px(3.))
                 .rounded(px(10.))
                 .border_1()
@@ -294,6 +294,7 @@ pub(super) fn settings_extensions_body(
                 .flex()
                 .items_center()
                 .gap_1()
+                .flex_wrap()
                 .children(tabs.into_iter().map(|(tab, icon_name, label, count)| {
                     let selected = selected_tab == tab;
                     div()
@@ -302,7 +303,7 @@ pub(super) fn settings_extensions_body(
                         .aria_label(label)
                         .aria_selected(selected)
                         .tab_stop(true)
-                        .h_full()
+                        .h(px(34.))
                         .px_3()
                         .rounded(px(8.))
                         .bg(if selected {
@@ -620,17 +621,16 @@ fn extension_row(
     div()
         .w_full()
         .px_4()
-        .py_3()
-        .border_b_1()
-        .border_color(palette.border)
+        .py_4()
         .flex()
         .items_center()
-        .gap_4()
+        .gap_3()
+        .flex_wrap()
         .children(mark)
         .child(
             div()
                 .flex_1()
-                .min_w_0()
+                .min_w(px(220.))
                 .flex()
                 .flex_col()
                 .gap_1()
@@ -658,22 +658,11 @@ fn extension_list(
     palette: ThemePalette,
     locale: Locale,
 ) -> gpui::AnyElement {
-    div()
-        .rounded(px(12.))
-        .border_1()
-        .border_color(palette.border)
-        .bg(palette.paper)
-        .overflow_hidden()
-        .child(
-            div()
-                .px_4()
-                .py_3()
-                .text_sm()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(palette.ink)
-                .child(title),
-        )
-        .when(rows.is_empty(), |view| {
+    let empty = rows.is_empty();
+    settings_group(
+        title,
+        "",
+        settings_rows(rows, palette).when(empty, |view| {
             view.child(
                 div()
                     .px_4()
@@ -682,9 +671,10 @@ fn extension_list(
                     .text_color(palette.faint)
                     .child(locale.text("ui.noItemsOrMatchingResults")),
             )
-        })
-        .children(rows)
-        .into_any_element()
+        }),
+        palette,
+    )
+    .into_any_element()
 }
 
 pub(in crate::surfaces) fn marketplace_action(

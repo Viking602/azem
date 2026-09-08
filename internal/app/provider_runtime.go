@@ -123,8 +123,6 @@ type liveApproval struct {
 	request     approvalReviewRequest
 	pending     agentservice.PendingApproval
 	decision    chan agentservice.ApprovalMode
-	suspension  chan error
-	suspendable bool
 	resolving   bool
 	resolved    bool
 }
@@ -183,7 +181,11 @@ func (r *ProviderRuntime) Start(ctx context.Context, request TurnRequest) (*agen
 	if err != nil {
 		return nil, hyagent.Engine{}, err
 	}
-	run, err := r.coding.StartRunWithMetadata(ctx, request.Prompt, map[string]string{"session_id": request.SessionID}, executionPolicy)
+	runMetadata := map[string]string{"session_id": request.SessionID}
+	if request.queueItemID != "" {
+		runMetadata["queue_item_id"] = request.queueItemID
+	}
+	run, err := r.coding.StartRunWithMetadata(ctx, request.Prompt, runMetadata, executionPolicy)
 	if err != nil {
 		return nil, hyagent.Engine{}, err
 	}
@@ -214,6 +216,9 @@ func (r *ProviderRuntime) Start(ctx context.Context, request TurnRequest) (*agen
 		durable.Metadata = map[string]string{}
 	}
 	durable.Metadata["session_id"] = request.SessionID
+	if request.queueItemID != "" {
+		durable.Metadata["queue_item_id"] = request.queueItemID
+	}
 	if err := r.coding.SaveRun(ctx, durable); err != nil {
 		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, err.Error(), err)
 		return nil, hyagent.Engine{}, err
@@ -309,7 +314,14 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 		drivers = append(drivers, governed)
 	}
 	if host != nil && host.Sessions() != nil && request.origin != turnOriginAutoLearn {
-		drivers = append(drivers, wrapHookDriver(host, host.HookMetadata(request.SessionID, run.RunID), &todoDriver{sessionID: request.SessionID, store: host.Sessions(), emit: func(event Event) bool {
+		drivers = append(drivers, wrapHookDriver(host, host.HookMetadata(request.SessionID, run.RunID), &historyDriver{sessions: host.Sessions(), sessionID: request.SessionID, tokenBudget: r.cfg.Agents.Context.HistoryRetrievalTokens}))
+		drivers = append(drivers, wrapHookDriver(host, host.HookMetadata(request.SessionID, run.RunID), &todoDriver{sessionID: request.SessionID, store: host.Sessions(), beforeComplete: func(ctx context.Context) error {
+			runIDs := []string{run.RunID}
+			if r.subagents != nil {
+				runIDs = r.subagents.relatedRunIDs(request.SessionID, run.RunID)
+			}
+			return verifyTodoCompletion(ctx, host.Sessions(), r.cfg.Workspace.Root, request.SessionID, run.RunID, runIDs)
+		}, emit: func(event Event) bool {
 			return host.EmitTodoUpdated(request.SessionID, *event.Todo)
 		}}))
 		if checkpoint != nil {
@@ -327,7 +339,7 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 			toolNames = append(toolNames, goalToolName, askToolName)
 		}
 		drivers = append(drivers, wrapHookDriver(host, host.HookMetadata(request.SessionID, run.RunID), &contextArtifactDriver{sessionID: request.SessionID, store: host.Sessions()}))
-		toolNames = append(toolNames, contextReadArtifactTool)
+		toolNames = append(toolNames, contextReadArtifactTool, contextSearchHistoryTool)
 		if request.PlanMode {
 			drivers = append(drivers, &submitPlanDriver{sessionID: request.SessionID, runID: run.RunID, host: host, planYolo: request.PlanYolo})
 			toolNames = append(toolNames, submitPlanToolName)
@@ -1075,7 +1087,7 @@ func (r *ProviderRuntime) TeamResolver(ctx context.Context, request TurnRequest)
 
 func retryProviderDriver(ctx context.Context, host providerHost, sessionID, runID, providerID string, policy config.RetryConfig, driver hyprovider.Driver) hyprovider.Driver {
 	if !policy.Enabled || policy.MaxRetries <= 0 {
-		return driver
+		return providerretry.WithRetry(driver, providerretry.RetryConfig{})
 	}
 	var observer hyprovider.RetryObserver
 	if host != nil {

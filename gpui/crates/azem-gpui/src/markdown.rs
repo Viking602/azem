@@ -161,6 +161,17 @@ pub(crate) fn markdown_view(
     reduced_motion: bool,
     palette: ThemePalette,
 ) -> gpui::AnyElement {
+    markdown_view_styled(index, source, streaming, reduced_motion, palette, false)
+}
+
+pub(crate) fn markdown_view_styled(
+    index: usize,
+    source: &str,
+    streaming: bool,
+    reduced_motion: bool,
+    palette: ThemePalette,
+    thinking: bool,
+) -> gpui::AnyElement {
     let source = if streaming {
         stabilize_streaming_markdown(source)
     } else {
@@ -176,25 +187,40 @@ pub(crate) fn markdown_view(
         .flex_col()
         .gap(px(9.))
         .children(blocks.into_iter().enumerate().map(|(block_index, block)| {
-            let rendered = render_block(index * 1000 + block_index, block, palette);
+            let id = index * 1000 + block_index;
+            let revision = block.text.len();
             if streaming && !reduced_motion && Some(block_index) == last_block_index {
                 div()
                     .w_full()
-                    .child(rendered)
                     .with_animation(
                         (
                             "markdown-stream-reveal",
-                            index.wrapping_mul(1_000_003).wrapping_add(block_index),
+                            id.wrapping_mul(1_000_003).wrapping_add(revision),
                         ),
                         Animation::new(Duration::from_millis(180)),
-                        |block, delta| block.opacity(stream_reveal_opacity(delta)),
+                        move |view, delta| {
+                            view.child(render_block(
+                                id,
+                                block.clone(),
+                                palette,
+                                thinking,
+                                stream_reveal_opacity(delta),
+                            ))
+                        },
                     )
                     .into_any_element()
             } else {
-                rendered
+                render_block(id, block, palette, thinking, 1.)
             }
         }))
         .into_any_element()
+}
+
+fn stream_tail_start(text: &str) -> usize {
+    let count = text.chars().count();
+    text.char_indices()
+        .nth(count.saturating_sub(16))
+        .map_or(0, |(offset, _)| offset)
 }
 
 fn stream_reveal_opacity(delta: f32) -> f32 {
@@ -314,7 +340,13 @@ fn heading_level(level: HeadingLevel) -> u8 {
     }
 }
 
-fn render_block(id: usize, block: MarkdownBlock, palette: ThemePalette) -> gpui::AnyElement {
+fn render_block(
+    id: usize,
+    block: MarkdownBlock,
+    palette: ThemePalette,
+    thinking: bool,
+    reveal: f32,
+) -> gpui::AnyElement {
     if matches!(block.kind, BlockKind::Rule) {
         return div()
             .id(("markdown-rule", id))
@@ -324,19 +356,25 @@ fn render_block(id: usize, block: MarkdownBlock, palette: ThemePalette) -> gpui:
             .into_any_element();
     }
     if let BlockKind::Code(language) = &block.kind {
+        let line_count = block.text.lines().count();
         return div()
             .id(("markdown-code", id))
             .w_full()
-            .rounded(px(9.))
-            .border_1()
-            .border_color(palette.border)
-            .bg(palette.paper_muted)
+            .when(!thinking, |code| {
+                code.rounded(px(9.))
+                    .border_1()
+                    .border_color(palette.border)
+                    .bg(palette.paper_muted)
+            })
+            .when(thinking, |code| {
+                code.border_l_2().border_color(palette.border).pl_3().py_1()
+            })
             .overflow_x_scroll()
-            .p_3()
+            .when(!thinking, |code| code.p_3())
             .flex()
             .flex_col()
             .gap_2()
-            .when(!language.is_empty(), |code| {
+            .when(!thinking && !language.is_empty(), |code| {
                 code.child(
                     div()
                         .text_size(px(9.))
@@ -349,38 +387,87 @@ fn render_block(id: usize, block: MarkdownBlock, palette: ThemePalette) -> gpui:
                     .font_family("SF Mono")
                     .text_size(px(palette.code_font_size))
                     .line_height(px(palette.code_font_size * 1.6))
-                    .text_color(palette.ink_soft)
-                    .child(block.text),
+                    .text_color(if thinking {
+                        palette.faint
+                    } else {
+                        palette.ink_soft
+                    })
+                    .children(block.text.lines().enumerate().map(|(line_index, line)| {
+                        div()
+                            .whitespace_nowrap()
+                            .when(line_index + 1 == line_count, |line| line.opacity(reveal))
+                            .text_color(if thinking {
+                                palette.faint
+                            } else if language == "diff" && line.starts_with('+') {
+                                palette.positive
+                            } else if language == "diff" && line.starts_with('-') {
+                                palette.danger
+                            } else {
+                                palette.ink_soft
+                            })
+                            .child(if line.is_empty() {
+                                " ".to_string()
+                            } else {
+                                line.to_string()
+                            })
+                    })),
             )
             .into_any_element();
     }
-    let text = StyledText::new(block.text).with_highlights(block.runs.into_iter().map(|run| {
-        let mut style = HighlightStyle::default();
-        if run.marks & BOLD != 0 {
-            style.font_weight = Some(FontWeight::BOLD);
-        }
-        if run.marks & ITALIC != 0 {
-            style.font_style = Some(FontStyle::Italic);
-        }
-        if run.marks & STRIKE != 0 {
-            style.strikethrough = Some(StrikethroughStyle {
-                thickness: px(1.),
-                color: Some(palette.muted.into()),
-            });
-        }
-        if run.marks & CODE != 0 {
-            style.background_color = Some(palette.paper_muted.into());
-        }
-        if run.marks & LINK != 0 {
-            style.color = Some(palette.accent.into());
-            style.underline = Some(UnderlineStyle {
-                thickness: px(1.),
-                color: Some(palette.accent.into()),
-                wavy: false,
-            });
-        }
-        (run.range, style)
-    }));
+    let tail = stream_tail_start(&block.text);
+    let mut boundaries = vec![0, tail, block.text.len()];
+    for run in &block.runs {
+        boundaries.extend([run.range.start, run.range.end]);
+    }
+    boundaries.sort_unstable();
+    boundaries.dedup();
+    let text =
+        StyledText::new(block.text.clone()).with_highlights(boundaries.windows(2).map(|pair| {
+            let run = InlineRun {
+                range: pair[0]..pair[1],
+                marks: block
+                    .runs
+                    .iter()
+                    .filter(|run| run.range.contains(&pair[0]))
+                    .fold(0, |marks, run| marks | run.marks),
+            };
+            let mut style = HighlightStyle::default();
+            if run.marks & BOLD != 0 {
+                style.font_weight = Some(FontWeight::BOLD);
+            }
+            if run.marks & ITALIC != 0 {
+                style.font_style = Some(FontStyle::Italic);
+            }
+            if run.marks & STRIKE != 0 {
+                style.strikethrough = Some(StrikethroughStyle {
+                    thickness: px(1.),
+                    color: Some(palette.muted.into()),
+                });
+            }
+            if run.marks & CODE != 0 {
+                style.background_color = Some(palette.paper_muted.into());
+            }
+            if run.marks & LINK != 0 {
+                style.color = Some(palette.accent.into());
+                style.underline = Some(UnderlineStyle {
+                    thickness: px(1.),
+                    color: Some(palette.accent.into()),
+                    wavy: false,
+                });
+            }
+            if run.range.start >= tail && reveal < 1. {
+                let mut color = if thinking {
+                    palette.faint
+                } else if run.marks & LINK != 0 {
+                    palette.accent
+                } else {
+                    palette.ink
+                };
+                color.a *= reveal;
+                style.color = Some(color.into());
+            }
+            (run.range, style)
+        }));
     let base = div()
         .id(("markdown-block", id))
         .w_full()
@@ -537,6 +624,23 @@ mod tests {
     use super::{
         BOLD, BlockKind, CODE, parse_markdown, stabilize_streaming_markdown, stream_reveal_opacity,
     };
+
+    #[test]
+    fn stream_tail_preserves_unicode_and_leaves_previous_text_stable() {
+        for source in [
+            "",
+            "short",
+            "0123456789abcdefghijkl",
+            "思考中的代码应当保持流畅自然并且不破坏中文字符边界🦀",
+        ] {
+            let start = super::stream_tail_start(source);
+            assert!(source.is_char_boundary(start));
+            assert_eq!(
+                source[start..].chars().count(),
+                source.chars().count().min(16)
+            );
+        }
+    }
 
     #[test]
     fn streaming_markdown_keeps_incomplete_syntax_structurally_stable() {

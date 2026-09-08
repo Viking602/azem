@@ -155,6 +155,32 @@ fn nullable_bridge_collections_do_not_drop_model_provider_events() {
 }
 
 #[test]
+fn model_catalog_replaces_matching_provider_models() {
+    let mut state = AppState::default();
+    state.apply_direct_event(json!({
+        "kind": "model_providers",
+        "modelProviders": [{
+            "id": "chatgpt",
+            "displayName": "OpenAI / ChatGPT",
+            "subscription": true,
+            "enabled": true,
+            "models": [{"id": "gpt-old", "name": "GPT Old"}]
+        }]
+    }));
+    state.apply_direct_event(json!({
+        "kind": "model_catalog",
+        "data": {
+            "provider": "chatgpt",
+            "accountID": "acct",
+            "models": "[{\"id\":\"gpt-new\",\"name\":\"GPT New\"}]"
+        }
+    }));
+    assert_eq!(state.catalogs.models[0]["id"], "gpt-new");
+    assert_eq!(state.catalogs.providers[0]["models"][0]["id"], "gpt-new");
+    assert_eq!(state.catalogs.providers[0]["models"][0]["name"], "GPT New");
+}
+
+#[test]
 fn reconnect_without_active_run_clears_stale_runtime_state() {
     let mut state = AppState::default();
     state.navigation.current_session_id = "session-1".into();
@@ -253,6 +279,31 @@ fn session_load_restores_preferences_and_durable_tools_in_order() {
         ["user", "tool", "assistant"]
     );
     assert_eq!(blocks[1].tool_call_id.as_ref(), "tool-1");
+}
+
+#[test]
+fn duplicate_resume_broadcast_skips_identical_transcript_reparse() {
+    let mut state = AppState::default();
+    let payload = json!({
+        "kind": "session_loaded",
+        "sessionId": "session-1",
+        "state": "loaded",
+        "data": {
+            "title": "Restored",
+            "lastRunID": "run-1",
+            "blocks": "[{\"id\":\"u1\",\"kind\":\"user\",\"content\":\"ask\"}]",
+            "blockSequences": "[1]"
+        }
+    });
+    state.apply_direct_event(payload.clone());
+    assert_eq!(state.navigation.current_session_id.as_ref(), "session-1");
+    assert!(!state.runtime.resume_fingerprint.is_empty());
+    state.transcript.blocks.borrow_mut()[0].content = "mutated-locally".into();
+    state.apply_direct_event(payload);
+    assert_eq!(
+        state.transcript.blocks.borrow()[0].content,
+        "mutated-locally"
+    );
 }
 
 #[test]
@@ -827,4 +878,69 @@ fn streaming_reducer_coalesces_ten_thousand_deltas_into_one_block() {
     let blocks = state.transcript.blocks.borrow();
     assert_eq!(blocks.len(), 1);
     assert_eq!(blocks[0].content.len(), 10_000);
+}
+
+#[test]
+fn current_backend_snapshot_restores_projection_and_controls() {
+    let mut state = AppState::default();
+    state.apply_reconnect_snapshot(json!({
+        "selectedSessionId":"s", "wireSequence":42,
+        "session":{"session":{"id":"s","title":"Current","providerId":"grok","modelId":"grok-4.6","reasoning":"xhigh"},
+            "blocks":[{"id":"b","sequence":1,"kind":"user","content":"hello"}],
+            "toolRecords":[],"todo":{"items":[{"id":"1","status":"completed"}]},"agentSnapshots":[]},
+        "runs":[{"sessionId":"s","runId":"r","state":"running","activity":"awaiting_approval"}],
+        "liveBlocks":[{"id":"live","sessionId":"s","runId":"r","kind":"text","textPhase":"commentary","content":"Working","state":"streaming"}],
+        "controls":[{"kind":"approval","id":"a","sessionId":"s","runId":"r","state":"pending","data":{"tool":"coding.shell"}}]
+    }));
+    assert_eq!(state.navigation.current_session_id.as_ref(), "s");
+    assert_eq!(state.navigation.current_title.as_ref(), "Current");
+    assert_eq!(state.settings.model.as_ref(), "grok-4.6");
+    assert_eq!(state.transcript.blocks.borrow().len(), 2);
+    assert_eq!(state.runtime.todo["items"][0]["status"], "completed");
+    assert!(state.runtime.running);
+    assert_eq!(state.runtime.activity.as_ref(), "awaiting_approval");
+    assert_eq!(state.runtime.approvals[0]["approvalId"], "a");
+    assert_eq!(state.sequence, 42);
+    state.apply_direct_event(json!({"kind":"run_state","sessionId":"s","runProjection":{"sessionId":"s","runId":"r","state":"completed","activity":"idle"}}));
+    assert!(!state.runtime.running);
+    state.apply_reconnect_snapshot(json!({"selectedSessionId":"s","runs":[],"controls":[]}));
+    assert!(state.runtime.approvals.is_empty());
+}
+
+#[test]
+fn selection_snapshot_preserves_catalogs_and_queue_revisions() {
+    let mut state = AppState::default();
+    state.workspace.root = "/workspace".into();
+    state.apply_direct_event(json!({"selectedSessionId":"s","session":{"session":{"id":"s","title":"New"},"blocks":[],"toolRecords":[]},"runs":[],"controls":[],"promptQueues":[{"sessionId":"s","revision":3,"items":[{"id":"q","text":"next"}]}]}));
+    assert_eq!(state.workspace.root.as_ref(), "/workspace");
+    state.apply_direct_event(json!({"kind":"prompt_queue_state","promptQueue":{"sessionId":"s","revision":2,"items":[]}}));
+    assert_eq!(state.runtime.prompt_queues["s"]["items"][0]["id"], "q");
+    state.apply_direct_event(json!({"kind":"session_projection","sessionId":"other","sessionProjection":{"session":{"id":"other"},"blocks":[]}}));
+    assert_eq!(state.navigation.current_session_id.as_ref(), "s");
+}
+
+#[test]
+fn native_session_navigation_preserves_project_pull_request() {
+    // All native navigation entry points must use the session-only snapshot.
+    // The legacy resume response is a reconnect snapshot without PR data.
+    for source in [
+        include_str!("../surfaces/navigation.rs"),
+        include_str!("../window_runtime.rs"),
+    ] {
+        assert!(!source.contains("Method::ResumeSession"));
+    }
+    let mut state = AppState::default();
+    state.workspace.root = "/workspace".into();
+    let dashboard = json!({"current":{"number":33,"title":"Harden native desktop runtime"}});
+    state.pull_requests.dashboard = dashboard.clone();
+    state.pull_requests.selected = json!({"number":33});
+    for session_id in ["second", "first"] {
+        state.apply_direct_event(json!({"selectedSessionId":session_id,
+            "session":{"session":{"id":session_id},"blocks":[],"toolRecords":[]},
+            "runs":[],"controls":[],"promptQueues":[]}));
+        assert_eq!(state.navigation.current_session_id.as_ref(), session_id);
+        assert_eq!(state.pull_requests.dashboard, dashboard);
+        assert_eq!(state.pull_requests.selected["number"], 33);
+        assert_eq!(state.workspace.root.as_ref(), "/workspace");
+    }
 }

@@ -336,6 +336,38 @@ fn settings_search_matches_names_and_control_keywords() {
     ));
 }
 
+#[test]
+fn settings_groups_own_borders_and_keep_content_height() {
+    let source = include_str!("settings/mod.rs");
+    let group = source
+        .split("fn settings_group(")
+        .nth(1)
+        .unwrap()
+        .split("fn settings_detail_row(")
+        .next()
+        .unwrap();
+    assert!(
+        group.contains(".overflow_hidden()"),
+        "the card must clip its contents to rounded corners"
+    );
+    assert!(
+        group.contains(".flex_shrink_0()"),
+        "long groups must scroll instead of shrinking into siblings"
+    );
+    let row = include_str!("settings/appearance.rs")
+        .split("fn settings_children_row(")
+        .nth(1)
+        .unwrap();
+    assert!(
+        !row.contains(".border_t_1()"),
+        "the first row must not paint over the rounded card border"
+    );
+    assert!(
+        source.contains(".when(index > 0,"),
+        "only neighboring rows need a divider"
+    );
+}
+
 use super::ReplyForkAnchor;
 use super::{
     ToolActivityKind, agent_belongs_to_run, agent_matches_group, animate_submitted_user,
@@ -344,8 +376,9 @@ use super::{
     is_core_settings_route, is_edit_tool, is_empty_search_result, is_file_change,
     is_host_tool_announcement, is_open_agent_state, is_process_tool_block, is_thinking_text,
     marketplace_action, marketplace_entries, model_capability_label, model_discovery_request,
-    model_matches_query, model_provider_action, needs_pending_process, plugin_import_action,
-    process_step_indexes, process_step_label, processing_status, provider_matches_query,
+    model_matches_query, model_provider_action, model_provider_save_request, needs_pending_process,
+    plan_item_animates, plugin_import_action, process_step_indexes, process_step_label,
+    processing_status, provider_base_url, provider_detail_subtitle, provider_matches_query,
     recap_copy, resolved_agent_state, run_process_summary, running_tool_summary, session_entry_id,
     settings_route_model_name, settings_route_title, settings_section_parts,
     thinking_belongs_to_tool_group, todo_status_mark, tool_action, tool_activity_kind,
@@ -798,7 +831,7 @@ fn completed_tool_group_summarizes_tools_without_a_thinking_label() {
     ];
     assert_eq!(
         process_step_indexes(&late_thinking, 0..late_thinking.len()),
-        vec![1, 3, 0, 2]
+        vec![0, 1, 2, 3]
     );
     let inline_script = Block {
         kind: Arc::from("tool"),
@@ -835,7 +868,7 @@ fn tool_group_summary_classifies_every_reference_activity_family() {
     assert_eq!(
             super::completed_tool_group_summary(&blocks, Locale::resolve("zh-CN")),
             Some(
-                "搜索了 1 次、网络搜索 1 次、抓取 1 个网页、调用子智能体 1 次、浏览器操作 1 次、更新了 1 次计划、调用了 1 个工具"
+                "搜索了 1 次、网络搜索 1 次、抓取 1 个网页、调用子智能体 1 次、浏览器操作 1 次、更新了 1 次待办、调用了 1 个工具"
                     .to_string()
             )
         );
@@ -1076,12 +1109,17 @@ fn model_catalog_filters_models_and_builds_the_right_discovery_action() {
     let generic = model_discovery_request(
         &json!({"id": "opencode-go", "subscription": false, "baseUrl": "https://example.com"}),
         "session-1",
+        "sk-test",
     );
     assert_eq!(generic["provider"]["id"], "opencode-go");
+    assert_eq!(generic["secret"], "sk-test");
     assert!(generic.get("target").is_none());
 
-    let subscription =
-        model_discovery_request(&json!({"id": "cursor", "subscription": true}), "session-1");
+    let subscription = model_discovery_request(
+        &json!({"id": "cursor", "subscription": true}),
+        "session-1",
+        "",
+    );
     assert_eq!(subscription["target"], "cursor");
     assert!(subscription.get("provider").is_none());
 }
@@ -1121,6 +1159,52 @@ fn model_catalog_filters_providers_and_handles_subscription_auth_state() {
     );
     assert_eq!(toggle["kind"], "set_model_provider");
     assert_eq!(toggle["provider"]["enabled"], true);
+    assert!(catalog_source.contains("provider-api-key"));
+    assert!(catalog_source.contains("save-provider"));
+    assert!(catalog_source.contains("ui.apiBaseURL"));
+}
+
+#[test]
+fn model_catalog_shows_api_address_and_saves_api_key() {
+    let novita = json!({
+        "id": "novita",
+        "displayName": "Novita AI",
+        "backend": "openai-compatible",
+        "defaultBaseUrl": "https://api.novita.ai/v1",
+        "baseUrl": "https://api.novita.ai/v1",
+        "envKey": "NOVITA_API_KEY",
+        "enabled": false,
+        "credentialSource": "none",
+        "subscription": false,
+    });
+    assert_eq!(provider_base_url(&novita), "https://api.novita.ai/v1");
+    assert_eq!(
+        provider_detail_subtitle(&novita, false),
+        "https://api.novita.ai/v1"
+    );
+    assert_ne!(provider_detail_subtitle(&novita, false), "none");
+    assert!(
+        provider_detail_subtitle(
+            &json!({"subscription": true, "credentialSource": "none"}),
+            true
+        )
+        .is_empty()
+    );
+
+    let save = model_provider_save_request(&novita, "session-1", true, "ignored", "sk-live");
+    assert_eq!(save["kind"], "set_model_provider");
+    assert_eq!(save["secret"], "sk-live");
+    assert_eq!(save["provider"]["enabled"], true);
+    assert_eq!(save["provider"]["baseUrl"], "https://api.novita.ai/v1");
+
+    let custom = json!({"id": "custom", "enabled": false});
+    let save_custom =
+        model_provider_save_request(&custom, "session-1", true, "https://example.test/v1", "");
+    assert_eq!(
+        save_custom["provider"]["baseUrl"],
+        "https://example.test/v1"
+    );
+    assert!(save_custom.get("secret").is_none());
 }
 
 #[test]
@@ -1198,6 +1282,29 @@ fn completed_run_uses_durable_elapsed_time() {
 }
 
 #[test]
+fn user_messages_keep_sent_image_attachment_paths() {
+    let block = Block {
+        kind: Arc::from("user"),
+        extra: HashMap::from([(
+            "attachments".to_string(),
+            json!([
+                {"id":"image-1","name":"screen.png","mimeType":"image/png","path":"/tmp/screen.png"},
+                {"id":"image-2","name":"clip.png","mime":"image/png","path":"data:image/png;base64,AAAA"}
+            ]),
+        )]),
+        ..Default::default()
+    };
+    assert_eq!(
+        super::user_attachment_sources(&block),
+        vec![
+            "/tmp/screen.png".to_string(),
+            "data:image/png;base64,AAAA".to_string()
+        ]
+    );
+    assert!(super::user_attachment_sources(&Block::default()).is_empty());
+}
+
+#[test]
 fn thinking_row_has_no_unique_icon_or_completed_duration() {
     let source = crate::SURFACES_SOURCE
         .split("fn thinking_process_entry")
@@ -1206,9 +1313,10 @@ fn thinking_row_has_no_unique_icon_or_completed_duration() {
         .split("struct TurnProcessRange")
         .next()
         .unwrap();
-    assert!(source.contains("processing_status(elapsed_ms, locale)"));
-    assert_eq!(source.matches("processing_status(").count(), 1);
-    assert!(source.contains("locale.text(\"ui.thought\")"));
+    assert!(source.contains("locale.text(\"ui.thinking\")"));
+    assert!(source.contains("process_detail_row("));
+    assert!(source.contains(".when(active, |body|"));
+    assert!(!source.contains(".child(label.clone())"));
     assert!(!source.contains("process.thinkingDuration"));
     assert!(!source.contains("icon(\"lightbulb\""));
 }
@@ -1216,7 +1324,7 @@ fn thinking_row_has_no_unique_icon_or_completed_duration() {
 #[test]
 fn only_the_tool_group_header_owns_expansion() {
     let source = crate::SURFACES_SOURCE
-        .split("fn timeline_entry")
+        .split("fn timeline_entry_unfolded")
         .nth(1)
         .unwrap()
         .split("struct TurnProcessRange")
@@ -1241,9 +1349,18 @@ fn only_the_tool_group_header_owns_expansion() {
     assert!(group.contains("process_step_indexes"));
     assert!(group.contains(".child(turn_status_header("));
     assert!(group.contains("process_step_row("));
-    assert!(group.contains(".when(expanded"));
+    assert!(group.contains(".child(disclosure_body("));
+    let column = group
+        .split(".id((\"tool-group-column\", index))")
+        .nth(1)
+        .unwrap();
+    assert!(
+        column.find(".max_w(px(CHAT_COLUMN_MAX_WIDTH))").unwrap()
+            < column.find(".child(turn_status_header(").unwrap()
+    );
+    assert!(column.contains(".child(disclosure_body("));
     assert!(group.contains(".left(px(8.))"));
-    assert!(group.contains("is_expanded(&key)"));
+    assert!(group.contains("group_is_expanded(&key, running)"));
     assert!(!group.contains(".when_some(processing"));
     assert!(!group.contains("\"git-branch\""));
     let pending = crate::SURFACES_SOURCE
@@ -1253,6 +1370,8 @@ fn only_the_tool_group_header_owns_expansion() {
         .split("struct TurnProcessRange")
         .next()
         .unwrap();
+    let waiting = pending.split("fn thinking_process_entry").next().unwrap();
+    assert!(!waiting.contains("ui.thinking"));
     assert!(pending.contains("processing_status"));
     assert!(pending.contains("animated_activity_label"));
     assert!(!pending.contains(".h(px(1.))"));
@@ -1265,7 +1384,7 @@ fn only_the_tool_group_header_owns_expansion() {
         .unwrap();
     assert!(header.contains(".aria_expanded(expanded)"));
     assert!(header.contains(".toggle(&toggle_key)"));
-    assert!(header.contains("chevron-down"));
+    assert!(header.contains("Transformation::rotate"));
     assert!(header.contains("chevron-right"));
     let collapsed_header = header
         .split(".children(expanded.map")
@@ -1453,6 +1572,46 @@ fn active_plan_item_uses_a_distinct_filled_marker() {
 }
 
 #[test]
+fn stopped_plan_does_not_spin_in_progress_items() {
+    assert!(plan_item_animates("in_progress", true, false));
+    assert!(!plan_item_animates("in_progress", false, false));
+    assert!(!plan_item_animates("in_progress", true, true));
+    assert!(!plan_item_animates("pending", true, false));
+    assert!(!plan_item_animates("completed", true, false));
+
+    let list = crate::SURFACES_SOURCE
+        .split("fn plan_list(")
+        .nth(1)
+        .unwrap()
+        .split("pub(super) fn plan_banner_visible")
+        .next()
+        .unwrap();
+    assert!(list.contains("plan_item_animates(status, running, reduced)"));
+    assert!(list.contains("running: bool"));
+
+    let composer = crate::SURFACES_SOURCE
+        .split("pub(crate) fn composer_plan(")
+        .nth(1)
+        .unwrap()
+        .split("pub(crate) fn environment_panel(")
+        .next()
+        .unwrap();
+    assert!(composer.contains("this.state.runtime.running"));
+    assert!(composer.contains("running,"));
+    assert!(composer.contains("\"composer-plan-items\""));
+
+    let environment = crate::SURFACES_SOURCE
+        .split("fn environment_panel(")
+        .nth(1)
+        .unwrap()
+        .split("fn side_panel(")
+        .next()
+        .unwrap();
+    assert!(!environment.contains("environment-plan"));
+    assert!(!environment.contains("plan_list("));
+}
+
+#[test]
 fn running_process_header_summarizes_the_visible_activity_tree() {
     let progress = vec![
         Block {
@@ -1626,7 +1785,9 @@ fn successful_tools_expose_results_and_edit_diffs() {
         .next()
         .unwrap();
     assert!(renderer.contains("let can_expand = detail.is_some()"));
-    assert!(renderer.contains("fenced_tool_detail(&detail.content, \"diff\")"));
+    assert!(renderer.contains("super::diff::file_cards"));
+    assert!(renderer.contains("source_from_read"));
+    assert!(renderer.contains("is_read_tool(tool_name(block))"));
     assert!(renderer.contains("fenced_tool_detail(&detail.content, \"text\")"));
 }
 
@@ -1662,6 +1823,33 @@ fn durable_file_change_projection_is_recognized() {
         ..Default::default()
     };
     assert!(is_file_change(&block));
+}
+
+#[test]
+fn tool_details_use_file_change_diff_and_readable_todo() {
+    let edit = Block {
+        kind: "tool".into(),
+        title: "coding.write_file".into(),
+        state: "completed".into(),
+        extra: HashMap::from([(
+            "fileChange".into(),
+            json!({"files":[{"path":"a.rs","diff":"+fn main() {}"}]}),
+        )]),
+        ..Default::default()
+    };
+    let detail = tool_step_detail(&edit, &[]).unwrap();
+    assert!(detail.is_diff);
+    assert!(detail.content.contains("+fn main() {}"));
+    let todo = Block {
+        kind: "tool".into(), title: "todo".into(), state: "completed".into(),
+        content: json!({"goal":"修复队列","revision":4,"phases":[{"title":"实现","items":[{"content":"验证引导","status":"in_progress"}]}]}).to_string(),
+        ..Default::default()
+    };
+    let detail = tool_step_detail(&todo, &[]).unwrap();
+    assert!(detail.content.contains("修复队列"));
+    assert!(detail.content.contains("验证引导"));
+    assert!(!detail.content.contains("revision"));
+    assert!(!detail.content.contains('{'));
 }
 
 #[test]
@@ -1776,4 +1964,185 @@ fn recap_projects_copy_without_exposing_raw_json() {
         (summary.as_str(), goal.as_str(), open_items.as_str()),
         ("Summary", "Goal", "Open")
     );
+}
+
+#[test]
+fn completed_process_fold_requires_accepted_final_and_process_activity() {
+    use super::timeline::process::completed_process_range;
+    let mut blocks = vec![
+        Block {
+            kind: Arc::from("user"),
+            ..Default::default()
+        },
+        Block {
+            kind: Arc::from("thinking"),
+            content: "Inspect entry".into(),
+            ..Default::default()
+        },
+        Block {
+            kind: Arc::from("tool"),
+            ..Default::default()
+        },
+        Block {
+            kind: Arc::from("assistant"),
+            text_phase: Arc::from("final_answer"),
+            state: Arc::from("streaming"),
+            ..Default::default()
+        },
+    ];
+    assert_eq!(completed_process_range(&blocks, 1), None);
+    blocks[3].state = Arc::from("completed");
+    assert_eq!(completed_process_range(&blocks, 1), Some(1..3));
+    assert_eq!(completed_process_range(&blocks, 2), Some(1..3));
+    assert_eq!(completed_process_range(&blocks, 0), None);
+    assert_eq!(completed_process_range(&blocks, 3), None);
+    blocks[3].text_phase = Arc::from("commentary");
+    assert_eq!(completed_process_range(&blocks, 1), None);
+    blocks[3].text_phase = Arc::from("final_answer");
+    blocks[2].kind = Arc::from("thinking");
+    assert_eq!(completed_process_range(&blocks, 1), Some(1..3));
+    blocks[3].state = Arc::from("streaming");
+    assert_eq!(completed_process_range(&blocks, 1), None);
+    blocks[3].state = Arc::from("complete");
+    assert_eq!(completed_process_range(&blocks, 1), Some(1..3));
+    blocks[1].kind = Arc::from("assistant");
+    blocks[2].kind = Arc::from("assistant");
+    assert_eq!(completed_process_range(&blocks, 1), None);
+}
+
+#[test]
+fn live_process_preview_keeps_recent_tools_and_all_active_or_failed_rows() {
+    use super::timeline::process::visible_process_steps;
+    let mut blocks: Vec<Block> = (0..8)
+        .map(|_| Block {
+            kind: Arc::from("tool"),
+            state: Arc::from("completed"),
+            ..Default::default()
+        })
+        .collect();
+    let indexes: Vec<usize> = (0..8).collect();
+    assert_eq!(
+        visible_process_steps(&blocks, &indexes, true),
+        vec![4, 5, 6, 7]
+    );
+    blocks[0].state = Arc::from("awaiting_approval");
+    blocks[1].state = Arc::from("failed");
+    blocks[2].kind = Arc::from("thinking");
+    assert_eq!(
+        visible_process_steps(&blocks, &indexes, true),
+        vec![0, 1, 2, 4, 5, 6, 7]
+    );
+    assert_eq!(visible_process_steps(&blocks, &indexes, false), indexes);
+}
+
+#[test]
+fn reconnected_tool_records_remain_inside_the_completed_process_fold() {
+    let mut state = AppState::default();
+    state.apply_direct_event(json!({
+        "selectedSessionId": "observed",
+        "session": {
+            "session": {"id":"observed"},
+            "blocks": [
+                {"id":"block:0","sequence":0,"kind":"user"},
+                {"id":"block:1","sequence":1,"kind":"commentary","state":"completed","textPhase":"commentary"},
+                {"id":"block:2","sequence":2,"kind":"thinking","state":"completed","textPhase":"final_answer"},
+                {"id":"block:3","sequence":3,"kind":"assistant","state":"completed","textPhase":"final_answer"}
+            ],
+            "toolRecords": [{"toolCallId":"read","anchorSequence":1,"name":"coding.read_file","state":"completed"}]
+        }
+    }));
+    let blocks = state.transcript.blocks.borrow();
+    assert_eq!(
+        super::timeline::process::completed_process_range(&blocks, 1),
+        Some(1..4)
+    );
+    assert_eq!(
+        super::timeline::process::completed_process_range(&blocks, 4),
+        None
+    );
+}
+
+#[test]
+fn live_run_finished_folds_the_same_process_as_a_reconnected_snapshot() {
+    let mut state = AppState::default();
+    state.navigation.current_session_id = "live".into();
+    state.transcript.blocks.borrow_mut().extend([
+        Block {
+            kind: "user".into(),
+            run_id: "run".into(),
+            ..Default::default()
+        },
+        Block {
+            kind: "tool".into(),
+            run_id: "run".into(),
+            state: "completed".into(),
+            ..Default::default()
+        },
+        Block {
+            kind: "assistant".into(),
+            run_id: "run".into(),
+            state: "streaming".into(),
+            text_phase: "final_answer".into(),
+            ..Default::default()
+        },
+    ]);
+    assert_eq!(
+        super::timeline::process::completed_process_range(&state.transcript.blocks.borrow(), 1),
+        None
+    );
+    state.apply_direct_event(
+        json!({"kind":"run_finished","sessionId":"live","runId":"run","state":"completed"}),
+    );
+    assert_eq!(
+        super::timeline::process::completed_process_range(&state.transcript.blocks.borrow(), 1),
+        Some(1..2)
+    );
+}
+
+#[test]
+fn plan_banner_shows_open_work_only_while_run_is_live() {
+    use super::environment::{plan_banner_visible, plan_items};
+    let todo = json!({"phases":[{"items":[{"content":"first","status":"completed"}]},{"items":[{"content":"second","status":"in_progress"},{"content":"third","status":"cancelled"}]}]});
+    let mut items = plan_items(&todo);
+    assert_eq!(
+        items
+            .iter()
+            .map(|item| item["content"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["first", "second", "third"]
+    );
+    assert!(plan_banner_visible(&items, true));
+    assert!(!plan_banner_visible(&items, false));
+    assert_eq!(items[1]["status"], "in_progress");
+    items[1]["status"] = json!("completed");
+    assert!(!plan_banner_visible(&items, true));
+    assert!(!plan_banner_visible(&plan_items(&json!({})), true));
+}
+
+#[test]
+fn provider_logos_use_models_dev_ids_instead_of_profile_ids() {
+    assert_eq!(super::provider_logo_asset_id("novita"), "novita-ai");
+    assert_eq!(super::provider_logo_asset_id("chatgpt"), "openai");
+    assert_eq!(super::provider_logo_asset_id("novita-ai"), "novita-ai");
+    assert_eq!(super::provider_logo_asset_id("deepseek"), "deepseek");
+    assert_eq!(
+        super::catalog_provider_logo_id(Some(&json!({"modelsDevId": "novita-ai"})), "novita"),
+        "novita-ai"
+    );
+    assert_eq!(
+        super::catalog_provider_logo_id(Some(&json!({})), "novita"),
+        "novita"
+    );
+}
+
+#[test]
+fn route_menus_fit_the_window_and_rows_use_shared_borders() {
+    let routes = include_str!("settings/routes.rs");
+    let row = routes.split("fn settings_route_row(").nth(1).unwrap();
+    assert!(routes.contains("settings_group("));
+    assert!(routes.contains("settings_rows(rows, palette)"));
+    assert!(!row.contains(".border_t_1()"));
+    assert!(row.contains(".snap_to_window_with_margin(px(8.))"));
+    assert!(row.contains("gpui::AnchoredPositionMode::Local"));
+    assert!(row.contains("div().absolute().top_0().left_0().child("));
 }

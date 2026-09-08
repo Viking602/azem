@@ -31,7 +31,7 @@ func TestStreamingHTTPClientHasNoTotalBodyTimeout(t *testing.T) {
 		t.Fatalf("streaming client total timeout = %v, want none", service.streamClient.Timeout())
 	}
 	transport, ok := service.streamClient.Transport().(*http.Transport)
-	if !ok || transport.ResponseHeaderTimeout != 30*time.Second || transport.Proxy == nil {
+	if !ok || transport.ResponseHeaderTimeout != streamingResponseHeaderTimeout || transport.Proxy == nil {
 		t.Fatalf("streaming transport = %#v", service.streamClient.Transport())
 	}
 	httpTransport, ok := service.httpClient.Transport().(*http.Transport)
@@ -52,6 +52,20 @@ func TestClassifyStreamOpenErrorRetriesTransportCancellationOnly(t *testing.T) {
 	if !errors.Is(callerCancellation, context.Canceled) || hyprovider.IsRetryableError(callerCancellation) {
 		t.Fatalf("caller cancellation classification=%v retryable=%v", callerCancellation, hyprovider.IsRetryableError(callerCancellation))
 	}
+
+	headerTimeout := classifyStreamOpenError(context.Background(), "grok", headerTimeoutError{})
+	if !hyprovider.IsRetryableError(headerTimeout) {
+		t.Fatalf("healthy-caller HTTP header timeout is not retryable: %v", headerTimeout)
+	}
+}
+
+type headerTimeoutError struct{}
+
+func (headerTimeoutError) Error() string   { return "net/http: timeout awaiting response headers" }
+func (headerTimeoutError) Timeout() bool   { return true }
+func (headerTimeoutError) Temporary() bool { return true }
+func (headerTimeoutError) Is(err error) bool {
+	return err == context.DeadlineExceeded
 }
 
 func TestDecodeSubscriptionQuotas(t *testing.T) {

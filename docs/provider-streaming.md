@@ -1,6 +1,6 @@
 # Provider Streaming
 
-Last verified: 2026-08-30
+Last verified: 2026-09-07
 
 Azem normalizes every provider into Venat v0.16.1's `provider.Driver`
 contract. The application runtime owns provider/account/model selection,
@@ -14,8 +14,8 @@ consumes the stream, while `durable.Runtime` settles provider/tool effects.
 |---|---|
 | `chatgpt` | Existing Codex Responses subscription driver |
 | `grok` | Existing xAI API or CLI-proxy subscription driver |
-| `cursor` | Oh My Pi-compatible `api2.cursor.sh` Connect protobuf agent driver |
-| llmux profile IDs | `internal/provider/llmux`, backed by llmux v0.3.1 |
+| `cursor` | Native `api2.cursor.sh` Connect protobuf agent driver |
+| llmux profile IDs | `internal/provider/llmux`, backed by llmux v0.3.2 |
 
 Cursor still advertises Azem tools as MCP definitions. Composer also emits
 built-in execs (`read`/`shell`/`write`/`delete`/`grep`/`ls` and `pi_*`
@@ -93,18 +93,21 @@ output, and advertised reasoning-effort values. The picker displays the
 models.dev name while requests retain the provider's actual model ID. API keys
 are sent only to the configured provider endpoint and never to models.dev.
 
-Grok OAuth treats the provider response as an availability overlay, not the
-complete product catalog. Azem keeps the same nine chat-capable curated models
-as the current Oh My Pi catalog, overlays live rows, injects missing curated
-rows, and removes image, speech, and voice-only IDs from the chat picker.
-Provider-specific reasoning policy is applied both when fresh rows are saved
-and when legacy SQLite rows are loaded, so a restart cannot temporarily remove
-the Grok 4.5/4.6 effort control while a background refresh is pending.
+Grok OAuth treats the combined successful `/v1/models` and
+`/v1/language-models` account response as the complete availability catalog.
+Azem normalizes only returned chat-capable rows and removes image, speech, and
+voice-only IDs from the chat picker. A successful refresh transaction replaces
+the persisted account catalog, so a model omitted by the API immediately leaves
+Settings, pickers, and route validation. No curated/static Grok rows are
+injected. A failed refresh may surface only the last successful account cache,
+marked stale. Provider-specific reasoning policy is applied both when fresh rows
+are saved and when SQLite rows are loaded, so a restart does not temporarily
+remove an advertised model's effort control while a refresh is pending.
 
 `GetUsableModels` does not publish a context-window field. Cursor metadata
-therefore follows the protocol signals used by Oh My Pi: a `1M` display label,
-native Kimi K3 or GLM 5.2+ identity, or Claude/Gemini `max_mode` raises the
-effective window to 1,000,000 tokens; other unknown rows stay at 200,000.
+therefore follows explicit protocol signals: a `1M` display label, native Kimi
+K3 or GLM 5.2+ identity, or Claude/Gemini `max_mode` raises the effective window
+to 1,000,000 tokens; other unknown rows stay at 200,000.
 Azem preserves Cursor's returned `max_mode` bit and writes it to both
 `ModelDetails.max_mode` and `RequestedModel.max_mode`. Model IDs that encode
 `none`/`low`/`medium`/`high`/`xhigh`/`max` remain the wire source of truth.
@@ -119,8 +122,8 @@ Availability remains an atomic write of that family's raw IDs.
 The family row reports how many enabled raw variants it contains and keeps
 every raw ID as a search alias, so folding does not make inventory invisible.
 The authenticated account's `GetUsableModels` response is authoritative.
-Azem does not inject legacy static OMP rows that the account endpoint omitted,
-because selecting one could fail at request time.
+Azem does not inject legacy static fallback rows that the account endpoint
+omitted because selecting one could fail at request time.
 Authentication, network, protobuf/decode, and empty-response failures are not
 converted into bundled rows. The catalog service may retain the last successful
 account-scoped result and surface it explicitly as stale; a failed refresh
@@ -201,6 +204,18 @@ output, and total token fields when the upstream protocol reports them.
 DeepSeek's separate uncached/cache-read counters become inclusive input, and a
 reported zero remains a real zero rather than unsupported telemetry. Opaque
 provider continuation state remains private.
+
+Main and resumed-main final publication is gated at the application boundary.
+Venat emits text and `FrameDone` before evaluating output guardrails, so those
+frames are candidates, not accepted answers. Explicit `final_answer` text and
+unphased terminal text stay private until the engine succeeds and
+`CompleteTurn` commits the canonical answer. Publish that accepted answer once;
+discard rejected candidates on a guard continuation. Explicit commentary,
+thinking, and tools remain live. Unphased text becomes commentary only when a
+tool boundary establishes that role. Genuine interrupted provider output may
+still be shown as a failed partial, never as an accepted completion.
+This changes publication timing, not the static prompt, tool schema, provider
+message order, or prefix-cache identity.
 
 Some OpenAI Responses-compatible streams expose one logical tool call first
 with a provisional `item_id` such as `fc_tmp_*`, then with the final
@@ -293,10 +308,12 @@ Team, and subagent maintenance all call the same host archive kernel.
 `internal/provider/errcode` classifies every terminal provider failure into a
 stable, machine-readable code: `auth`, `quota`, `rate_limit`,
 `context_overflow`, `empty_response`, `invalid_request`, `server`,
-`transport`, `cancelled`, or `unknown`. Typed errors (the shared
+`transport`, `timeout`, `cancelled`, or `unknown`. Typed errors (the shared
 `responses.APIError` and Venat's provider error kinds) win over transport
 heuristics, and anything unrecognized classifies as `unknown` rather than a
-guess.
+guess. `context.DeadlineExceeded` and Go 1.25 HTTP header timeouts classify
+as `timeout`, not `cancelled`; user stop remains `cancelled`. The desktop
+titles a timeout and replaces the raw Go sentinel with product copy.
 
 The runtime attaches the code to the event payload as `Data["errorCode"]` on
 `run_failed` (main and Team runs) and on `provider_retry` waiting events when a
@@ -307,7 +324,7 @@ alone never schedules an attempt.
 
 ## Portable provider contract
 
-Azem pins Venat v0.16.1 and llmux v0.3.1. The shared contract preserves
+Azem pins Venat v0.16.1 and llmux v0.3.2. The shared contract preserves
 commentary/final text phase, terminal state, distinct length/error stop reasons,
 reported usage flags, cache reads/writes, sources, files, warnings, portable
 modality metadata, and provider compatibility descriptors. Tool argument
@@ -336,3 +353,7 @@ checks before release:
 GOWORK=off go test ./internal/provider/llmux ./internal/provider/responses ./internal/app ./internal/desktop
 make test-gpui
 ```
+
+### Empty model responses
+
+The shared provider retry boundary rejects a completed turn with no text, reasoning, or finalized tool call before it reaches Venat continuation validation. It uses the existing pre-emission retry budget and never reruns earlier tool calls. With retries disabled or exhausted, it reports an explicit empty_response provider error instead of accepting an empty final answer. EOF before any output is handled the same way. Cancellation, explicit failures, and content filtering retain their terminal classification.

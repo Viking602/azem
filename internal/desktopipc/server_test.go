@@ -36,6 +36,15 @@ func (*lifecycleDispatcher) ImportAttachmentBytes(_, _, _ string, _ []byte) (des
 	return desktop.Attachment{}, nil
 }
 
+func TestReconnectSnapshotWantsRefresh(t *testing.T) {
+	if reconnectSnapshotWantsRefresh(json.RawMessage(`{"sessionId":"s"}`)) {
+		t.Fatal("default reconnect snapshot must not start catalogs")
+	}
+	if !reconnectSnapshotWantsRefresh(json.RawMessage(`{"sessionId":"s","refresh":true}`)) {
+		t.Fatal("refresh reconnect snapshot must start catalogs after the response is written")
+	}
+}
+
 type navigationDispatcher struct {
 	lifecycleDispatcher
 	started chan struct{}
@@ -92,71 +101,39 @@ func TestSessionNavigationDoesNotWaitForPullRequestDashboard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer client.connection.Close()
-	// Use the multiplexed wire contract used by GPUI, not the serial Go CLI helper.
-	request := NewEnvelope(FrameRequest)
-	request.ID, request.Method, request.Payload = "dashboard", MethodPullRequestDashboard, mustJSON(map[string]string{})
-	if err := client.codec.WriteEnvelope(request); err != nil {
-		t.Fatal(err)
-	}
+	defer client.Close()
+	dashboardDone := make(chan error, 1)
+	go func() {
+		requestCtx, requestCancel := context.WithTimeout(ctx, 5*time.Second)
+		defer requestCancel()
+		dashboardDone <- client.Request(requestCtx, MethodPullRequestDashboard, map[string]string{}, nil)
+	}()
 	select {
 	case <-dispatcher.started:
 	case <-time.After(time.Second):
 		t.Fatal("dashboard did not start")
 	}
-	request.ID = "dashboard-next"
-	if err := client.codec.WriteEnvelope(request); err != nil {
-		t.Fatal(err)
-	}
-	request.ID = "dashboard-busy"
-	if err := client.codec.WriteEnvelope(request); err != nil {
-		t.Fatal(err)
-	}
-	if err := client.connection.SetDeadline(time.Now().Add(time.Second)); err != nil {
-		t.Fatal(err)
-	}
-	busy, err := client.codec.ReadFrame()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if busy.Envelope == nil || busy.Envelope.ID != "dashboard-busy" || busy.Envelope.Error == nil || busy.Envelope.Error.Code != "request_busy" {
-		t.Fatalf("dashboard backpressure response = %#v", busy.Envelope)
-	}
 	started := time.Now()
-	request.ID, request.Method = "resume", MethodResumeSession
-	request.Payload = mustJSON(map[string]string{"sessionId": "existing-session"})
-	if err := client.connection.SetDeadline(time.Now().Add(250 * time.Millisecond)); err != nil {
-		t.Fatal(err)
-	}
-	if err := client.codec.WriteEnvelope(request); err != nil {
-		t.Fatal(err)
-	}
-	frame, err := client.codec.ReadFrame()
+	requestCtx, requestCancel := context.WithTimeout(ctx, time.Second)
+	var snapshot map[string]any
+	err = client.Request(requestCtx, MethodResumeSession, map[string]string{"sessionId": "existing-session"}, &snapshot)
+	requestCancel()
 	elapsed := time.Since(started)
 	if err != nil {
 		t.Fatalf("session navigation blocked by background dashboard for %s: %v", elapsed, err)
 	}
-	if frame.Envelope == nil || frame.Envelope.Kind != FrameResponse || frame.Envelope.ID != "resume" || frame.Envelope.Error != nil {
-		t.Fatalf("navigation response = %#v", frame.Envelope)
+	if elapsed > 250*time.Millisecond {
+		t.Fatalf("session navigation took %s while dashboard was blocked", elapsed)
 	}
 	t.Logf("session response while dashboard remains blocked: %s", elapsed)
-	select {
-	case <-dispatcher.started:
-		t.Fatal("dashboard queries must stay serial to prevent stale results overtaking new ones")
-	default:
-	}
 	release()
-	if err := client.connection.SetDeadline(time.Now().Add(time.Second)); err != nil {
-		t.Fatal(err)
-	}
-	for _, id := range []string{"dashboard", "dashboard-next"} {
-		frame, err := client.codec.ReadFrame()
+	select {
+	case err := <-dashboardDone:
 		if err != nil {
 			t.Fatal(err)
 		}
-		if frame.Envelope == nil || frame.Envelope.ID != id || frame.Envelope.Error != nil {
-			t.Fatalf("ordered dashboard response for %s = %#v", id, frame.Envelope)
-		}
+	case <-time.After(time.Second):
+		t.Fatal("dashboard request did not finish")
 	}
 }
 

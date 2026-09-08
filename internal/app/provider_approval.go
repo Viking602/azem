@@ -47,10 +47,6 @@ type approvalGate struct {
 	prepared map[string]preparedGovernedCall
 }
 
-type suspendableApprovalHost interface {
-	awaitSuspendableApproval(context.Context, string, string, string, *agentservice.Run, tool.Call, agentservice.PendingApproval) (approvalResolution, error)
-}
-
 func governedOperationKey(call tool.Call) string {
 	if strings.TrimSpace(call.OperationID) != "" {
 		return call.OperationID
@@ -111,16 +107,12 @@ func (gate *approvalGate) BeforeToolCall(ctx context.Context, call *tool.Call) e
 		if driver.host == nil {
 			return errors.New("approval UI is unavailable")
 		}
-		var resolution approvalResolution
-		if suspendable, ok := driver.host.(suspendableApprovalHost); ok {
-			resolution, err = suspendable.awaitSuspendableApproval(
-				ctx, driver.sessionID, driver.agentID, driver.agentType, driver.run, *call, *execution.Approval,
-			)
-		} else {
-			resolution, err = driver.host.AwaitApproval(
-				ctx, driver.sessionID, driver.agentID, driver.agentType, driver.run, *call, *execution.Approval,
-			)
-		}
+		// Keep a live approval on its current execution. Restart recovery owns
+		// resumption only after that execution has actually stopped.
+		resolution, approvalErr := driver.host.AwaitApproval(
+			ctx, driver.sessionID, driver.agentID, driver.agentType, driver.run, *call, *execution.Approval,
+		)
+		err = approvalErr
 		if err != nil {
 			return err
 		}
@@ -539,7 +531,10 @@ func (s *Service) teamToolBus(ctx context.Context, sessionID, runID, goal string
 		return nil, err
 	}
 	if s.sessions != nil {
-		drivers = append(drivers, &todoDriver{sessionID: sessionID, store: s.sessions, emit: func(event Event) bool {
+		drivers = append(drivers, &historyDriver{sessions: s.sessions, sessionID: sessionID, tokenBudget: s.cfg.Agents.Context.HistoryRetrievalTokens})
+		drivers = append(drivers, &todoDriver{sessionID: sessionID, store: s.sessions, beforeComplete: func(ctx context.Context) error {
+			return verifyTodoCompletion(ctx, s.sessions, s.cfg.Workspace.Root, sessionID, runID, []string{runID})
+		}, emit: func(event Event) bool {
 			return s.emitTodoUpdated(sessionID, *event.Todo)
 		}})
 		drivers = append(drivers, &contextArtifactDriver{sessionID: sessionID, store: s.sessions})
@@ -712,14 +707,6 @@ func (s *Service) bindProviderEngine(engine hyagent.Engine) hyagent.Engine {
 }
 
 func (s *Service) awaitApproval(ctx context.Context, sessionID, agentID, agentType string, run *agentservice.Run, call tool.Call, pending agentservice.PendingApproval) (approvalResolution, error) {
-	return s.awaitApprovalMode(ctx, sessionID, agentID, agentType, run, call, pending, false)
-}
-
-func (s *Service) awaitSuspendableApproval(ctx context.Context, sessionID, agentID, agentType string, run *agentservice.Run, call tool.Call, pending agentservice.PendingApproval) (approvalResolution, error) {
-	return s.awaitApprovalMode(ctx, sessionID, agentID, agentType, run, call, pending, true)
-}
-
-func (s *Service) awaitApprovalMode(ctx context.Context, sessionID, agentID, agentType string, run *agentservice.Run, call tool.Call, pending agentservice.PendingApproval, suspendable bool) (approvalResolution, error) {
 	approvalID := strings.TrimSpace(pending.Request.ApprovalID)
 	if approvalID == "" {
 		var err error
@@ -785,8 +772,8 @@ func (s *Service) awaitApprovalMode(ctx context.Context, sessionID, agentID, age
 	}
 	live := &liveApproval{
 		approvalID: approvalID, agentID: agentID, agentType: agentType, run: run, runID: run.RunID,
-		callID: call.ID, operationID: durableApprovalKey(call), sessionID: sessionID, pending: pending,
-		decision: make(chan agentservice.ApprovalMode, 1), suspension: make(chan error, 1), suspendable: suspendable,
+		callID: call.ID, operationID: durableApprovalKey(call), sessionID: sessionID, pending: pending, request: request,
+		decision: make(chan agentservice.ApprovalMode, 1),
 	}
 	s.mu.Lock()
 	if _, exists := s.liveApprovals[approvalID]; exists {
@@ -799,12 +786,7 @@ func (s *Service) awaitApprovalMode(ctx context.Context, sessionID, agentID, age
 	}
 	s.liveApprovals[approvalID] = live
 	s.mu.Unlock()
-	handedOff := false
-	defer func() {
-		if !handedOff {
-			s.finishLiveApproval(live)
-		}
-	}()
+	defer s.finishLiveApproval(live)
 	if !s.emit(ctx, Event{
 		Kind: EventToolUpdate, SessionID: sessionID, RunID: run.RunID, AgentID: agentID,
 		ToolCallID: call.ID, State: "awaiting_approval",
@@ -816,22 +798,7 @@ func (s *Service) awaitApprovalMode(ctx context.Context, sessionID, agentID, age
 	if !s.emit(ctx, event) {
 		return approvalResolution{}, eventDeliveryError(ctx)
 	}
-	if suspendable {
-		s.mu.Lock()
-		if s.shuttingDown {
-			s.mu.Unlock()
-			return approvalResolution{}, context.Canceled
-		}
-		s.wg.Add(1)
-		s.mu.Unlock()
-		go func() {
-			defer s.wg.Done()
-			live.suspension <- s.coding.SuspendRun(s.ctx, run)
-		}()
-		handedOff = true
-		<-ctx.Done()
-		return approvalResolution{}, context.Cause(ctx)
-	}
+
 	select {
 	case <-ctx.Done():
 		return approvalResolution{}, context.Cause(ctx)
@@ -1321,9 +1288,6 @@ func (s *Service) resolveLiveApproval(ctx context.Context, approvalID, decision,
 	}
 	live.resolving = true
 	s.mu.Unlock()
-	if live.suspendable {
-		return s.resolveSuspendedLiveApproval(ctx, live, decision, decidedBy, mode)
-	}
 
 	if live.run != nil {
 		if err := s.coding.ResolveApproval(ctx, live.run, live.operationID, mode, decidedBy); err != nil {
@@ -1369,68 +1333,6 @@ func (s *Service) resolveLiveApproval(ctx context.Context, approvalID, decision,
 		s.providers.AutoWakePending(live.sessionID)
 	}
 	return true, nil
-}
-
-func (s *Service) resolveSuspendedLiveApproval(
-	ctx context.Context,
-	live *liveApproval,
-	decision string,
-	decidedBy string,
-	mode agentservice.ApprovalMode,
-) (bool, error) {
-	select {
-	case err := <-live.suspension:
-		if err != nil {
-			s.resetLiveApprovalResolution(live)
-			return true, err
-		}
-	case <-ctx.Done():
-		s.resetLiveApprovalResolution(live)
-		return true, context.Cause(ctx)
-	}
-	if s.coding == nil {
-		s.resetLiveApprovalResolution(live)
-		return true, fmt.Errorf("coding runtime is unavailable")
-	}
-	if err := s.coding.ResolveRecoveredApproval(
-		ctx, live.pending.Request, live.pending.Token.TokenID, decision,
-	); err != nil {
-		s.resetLiveApprovalResolution(live)
-		return true, err
-	}
-	s.mu.Lock()
-	if current := s.liveApprovals[live.approvalID]; current != live {
-		s.mu.Unlock()
-		return true, fmt.Errorf("approval %q is no longer pending", live.approvalID)
-	}
-	live.resolving = false
-	live.resolved = true
-	delete(s.liveApprovals, live.approvalID)
-	s.mu.Unlock()
-	s.emit(ctx, Event{
-		Kind: EventApprovalResolved, SessionID: live.sessionID, RunID: live.runID, AgentID: live.agentID,
-		ToolCallID: live.callID, ApprovalID: live.approvalID, State: decision, Data: map[string]string{"decided_by": decidedBy},
-	})
-	if s.providers == nil {
-		return true, fmt.Errorf("provider runtime is unavailable")
-	}
-	if err := s.providers.ResumeRecoveredRunAtOperation(ctx, live.runID, live.operationID); err != nil {
-		return true, err
-	}
-	if mode == agentservice.ApprovalDenied {
-		s.notifyHook(ctx, hooks.Metadata{
-			SessionID: live.sessionID, RunID: live.runID, AgentID: live.agentID, AgentType: live.agentType, CWD: s.cfg.Workspace.Root,
-		}, "permission_denied", "Approval denied", live.pending.Request.RequestedAction)
-	}
-	return true, nil
-}
-
-func (s *Service) resetLiveApprovalResolution(live *liveApproval) {
-	s.mu.Lock()
-	if current := s.liveApprovals[live.approvalID]; current == live {
-		live.resolving = false
-	}
-	s.mu.Unlock()
 }
 
 func approvalDecisionMode(decision string) (agentservice.ApprovalMode, error) {

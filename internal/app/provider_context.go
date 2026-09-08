@@ -101,6 +101,7 @@ type TurnRequest struct {
 	approvedPlanContext    string
 	accountID              string
 	historicalContext      string
+	queueItemID            string
 	resuming               bool
 	budgetRestored         bool
 	maxTokens              int64

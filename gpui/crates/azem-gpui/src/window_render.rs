@@ -2,6 +2,8 @@ use super::*;
 pub(crate) fn thread_status(state: &AppState) -> (&'static str, bool) {
     if state.runtime.activity.as_ref() == "stopping" && stoppable_run(state).is_some() {
         ("ui.stopping", false)
+    } else if super::window_controls::pending_native_approval(state).is_some() {
+        ("approval.required", false)
     } else if pending_question_run_id(state).is_some() {
         ("ui.awaitingInput", false)
     } else if state.runtime.running {
@@ -13,8 +15,30 @@ pub(crate) fn thread_status(state: &AppState) -> (&'static str, bool) {
 
 impl Render for AzemWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.advance_sidebar_animation(window, AppearancePreferences::current(cx).reduced_motion);
         self.reconcile_side_panel_layout(window);
         self.advance_side_panel_animation(window);
+        let moving: Vec<_> = self
+            .process_expansion
+            .borrow_mut()
+            .disclosures
+            .values_mut()
+            .filter_map(|motion| {
+                if motion.from == motion.target {
+                    return None;
+                }
+                if !motion.active(Instant::now()) {
+                    motion.from = motion.target;
+                }
+                Some(motion.index)
+            })
+            .collect();
+        for index in &moving {
+            self.refresh_transcript_layout(*index);
+        }
+        if !moving.is_empty() {
+            window.request_animation_frame();
+        }
         let locale = Locale::resolve(&self.state.settings.language);
         let preferences = AppearancePreferences::current(cx);
         window.set_rem_size(px(16. * preferences.ui_font_size / 14.));
@@ -27,15 +51,57 @@ impl Render for AzemWindow {
         } else {
             requested_surface
         };
+        let content_opacity = self.surface_motion.opacity(
+            surface,
+            self.state.navigation.current_session_id.as_ref(),
+            preferences.reduced_motion,
+            Instant::now(),
+        );
+        if content_opacity < 1. {
+            window.request_animation_frame();
+        }
         let model_popup_visible = self.model_picker_open
             && !search_open
             && if self.settings_open {
-                self.route_picker_target
-                    .as_ref()
-                    .is_some_and(|target| target.kind == RoutePickerKind::Model)
+                self.route_picker_target.is_some()
             } else {
                 surface == Surface::Thread && self.route_picker_target.is_none()
             };
+        if model_popup_visible {
+            self.model_picker_render_target = self.route_picker_target.clone();
+        }
+        for (key, open) in [
+            ("settings", self.settings_open),
+            ("search", search_open),
+            ("rename", self.renaming_session_id.is_some()),
+            ("model", model_popup_visible),
+            (
+                "approval",
+                self.approval_picker.open && !search_open && !self.settings_open,
+            ),
+            (
+                "branch",
+                self.branch_picker.open && !search_open && !self.settings_open,
+            ),
+            (
+                "context",
+                self.context_popover_open
+                    && surface == Surface::Thread
+                    && !search_open
+                    && !self.settings_open,
+            ),
+        ] {
+            if self.popup_motions.entry(key).or_default().update(
+                open,
+                preferences.reduced_motion,
+                Instant::now(),
+            ) {
+                window.request_animation_frame();
+            }
+        }
+        if !self.popup_motion("model").visible() {
+            self.model_picker_render_target = None;
+        }
         if !model_popup_visible {
             self.reasoning_drag = None;
         }
@@ -67,11 +133,12 @@ impl Render for AzemWindow {
             Surface::Security => labels.security.to_string(),
             Surface::Terminal => labels.terminal.to_string(),
         };
-        let current_workspace_width = workspace_width(f32::from(window.bounds().size.width));
+        let current_workspace_width = workspace_width(
+            f32::from(window.bounds().size.width) + SIDEBAR_WIDTH - self.sidebar_visible_width,
+        );
         let content = match surface {
             Surface::Thread if empty_thread => {
                 let composer = self.composer_view(palette, labels, true, cx);
-                let queue = self.queued_prompts_view(palette, labels, cx);
                 div()
                     .id("empty-thread")
                     .role(Role::Region)
@@ -93,25 +160,34 @@ impl Render for AzemWindow {
                             .flex_col()
                             .child(
                                 div()
-                                    .mb(px(22.))
+                                    .mb(px(20.))
                                     .flex()
                                     .flex_col()
-                                    .gap_1()
+                                    .items_center()
+                                    .gap(px(16.))
+                                    .child(icon("bot", 40., palette.ink))
                                     .child(
                                         div()
-                                            .text_size(px(36.))
-                                            .line_height(px(40.))
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .text_size(px(30.))
+                                            .line_height(px(35.))
+                                            .font_weight(gpui::FontWeight::NORMAL)
                                             .text_color(palette.ink)
-                                            .child(labels.prompt_title),
-                                    )
-                                    .child(
-                                        div()
-                                            .max_w(px(540.))
-                                            .text_size(px(13.))
-                                            .line_height(px(21.))
-                                            .text_color(palette.muted)
-                                            .child(labels.prompt_subtitle),
+                                            .text_center()
+                                            .child(
+                                                locale.format(
+                                                    "chat.projectPrompt",
+                                                    &[(
+                                                        "project",
+                                                        std::path::Path::new(
+                                                            self.state.workspace.root.as_ref(),
+                                                        )
+                                                        .file_name()
+                                                        .and_then(|name| name.to_str())
+                                                        .unwrap_or("workspace")
+                                                        .to_string(),
+                                                    )],
+                                                ),
+                                            ),
                                     ),
                             )
                             .child(
@@ -120,7 +196,6 @@ impl Render for AzemWindow {
                                     .max_w(px(CHAT_COLUMN_MAX_WIDTH))
                                     .flex()
                                     .flex_col()
-                                    .when_some(queue, |stack, queue| stack.child(queue))
                                     .child(composer),
                             ),
                     )
@@ -184,7 +259,6 @@ impl Render for AzemWindow {
                         self,
                         palette,
                         labels,
-                        self.environment_expanded.as_deref(),
                         if environment_returning {
                             0.
                         } else {
@@ -235,7 +309,6 @@ impl Render for AzemWindow {
                     )
                 };
                 let composer = self.composer_view(palette, labels, false, cx);
-                let queue = self.queued_prompts_view(palette, labels, cx);
                 div()
                     .id("active-thread")
                     .role(Role::Region)
@@ -305,7 +378,6 @@ impl Render for AzemWindow {
                                     .left(px(column_animation_offset))
                                     .flex()
                                     .flex_col()
-                                    .when_some(queue, |stack, queue| stack.child(queue))
                                     .child(composer),
                             ),
                     )
@@ -331,17 +403,18 @@ impl Render for AzemWindow {
             self.sidebar_context_menu.as_ref().map(|menu| &menu.target),
             cx,
         );
-        let settings_modal = if self.settings_open {
+        let settings_modal = if self.popup_motion("settings").visible() {
             Some(self.settings_modal_view(palette, cx))
         } else {
             None
         };
-        let search_modal = if search_open {
+        let search_modal = if self.popup_motion("search").visible() {
             Some(search_surface(
                 &self.state,
                 self.search_input.clone(),
                 palette,
                 labels,
+                self.popup_motion("search"),
                 cx,
             ))
         } else {
@@ -352,9 +425,9 @@ impl Render for AzemWindow {
             .as_ref()
             .map(|_| sidebar_context_menu_view(self, palette, locale, cx));
         let rename_modal = self
-            .renaming_session_id
-            .as_ref()
-            .map(|_| session_rename_modal(self, palette, locale, cx));
+            .popup_motion("rename")
+            .visible()
+            .then(|| session_rename_modal(self, palette, locale, cx));
         let agent_titlebar_visible = surface == Surface::Thread
             && self.side_panel_agents_open
             && (self.side_panel_open || self.side_panel_closing);
@@ -388,199 +461,235 @@ impl Render for AzemWindow {
             .flex_col()
             .child(
                 div()
-                    .h(px(37.))
-                    .flex_shrink_0()
-                    .border_b_1()
-                    .border_color(palette.border)
-                    .bg(palette.paper),
-            )
-            .child(
-                div().flex_1().min_h_0().flex().child(sidebar).child(
-                    div()
-                        .id("workspace")
-                        .role(Role::Main)
-                        .aria_label(surface_title.clone())
-                        .flex_1()
-                        .min_w_0()
-                        .h_full()
-                        .bg(palette.paper)
-                        .flex()
-                        .flex_col()
-                        .child(
-                            div()
-                                .relative()
-                                .h(px(if surface == Surface::Thread { 46. } else { 0. }))
-                                .pl(px(if surface == Surface::Thread { 22. } else { 0. }))
-                                .pr(px(if surface == Surface::Thread {
-                                    22. + agent_titlebar_width
-                                } else {
-                                    0.
-                                }))
-                                .when(surface == Surface::Thread && !empty_thread, |header| {
-                                    header.border_b_1().border_color(palette.border)
-                                })
-                                .bg(palette.paper)
-                                .overflow_hidden()
-                                .flex()
-                                .items_center()
-                                .child(
-                                    div()
-                                        .text_color(palette.ink)
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .when(
-                                            surface == Surface::Thread && !empty_thread,
-                                            |title| {
-                                                title
-                                                    .child(
-                                                        div()
-                                                            .font_family("SF Mono")
-                                                            .text_size(px(9.))
-                                                            .text_color(palette.faint)
-                                                            .child(
-                                                                if surface_title.contains("UI") {
-                                                                    locale.text(
-                                                                        "conversation.designTask",
-                                                                    )
-                                                                } else {
-                                                                    locale.text("conversation.task")
-                                                                },
-                                                            ),
-                                                    )
-                                                    .child(
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .child(
+                        div()
+                            .w(px(self.sidebar_visible_width))
+                            .min_w(px(0.))
+                            .h_full()
+                            .pt(px(46.))
+                            .bg(palette.sidebar)
+                            .flex_shrink_0()
+                            .overflow_hidden()
+                            .when(self.sidebar_visible_width > 0., |rail| rail.child(sidebar)),
+                    )
+                    .child(
+                        div()
+                            .id("workspace")
+                            .role(Role::Main)
+                            .aria_label(surface_title.clone())
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .bg(palette.paper)
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .relative()
+                                    .h(px(46.))
+                                    .flex_shrink_0()
+                                    .pl(px((120. - self.sidebar_visible_width).max(22.)))
+                                    .pr(px(if surface == Surface::Thread {
+                                        22. + agent_titlebar_width
+                                    } else {
+                                        0.
+                                    }))
+                                    .when(surface == Surface::Thread && !empty_thread, |header| {
+                                        header.border_b_1().border_color(palette.border)
+                                    })
+                                    .bg(palette.paper)
+                                    .overflow_hidden()
+                                    .flex()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .text_color(palette.ink)
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .when(
+                                                surface == Surface::Thread && !empty_thread,
+                                                |title| {
+                                                    title.child(
                                                         div()
                                                             .text_size(px(13.))
                                                             .font_weight(gpui::FontWeight::SEMIBOLD)
                                                             .child(surface_title.clone()),
                                                     )
-                                            },
-                                        )
-                                        .when(surface != Surface::Thread, |title| {
-                                            title.child(
-                                                div()
-                                                    .text_size(px(13.))
-                                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                                    .child(surface_title),
+                                                },
                                             )
-                                        }),
-                                )
-                                .child(div().flex_1())
-                                .when(surface == Surface::Thread && !empty_thread, |header| {
-                                    header
-                                        .when(self.state.connection.connected, |header| {
-                                            header.child(
-                                                div()
-                                                    .px_2()
-                                                    .py(px(3.))
-                                                    .rounded_full()
-                                                    .bg(if thread_status_active {
-                                                        rgba(0x1f7af014)
-                                                    } else {
-                                                        palette.paper_muted
-                                                    })
-                                                    .text_size(px(10.))
-                                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                                    .text_color(if thread_status_active {
-                                                        rgb(0x1f7af0)
-                                                    } else {
-                                                        palette.faint
-                                                    })
-                                                    .child(locale.text(thread_status_key)),
-                                            )
-                                        })
-                                        .child(
-                                            div()
-                                                .id("environment-toggle")
-                                                .role(Role::Button)
-                                                .aria_label(locale.text("ui.toggleEnvironment"))
-                                                .aria_selected(self.environment_open)
-                                                .tab_stop(true)
-                                                .h(px(29.))
-                                                .px_2()
-                                                .ml_2()
-                                                .rounded(px(7.))
-                                                .border_1()
-                                                .border_color(palette.border)
-                                                .bg(if self.environment_open {
-                                                    palette.paper_muted
-                                                } else {
-                                                    palette.paper
-                                                })
-                                                .text_color(palette.muted)
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .cursor_pointer()
-                                                .hover(move |style| style.bg(palette.hover))
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.toggle_environment_panel(cx);
-                                                }))
-                                                .child(icon(
-                                                    "sliders-horizontal",
-                                                    15.,
-                                                    palette.muted,
-                                                )),
-                                        )
-                                        .child(
-                                            div()
-                                                .id("side-panel-toggle")
-                                                .role(Role::Button)
-                                                .aria_label(locale.text("ui.toggleSidePanel"))
-                                                .aria_selected(self.side_panel_open)
-                                                .tab_stop(true)
-                                                .h(px(29.))
-                                                .px_2()
-                                                .ml_1()
-                                                .rounded(px(7.))
-                                                .border_1()
-                                                .border_color(palette.border)
-                                                .bg(if self.side_panel_open {
-                                                    palette.paper_muted
-                                                } else {
-                                                    palette.paper
-                                                })
-                                                .text_color(palette.muted)
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .cursor_pointer()
-                                                .hover(move |style| style.bg(palette.hover))
-                                                .on_click(cx.listener(|this, _, window, cx| {
-                                                    this.toggle_side_panel(window, cx);
-                                                }))
-                                                .child(icon("panels", 15., palette.muted)),
-                                        )
-                                })
-                                .when(!self.state.connection.connected, |header| {
-                                    header.child(
-                                        div()
-                                            .id("connection-status")
-                                            .role(Role::Status)
-                                            .text_size(px(11.))
-                                            .text_color(palette.warning)
-                                            .child(self.state.connection.message.to_string()),
+                                            .when(surface != Surface::Thread, |title| {
+                                                title.child(
+                                                    div()
+                                                        .text_size(px(13.))
+                                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                        .child(surface_title),
+                                                )
+                                            }),
                                     )
-                                })
-                                .when(agent_titlebar_visible, |header| {
-                                    header.child(agent_panel_tab(self, palette, locale, cx))
-                                }),
-                        )
-                        .child(content)
-                        .when(self.terminal_open, |workspace| {
-                            workspace.child(
-                                div()
-                                    .id("terminal-dock")
-                                    .h(px(260.))
-                                    .min_h(px(140.))
-                                    .flex_shrink_0()
-                                    .border_t_1()
-                                    .border_color(palette.border)
-                                    .bg(palette.paper)
-                                    .child(self.terminal_view(palette, cx)),
+                                    .child(div().flex_1())
+                                    .when(surface == Surface::Thread && !empty_thread, |header| {
+                                        header
+                                            .when(self.state.connection.connected, |header| {
+                                                header.child(
+                                                    div()
+                                                        .px_2()
+                                                        .py(px(3.))
+                                                        .rounded_full()
+                                                        .bg(if thread_status_active {
+                                                            rgba(0x1f7af014)
+                                                        } else {
+                                                            palette.paper_muted
+                                                        })
+                                                        .text_size(px(10.))
+                                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                        .text_color(if thread_status_active {
+                                                            rgb(0x1f7af0)
+                                                        } else {
+                                                            palette.faint
+                                                        })
+                                                        .child(locale.text(thread_status_key)),
+                                                )
+                                            })
+                                            .child(
+                                                div()
+                                                    .id("environment-toggle")
+                                                    .role(Role::Button)
+                                                    .aria_label(locale.text("ui.toggleEnvironment"))
+                                                    .aria_selected(self.environment_open)
+                                                    .tab_stop(true)
+                                                    .h(px(29.))
+                                                    .px_2()
+                                                    .ml_2()
+                                                    .rounded(px(7.))
+                                                    .border_1()
+                                                    .border_color(palette.border)
+                                                    .bg(if self.environment_open {
+                                                        palette.paper_muted
+                                                    } else {
+                                                        palette.paper
+                                                    })
+                                                    .text_color(palette.muted)
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .cursor_pointer()
+                                                    .hover(move |style| style.bg(palette.hover))
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.toggle_environment_panel(cx);
+                                                    }))
+                                                    .child(icon(
+                                                        "sliders-horizontal",
+                                                        15.,
+                                                        palette.muted,
+                                                    )),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id("side-panel-toggle")
+                                                    .role(Role::Button)
+                                                    .aria_label(locale.text("ui.toggleSidePanel"))
+                                                    .aria_selected(self.side_panel_open)
+                                                    .tab_stop(true)
+                                                    .h(px(29.))
+                                                    .px_2()
+                                                    .ml_1()
+                                                    .rounded(px(7.))
+                                                    .border_1()
+                                                    .border_color(palette.border)
+                                                    .bg(if self.side_panel_open {
+                                                        palette.paper_muted
+                                                    } else {
+                                                        palette.paper
+                                                    })
+                                                    .text_color(palette.muted)
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .cursor_pointer()
+                                                    .hover(move |style| style.bg(palette.hover))
+                                                    .on_click(cx.listener(|this, _, window, cx| {
+                                                        this.toggle_side_panel(window, cx);
+                                                    }))
+                                                    .child(icon("panels", 15., palette.muted)),
+                                            )
+                                    })
+                                    .when(!self.state.connection.connected, |header| {
+                                        header.child(
+                                            div()
+                                                .id("connection-status")
+                                                .role(Role::Status)
+                                                .text_size(px(11.))
+                                                .text_color(palette.warning)
+                                                .child(self.state.connection.message.to_string()),
+                                        )
+                                    })
+                                    .when(agent_titlebar_visible, |header| {
+                                        header.child(agent_panel_tab(self, palette, locale, cx))
+                                    }),
                             )
-                        }),
-                ),
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .opacity(content_opacity)
+                                    .child(content),
+                            )
+                            .when(self.terminal_open, |workspace| {
+                                workspace.child(
+                                    div()
+                                        .id("terminal-dock")
+                                        .h(px(260.))
+                                        .min_h(px(140.))
+                                        .flex_shrink_0()
+                                        .border_t_1()
+                                        .border_color(palette.border)
+                                        .bg(palette.paper)
+                                        .child(self.terminal_view(palette, cx)),
+                                )
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .w(px(120.))
+                    .h(px(32.))
+                    .flex()
+                    .items_center()
+                    .pl(px(82.))
+                    .child(
+                        div()
+                            .id("thread-sidebar-toggle")
+                            .role(Role::Button)
+                            .aria_label(locale.text("ui.toggleSidebar"))
+                            .aria_expanded(self.sidebar_open)
+                            .tab_stop(true)
+                            .size(px(28.))
+                            .rounded_md()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .hover(move |style| style.bg(palette.hover))
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)))
+                            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                    this.toggle_sidebar(cx);
+                                    cx.stop_propagation();
+                                }
+                            }))
+                            .child(icon("sidebar-simple", 14., palette.muted)),
+                    )
+                    .flex_shrink_0(),
             )
             .when_some(search_modal, |root, modal| root.child(modal))
             .when_some(settings_modal, |root, modal| root.child(modal))

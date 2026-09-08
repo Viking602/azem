@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/daemon"
 	"github.com/Viking602/azem/internal/desktop"
 	"github.com/Viking602/azem/internal/desktopipc"
@@ -56,10 +57,7 @@ func daemonStatusCommand(ctx context.Context, args []string, streams operator.IO
 	if *jsonOutput {
 		return json.NewEncoder(streams.Out).Encode(map[string]any{"endpoint": endpoint, "snapshot": snapshot})
 	}
-	activeRun := snapshot.ActiveRunID
-	if activeRun == "" && snapshot.Session != nil {
-		activeRun = snapshot.Session.Data["globalActiveRunID"]
-	}
+	activeRun := snapshotActiveRunID(snapshot)
 	_, err = fmt.Fprintf(streams.Out, "workspace: %s\npid: %d\nprotocol: %d\nactive run: %s\n", endpoint.Workspace, endpoint.PID, endpoint.Protocol, firstNonempty(activeRun, "none"))
 	return err
 }
@@ -78,10 +76,7 @@ func daemonStopCommand(ctx context.Context, args []string, streams operator.IO) 
 		return err
 	}
 	defer client.Close()
-	activeRun := snapshot.ActiveRunID
-	if activeRun == "" && snapshot.Session != nil {
-		activeRun = snapshot.Session.Data["globalActiveRunID"]
-	}
+	activeRun := snapshotActiveRunID(snapshot)
 	if activeRun != "" && !*includeActive {
 		return fmt.Errorf("daemon has active run %s; wait for completion or pass --include-active", activeRun)
 	}
@@ -102,11 +97,11 @@ func connectWorkspaceDaemon(ctx context.Context, workspace, configFile string) (
 		}
 		workspace = cwd
 	}
-	paths, err := resolveOperatorPaths(workspace, configFile)
+	paths, err := config.ResolveClientPaths(workspace, configFile)
 	if err != nil {
 		return desktopipc.Endpoint{}, nil, snapshot, err
 	}
-	endpointPath, err := daemon.EndpointPath(paths.StateDir, workspace)
+	endpointPath, err := daemon.EndpointPath(paths.StateDir, paths.Workspace)
 	if err != nil {
 		return desktopipc.Endpoint{}, nil, snapshot, err
 	}
@@ -125,4 +120,17 @@ func connectWorkspaceDaemon(ctx context.Context, workspace, configFile string) (
 		return endpoint, nil, snapshot, err
 	}
 	return endpoint, client, snapshot, nil
+}
+
+func snapshotActiveRunID(snapshot desktop.ReconnectSnapshot) string {
+	for _, run := range snapshot.Runs {
+		switch run.State {
+		case "completed", "failed", "cancelled":
+			continue
+		}
+		if run.RunID != "" && run.Activity != "idle" {
+			return run.RunID
+		}
+	}
+	return ""
 }

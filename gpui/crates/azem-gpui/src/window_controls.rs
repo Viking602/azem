@@ -1,6 +1,32 @@
 use super::*;
 
 impl AzemWindow {
+    pub(super) fn popup_motion(&self, key: &str) -> PopupMotion {
+        self.popup_motions.get(key).copied().unwrap_or_default()
+    }
+
+    pub(super) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_open = !self.sidebar_open;
+        self.sidebar_animation = Some((Instant::now(), self.sidebar_visible_width));
+        cx.notify();
+    }
+
+    pub(super) fn advance_sidebar_animation(&mut self, window: &mut Window, reduced: bool) {
+        let target = if self.sidebar_open { SIDEBAR_WIDTH } else { 0. };
+        if reduced {
+            self.sidebar_visible_width = target;
+            self.sidebar_animation = None;
+        } else if let Some((started, from)) = self.sidebar_animation {
+            self.sidebar_visible_width = eased_side_panel_width(from, target, started.elapsed());
+            if started.elapsed() >= SIDE_PANEL_TRANSITION {
+                self.sidebar_visible_width = target;
+                self.sidebar_animation = None;
+            } else {
+                window.request_animation_frame();
+            }
+        }
+    }
+
     pub(super) fn approval_request_pending(&self) -> bool {
         self.pending_requests
             .values()
@@ -26,6 +52,9 @@ impl AzemWindow {
     }
 
     pub(super) fn change_approval_mode(&mut self, target: &str, cx: &mut Context<Self>) {
+        if !self.approval_picker.open {
+            return;
+        }
         if let Some(action) =
             approval_mode_action(&self.state, target, self.approval_request_pending())
         {
@@ -88,7 +117,12 @@ impl AzemWindow {
     }
 
     pub(super) fn model_picker_selection(&self) -> (String, String, String) {
-        let Some(target) = &self.route_picker_target else {
+        let display_target = if self.model_picker_open {
+            &self.route_picker_target
+        } else {
+            &self.model_picker_render_target
+        };
+        let Some(target) = display_target else {
             return (
                 self.state.settings.provider.to_string(),
                 self.state.settings.model.to_string(),
@@ -127,7 +161,7 @@ impl AzemWindow {
         close: bool,
         cx: &mut Context<Self>,
     ) {
-        if !self.model_controls_enabled() {
+        if !self.model_picker_open || !self.model_controls_enabled() {
             tracing::trace!(target: "azem_gpui::reasoning_slider", phase = "blocked", %reasoning);
             return;
         }
@@ -448,7 +482,9 @@ impl AzemWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let workspace_width = workspace_width(f32::from(window.bounds().size.width));
+        let workspace_width = workspace_width(
+            f32::from(window.bounds().size.width) + SIDEBAR_WIDTH - self.sidebar_visible_width,
+        );
         let Some(maximum) = side_panel_max_width(workspace_width) else {
             self.hide_side_panel();
             cx.notify();
@@ -476,7 +512,9 @@ impl AzemWindow {
         if !self.side_panel_open && !self.side_panel_closing {
             return;
         }
-        let workspace_width = workspace_width(f32::from(window.bounds().size.width));
+        let workspace_width = workspace_width(
+            f32::from(window.bounds().size.width) + SIDEBAR_WIDTH - self.sidebar_visible_width,
+        );
         let Some(maximum) = side_panel_max_width(workspace_width) else {
             self.hide_side_panel();
             return;
@@ -540,7 +578,9 @@ impl AzemWindow {
         } else if self.side_panel_closing {
             self.animate_side_panel(false, window, cx);
         } else {
-            let workspace_width = workspace_width(f32::from(window.bounds().size.width));
+            let workspace_width = workspace_width(
+                f32::from(window.bounds().size.width) + SIDEBAR_WIDTH - self.sidebar_visible_width,
+            );
             let Some(width) = side_panel_width_for_workspace(workspace_width) else {
                 self.hide_side_panel();
                 cx.notify();
@@ -700,7 +740,8 @@ impl AzemWindow {
         confirmed: bool,
         cx: &mut Context<Self>,
     ) {
-        if !self.state.connection.connected
+        if !self.branch_picker.open
+            || !self.state.connection.connected
             || runtime_busy(&self.state)
             || self.branch_request_pending()
             || !self
@@ -877,5 +918,213 @@ impl AzemWindow {
             }),
         );
         cx.notify();
+    }
+}
+
+pub(crate) fn approval_action_text(text: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("command")
+                .and_then(|command| command.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| text.to_string())
+}
+
+pub(crate) fn pending_native_approval(state: &AppState) -> Option<serde_json::Value> {
+    state
+        .runtime
+        .approvals
+        .iter()
+        .find(|value| {
+            value["sessionId"].as_str() == Some(state.navigation.current_session_id.as_ref())
+                && matches!(value["state"].as_str(), Some("pending" | "interrupted"))
+                && value["approvalId"]
+                    .as_str()
+                    .is_some_and(|id| !id.is_empty())
+        })
+        .cloned()
+}
+
+impl AzemWindow {
+    fn decide_native_approval(
+        &mut self,
+        approval_id: &str,
+        decision: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .pending_requests
+            .values()
+            .any(|request| matches!(request, PendingRequest::ApprovalDecision { .. }))
+        {
+            return;
+        }
+        let Some(pending) = pending_native_approval(&self.state) else {
+            return;
+        };
+        if pending["approvalId"].as_str() != Some(approval_id) {
+            return;
+        }
+        let id = self.runtime.request(Method::Execute, json!({"kind":"resolve_approval", "target":approval_id, "decision":decision, "sessionId":self.state.navigation.current_session_id.as_ref()}));
+        self.pending_requests.insert(
+            id,
+            PendingRequest::ApprovalDecision {
+                approval_id: approval_id.to_string(),
+            },
+        );
+        cx.notify();
+    }
+
+    pub(super) fn pending_approval_view(
+        &self,
+        palette: ThemePalette,
+        locale: Locale,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let pending = pending_native_approval(&self.state)?;
+        let approval_id = pending["approvalId"].as_str()?.to_string();
+        let busy = self
+            .pending_requests
+            .values()
+            .any(|request| matches!(request, PendingRequest::ApprovalDecision { .. }));
+        let mut text = pending["text"]
+            .as_str()
+            .filter(|text| !text.is_empty())
+            .or_else(|| {
+                pending["data"]["action"]
+                    .as_str()
+                    .filter(|text| !text.is_empty())
+            })
+            .unwrap_or_default()
+            .to_string();
+        if text.is_empty() {
+            let blocks = self.state.transcript.blocks.borrow();
+            if let Some(block) = blocks
+                .iter()
+                .find(|block| Some(block.tool_call_id.as_ref()) == pending["toolCallId"].as_str())
+            {
+                text = block.content.to_string();
+                if text.is_empty()
+                    && let Some(value) = block.extra.get("arguments").or_else(|| {
+                        block
+                            .extra
+                            .get("data")
+                            .and_then(|data| data.get("arguments"))
+                    })
+                {
+                    text = value
+                        .as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| value.to_string());
+                }
+            }
+        }
+        let text = approval_action_text(&text);
+        let mut buttons = div().flex().justify_end().gap_2();
+        for (decision, key) in [("deny", "approval.deny"), ("once", "approval.once")] {
+            let click_id = approval_id.clone();
+            let key_id = approval_id.clone();
+            buttons = buttons.child(
+                div()
+                    .id(gpui::SharedString::from(format!(
+                        "approval-decision-{decision}"
+                    )))
+                    .role(Role::Button)
+                    .aria_label(locale.text(key))
+                    .tab_stop(!busy)
+                    .text_size(px(12.))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .bg(if decision == "once" {
+                        palette.button
+                    } else {
+                        palette.paper
+                    })
+                    .text_color(if decision == "once" {
+                        palette.button_text
+                    } else {
+                        palette.muted
+                    })
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(palette.border)
+                    .when(!busy, |button| {
+                        button
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.decide_native_approval(&click_id, decision, cx)
+                            }))
+                            .on_key_down(cx.listener(
+                                move |this, event: &gpui::KeyDownEvent, _, cx| {
+                                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                        this.decide_native_approval(&key_id, decision, cx);
+                                        cx.stop_propagation();
+                                    }
+                                },
+                            ))
+                    })
+                    .child(locale.text(key)),
+            );
+        }
+        Some(
+            div()
+                .id("pending-approval")
+                .w(relative(11. / 12.))
+                .mx_auto()
+                .text_size(px(12.))
+                .text_color(palette.ink)
+                .p_3()
+                .mb_2()
+                .rounded_lg()
+                .border_1()
+                .border_color(palette.border)
+                .bg(palette.paper)
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(icon("shield-check", 15., palette.muted))
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .child(locale.text("approval.required")),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_color(palette.muted)
+                        .child(locale.text("approval.notRunning")),
+                )
+                .child(
+                    div()
+                        .id("approval-command")
+                        .p_2()
+                        .rounded_md()
+                        .bg(palette.paper_muted)
+                        .font_family("SF Mono")
+                        .text_size(px(11.))
+                        .text_color(palette.ink_soft)
+                        .max_h(px(104.))
+                        .overflow_y_scroll()
+                        .child(text),
+                )
+                .child(if busy {
+                    div()
+                        .child(locale.text("approval.submitting"))
+                        .into_any_element()
+                } else {
+                    buttons.into_any_element()
+                })
+                .into_any_element(),
+        )
     }
 }

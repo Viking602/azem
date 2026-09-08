@@ -24,7 +24,6 @@ import (
 	"github.com/Viking602/azem/internal/recap"
 	"github.com/Viking602/azem/internal/recovery"
 	"github.com/Viking602/azem/internal/rules"
-	"github.com/Viking602/azem/internal/securityscan"
 	"github.com/Viking602/azem/internal/session"
 	"github.com/Viking602/azem/internal/skills"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
@@ -376,28 +375,9 @@ func (b *bootstrapAssembly) wireService() error {
 	if err := b.attachBackground(); err != nil {
 		return err
 	}
-	securityStore, err := securityscan.NewSQLStore(b.store.DB())
-	if err != nil {
+	if err := b.attachSecurity(); err != nil {
 		return err
 	}
-	finalizer, err := securityscan.NewFinalizer()
-	if err != nil {
-		return err
-	}
-	b.securityStore = securityStore
-	b.securityRunner = &securityExecutor{runtime: b.providerRuntime, coding: b.coding}
-	b.securityService, err = securityscan.NewService(securityscan.ServiceOptions{
-		Store: securityStore, Executor: b.securityRunner, BaseContext: b.service.ctx,
-		Snapshotter: securityscan.Snapshotter{DataRoot: b.paths.DataDir}, Finalizer: finalizer,
-		Emit: func(projection securityscan.Projection) {
-			b.service.emit(b.service.ctx, Event{Kind: EventKind("security_scan_state"), State: string(projection.Scan.Status), Security: &projection})
-		},
-	})
-	if err != nil {
-		return err
-	}
-	b.securityRunner.service = b.securityService
-	b.service.AttachSecurity(b.securityService)
 	return b.attachRecovery(teamResumer, runResumer)
 }
 

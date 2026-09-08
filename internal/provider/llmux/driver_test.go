@@ -70,6 +70,9 @@ func TestProfilesAndStreamMapping(t *testing.T) {
 	if profile, ok := LookupProfile("opencode"); !ok || profile.ID != "opencode-zen" || profile.BaseURL != "https://opencode.ai/zen/v1" {
 		t.Fatalf("opencode profile = %+v, found=%v", profile, ok)
 	}
+	if profile, ok := LookupProfile("novita"); !ok || profile.BaseURL != "https://api.novita.ai/openai/v1" {
+		t.Fatalf("novita profile = %+v, found=%v", profile, ok)
+	}
 	stream := &streamAdapter{inner: &sliceStream{parts: []sdk.Part{
 		{Kind: sdk.PartTextDelta, Delta: "hello"},
 		{Kind: sdk.PartFinish, FinishReason: sdk.FinishStop, Usage: sdk.Usage{InputTokens: 3, OutputTokens: 2, TotalTokens: 5}},

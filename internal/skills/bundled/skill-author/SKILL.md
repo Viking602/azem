@@ -11,4 +11,4 @@ Capture one repeatable workflow as an Agent Skill:
 4. Keep the body procedural, concrete, and independent of this conversation. Put large reference material in sibling resource files.
 5. Do not embed executable shell directives or claim that `allowed-tools` grants permission.
 
-Before writing, show the complete proposed SKILL.md and its destination. Write it only after the user explicitly asks to save it. After writing, report the path and how to invoke it with `/skill <name> [instruction]`.
+Before writing, show the complete proposed SKILL.md and its destination. Write it only after the user explicitly asks to save it. An existing explicit save request for that proposed content and destination remains valid across turns; do not ask again unless either materially changes. After writing, report the path and how to invoke it with `/skill <name> [instruction]`.

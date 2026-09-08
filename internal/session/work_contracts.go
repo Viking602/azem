@@ -339,6 +339,12 @@ func validRelativePath(value string) bool {
 	return clean != "" && clean != "." && clean != ".." && !strings.HasPrefix(clean, "../") && !strings.HasPrefix(clean, "/")
 }
 
+// ValidRelativePath reports whether value is a contract-safe workspace-relative
+// path. Absolute paths, empty names, and parent-directory escapes are rejected.
+func ValidRelativePath(value string) bool {
+	return validRelativePath(value)
+}
+
 func validateDigest(value, label string) error {
 	if value == "" {
 		return nil

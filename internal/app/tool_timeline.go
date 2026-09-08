@@ -227,6 +227,16 @@ func (t *durableToolTimeline) fileObservations(name string, arguments, structure
 		return nil
 	}
 	observations := requestedFileObservations(name, arguments, structured)
+	normalized := make([]session.FileObservation, 0, len(observations))
+	for _, observation := range observations {
+		path, ok := observationPathInWorkspace(t.workspace, observation.Path)
+		if !ok {
+			continue
+		}
+		observation.Path = path
+		normalized = append(normalized, observation)
+	}
+	observations = normalized
 	remaining := int64(maxWorkspaceTotalBytes)
 	for index := range observations {
 		value, err := readWorkspaceEvidence(t.workspace, observations[index].Path, &remaining)
@@ -248,6 +258,47 @@ func (t *durableToolTimeline) fileObservations(name string, arguments, structure
 		observations[index].SHA256 = sha256Hex(value)
 	}
 	return observations
+}
+
+// observationPathInWorkspace returns a contract-safe workspace-relative path.
+// Absolute paths under the workspace are relativized; escapes and foreign
+// absolute paths are dropped so they cannot fail ObservationEnvelope validation
+// and abort an otherwise healthy tool completion.
+func observationPathInWorkspace(workspace, raw string) (string, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", false
+	}
+	workspace = strings.TrimSpace(workspace)
+	candidate := raw
+	if filepath.IsAbs(raw) {
+		if workspace == "" {
+			return "", false
+		}
+		root, err := filepath.Abs(workspace)
+		if err != nil {
+			return "", false
+		}
+		if resolved, err := filepath.EvalSymlinks(root); err == nil {
+			root = resolved
+		}
+		target := filepath.Clean(raw)
+		if resolved, err := filepath.EvalSymlinks(target); err == nil {
+			target = resolved
+		}
+		relative, err := filepath.Rel(root, target)
+		if err != nil {
+			return "", false
+		}
+		candidate = relative
+	} else {
+		candidate = filepath.Clean(raw)
+	}
+	candidate = filepath.ToSlash(candidate)
+	if !session.ValidRelativePath(candidate) {
+		return "", false
+	}
+	return candidate, true
 }
 
 func requestedFileObservations(name string, arguments, structured json.RawMessage) []session.FileObservation {

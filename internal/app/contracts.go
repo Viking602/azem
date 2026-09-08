@@ -116,6 +116,9 @@ func AllEventKinds() []EventKind {
 	return []EventKind{
 		EventBootstrapDone,
 		EventSessionLoaded,
+		EventRunState,
+		EventSessionProjection,
+		EventPromptQueueState,
 		EventTodoUpdated,
 		EventRunStarted,
 		EventContextUsage,

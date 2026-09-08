@@ -17,6 +17,9 @@ type EventKind string
 const (
 	EventBootstrapDone      EventKind = "bootstrap_done"
 	EventSessionLoaded      EventKind = "session_loaded"
+	EventRunState           EventKind = "run_state"
+	EventSessionProjection  EventKind = "session_projection"
+	EventPromptQueueState   EventKind = "prompt_queue_state"
 	EventTodoUpdated        EventKind = "todo_updated"
 	EventRunStarted         EventKind = "run_started"
 	EventContextUsage       EventKind = "context_usage"
@@ -371,6 +374,10 @@ type Event struct {
 	SecurityFinding    *securityscan.Finding
 	SecurityPatch      *securityscan.PatchResult
 	WorkspaceDirty     bool
+	SessionProjection  *SessionProjection
+	RunProjection      *RunProjection
+	PromptQueue        *session.PromptQueueV1
+	RuntimeProjection  *RuntimeProjectionSnapshot
 	At                 time.Time
 }
 
@@ -513,6 +520,40 @@ func (e Event) Clone() Event {
 		value := *e.SecurityPatch
 		value.Files = append([]string(nil), e.SecurityPatch.Files...)
 		cloned.SecurityPatch = &value
+	}
+	if e.SessionProjection != nil {
+		value := cloneSessionProjection(*e.SessionProjection)
+		cloned.SessionProjection = &value
+	}
+	if e.RunProjection != nil {
+		value := cloneRunProjection(*e.RunProjection)
+		cloned.RunProjection = &value
+	}
+	if e.PromptQueue != nil {
+		value := e.PromptQueue.Clone()
+		cloned.PromptQueue = &value
+	}
+	if e.RuntimeProjection != nil {
+		value := *e.RuntimeProjection
+		if value.Session != nil {
+			sessionCopy := cloneSessionProjection(*value.Session)
+			value.Session = &sessionCopy
+		}
+		value.Runs = append([]RunProjection(nil), value.Runs...)
+		for index := range value.Runs {
+			value.Runs[index] = cloneRunProjection(value.Runs[index])
+		}
+		value.LiveBlocks = append([]LiveBlockProjection(nil), value.LiveBlocks...)
+		for index := range value.LiveBlocks {
+			value.LiveBlocks[index] = cloneLiveBlock(value.LiveBlocks[index])
+		}
+		value.PendingControls = append([]PendingControlProjection(nil), value.PendingControls...)
+		value.PromptQueues = append([]session.PromptQueueV1(nil), value.PromptQueues...)
+		for index := range value.PromptQueues {
+			value.PromptQueues[index] = value.PromptQueues[index].Clone()
+		}
+		value.Recovery.Items = append([]PendingControlProjection(nil), value.Recovery.Items...)
+		cloned.RuntimeProjection = &value
 	}
 	return cloned
 }

@@ -79,7 +79,7 @@ archive/checkpoint 后清除旧 provider 压力，防止新 cache epoch 被旧�
 |`reserve_tokens`|`16384`|最小 headroom；有效值至少为上下文窗口的 15%|
 |`keep_recent_tokens`|`20000`|优先保留的原始 hot-tail token 下限|
 |`large_tool_result_tokens`|`12000`|大工具结果 artifact offload 阈值|
-|`history_retrieval_tokens`|`4096`|私有 session history FTS 证据预算|
+|`history_retrieval_tokens`|`4096`|按需 context.search_history 证据预算，发送时不自动检索|
 
 `keep_recent_tokens` 是优化偏好，不是高于硬窗口的强制条件。如果它因为一个超大旧消息导致所有 carrier 都无法放入目标，reducer 会放弃这个可选 token floor，再按“最近 3 个完整 shared user turn”重切一次。最近三轮本身仍是强制边界；如果它们加 carrier 仍超过硬限制，归档明确失败，并且不写 artifact、不改 live history、不提交部分 checkpoint。
 

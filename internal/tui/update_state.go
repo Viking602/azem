@@ -448,7 +448,7 @@ func (m *AppModel) loadModels(event app.Event) {
 		m.errorBanner = m.tr("error.decode_models") + ": " + err.Error()
 		return
 	}
-	sort.Slice(choices, func(i, j int) bool { return choices[i].ID < choices[j].ID })
+	choices = enabledModelChoices(choices)
 	if m.modelsByProvider == nil {
 		m.modelsByProvider = make(map[string][]ModelChoice)
 	}
@@ -456,6 +456,77 @@ func (m *AppModel) loadModels(event app.Event) {
 	if provider == m.provider {
 		m.selectModels(choices)
 	}
+}
+
+func (m *AppModel) loadModelProviders(event app.Event) {
+	m.modelProviders = append([]app.ModelProviderEntry(nil), event.ModelProviders...)
+	modelsByProvider := make(map[string][]ModelChoice, len(m.modelProviders))
+	for _, provider := range m.modelProviders {
+		if provider.Subscription {
+			auth := m.auth[provider.ID]
+			auth.Provider = provider.ID
+			auth.AccountID = provider.AccountID
+			if provider.AccountLabel != "" {
+				auth.DisplayName = provider.AccountLabel
+			}
+			auth.Plan = provider.AccountPlan
+			if provider.Enabled {
+				auth.State = "connected"
+			} else if auth.State == "" {
+				auth.State = "disconnected"
+			}
+			m.auth[provider.ID] = auth
+		}
+		if !provider.Enabled {
+			continue
+		}
+		choices := make([]ModelChoice, 0, len(provider.Models))
+		for _, model := range provider.Models {
+			choice := ModelChoice{
+				ID: model.ID, Disabled: model.Disabled, Name: model.Name,
+				Aliases: append([]string(nil), model.Aliases...), Description: model.Description,
+				ContextWindow: model.ContextWindow, MaxOutputTokens: model.MaxOutputTokens,
+				ReasoningLevels: append([]string(nil), model.ReasoningLevels...), DefaultReasoning: model.DefaultReasoning,
+				InputModalities: append([]string(nil), model.InputModalities...), OutputModalities: append([]string(nil), model.OutputModalities...),
+			}
+			for _, capability := range model.Capabilities {
+				switch capability {
+				case "tools":
+					choice.SupportsTools = true
+				case "parallel-tools":
+					choice.SupportsParallel = true
+				case "reasoning":
+					choice.SupportsReasoning = true
+				case "structured-output":
+					choice.SupportsStructured = true
+				}
+			}
+			if len(choice.ReasoningLevels) > 0 {
+				choice.SupportsReasoning = true
+			}
+			choices = append(choices, choice)
+		}
+		modelsByProvider[provider.ID] = enabledModelChoices(choices)
+	}
+	m.modelsByProvider = modelsByProvider
+	if choices, ok := modelsByProvider[m.provider]; ok {
+		m.selectModels(choices)
+		return
+	}
+	if providers := m.providerIDs(false); len(providers) > 0 {
+		m.switchProvider(providers[0])
+	}
+}
+
+func enabledModelChoices(choices []ModelChoice) []ModelChoice {
+	filtered := choices[:0]
+	for _, choice := range choices {
+		if !choice.Disabled {
+			filtered = append(filtered, choice)
+		}
+	}
+	sort.Slice(filtered, func(i, j int) bool { return filtered[i].ID < filtered[j].ID })
+	return filtered
 }
 
 func (m *AppModel) switchProvider(provider string) {
@@ -681,7 +752,14 @@ func (m *AppModel) resetTurnUsage() {
 
 func (m *AppModel) restoreUsage(raw string) {
 	usage, err := session.DecodeUsage([]byte(raw))
-	if err != nil || usage.IsZero() {
+	if err != nil {
+		return
+	}
+	m.restoreUsageSnapshot(usage)
+}
+
+func (m *AppModel) restoreUsageSnapshot(usage session.Usage) {
+	if usage.IsZero() {
 		return
 	}
 	if usage.ContextLimit > 0 {
@@ -760,6 +838,15 @@ func (m AppModel) showsCacheWrite() bool {
 }
 
 func (m AppModel) isRunning() bool {
+	if m.status == "Starting" || m.status == "Cancelling" || m.status == "Compacting" {
+		return true
+	}
+	if _, exists := m.currentRunProjection(); exists {
+		return true
+	}
+	if len(m.runs) > 0 {
+		return false
+	}
 	return m.status == "Starting" || m.status == "Running" || m.status == "Awaiting approval" || m.status == "Reviewing approval" || m.status == "Cancelling" || m.status == "Compacting"
 }
 

@@ -12,7 +12,8 @@ SQLite and stores large opaque payloads as content-addressed files. Schema 27
 uses the same BlobStore boundary for Venat v0.16 execution
 continuations/results and immutable application bindings. Schema 28 adds
 reversible project-catalog visibility without deleting session ownership.
-Runtime migrations
+Schema 29 adds revisioned prompt-queue documents whose large payloads reuse the
+same digest-verified BlobStore boundary. Runtime migrations
 and SQLC require separate schema representations. Older binaries cannot safely
 interpret state written by newer schemas.
 
@@ -35,6 +36,9 @@ interpret state written by newer schemas.
   migration. Preserve terminal legacy history. Mark non-terminal legacy rows
   without enough identity for exact replay `reconcile_required`; never
   manufacture a new checkpoint or lower the schema to run old code.
+- A renderer-independent work queue must be durable, session-owned, revisioned,
+  size-bounded, and restart-reconciled. A client retry may not duplicate or
+  overwrite a newer queue mutation.
 
 ## Consequences
 

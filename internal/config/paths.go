@@ -38,16 +38,22 @@ func RuntimeDatabasePath() (string, error) {
 }
 
 func ResolvePaths(startupWorkspace string) (Paths, error) {
-	return resolvePaths(startupWorkspace, "")
+	return resolvePaths(startupWorkspace, "", true)
 }
 
 // ResolvePathsWithConfig resolves the unified home while preserving an
 // explicitly selected legacy config file if the startup migration moves it.
 func ResolvePathsWithConfig(startupWorkspace, configFile string) (Paths, error) {
-	return resolvePaths(startupWorkspace, configFile)
+	return resolvePaths(startupWorkspace, configFile, true)
 }
 
-func resolvePaths(startupWorkspace, configFile string) (Paths, error) {
+// ResolveClientPaths resolves renderer paths without migrating, opening, or
+// otherwise claiming ownership of persistent runtime state.
+func ResolveClientPaths(startupWorkspace, configFile string) (Paths, error) {
+	return resolvePaths(startupWorkspace, configFile, false)
+}
+
+func resolvePaths(startupWorkspace, configFile string, migrate bool) (Paths, error) {
 	if configFile != "" {
 		absolute, err := filepath.Abs(configFile)
 		if err != nil {
@@ -59,10 +65,12 @@ func resolvePaths(startupWorkspace, configFile string) (Paths, error) {
 	if err != nil {
 		return Paths{}, err
 	}
-	if err := maybeMigrateLegacyHome(dest); err != nil {
-		return Paths{}, err
+	if migrate {
+		if err := maybeMigrateLegacyHome(dest); err != nil {
+			return Paths{}, err
+		}
 	}
-	if configFile != "" {
+	if migrate && configFile != "" {
 		configFile = remapMigratedLegacyPath(configFile, dest)
 	}
 	workspace, err := canonicalDirectory(startupWorkspace)

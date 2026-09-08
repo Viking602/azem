@@ -162,7 +162,30 @@ func (transaction *durableTransaction) now(ctx context.Context) (time.Time, erro
 	return time.Unix(0, nanoseconds).UTC(), nil
 }
 
+func (backend *DurableBackend) PeekExecutionStatus(ctx context.Context, executionID durable.ExecutionID) (durable.ExecutionStatus, error) {
+	if !validExecutionID(executionID) {
+		return "", contextOrValidation(ctx, executionError(executionID, durable.ErrInvalidArgument))
+	}
+	var status string
+	err := backend.provider.DB().QueryRowContext(ctx, `SELECT status FROM agent_executions WHERE execution_id=?`, executionID).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", executionError(executionID, durable.ErrNotFound)
+	}
+	if err != nil {
+		return "", fmt.Errorf("peek durable execution %q status: %w", executionID, err)
+	}
+	return durable.ExecutionStatus(status), nil
+}
+
+func (backend *DurableBackend) LoadExecutionState(ctx context.Context, executionID durable.ExecutionID) (durable.Execution, error) {
+	return backend.loadExecution(ctx, executionID, false)
+}
+
 func (transaction *durableTransaction) load(ctx context.Context, executionID durable.ExecutionID) (*durableRecord, error) {
+	return transaction.loadWithGraph(ctx, executionID, true)
+}
+
+func (transaction *durableTransaction) loadWithGraph(ctx context.Context, executionID durable.ExecutionID, includeGraph bool) (*durableRecord, error) {
 	var (
 		storedID       string
 		specHash       []byte
@@ -196,9 +219,6 @@ func (transaction *durableTransaction) load(ctx context.Context, executionID dur
 	if err := validateStoredExecution(execution, storedID, specHash, status, version, leaseOwner, leaseClaim, leaseToken, leaseExpiresAt); err != nil {
 		return nil, err
 	}
-	if err := validateExecutionHashes(execution); err != nil {
-		return nil, executionError(executionID, err)
-	}
 	record := &durableRecord{
 		execution:       execution,
 		executionDigest: digest,
@@ -210,6 +230,12 @@ func (transaction *durableTransaction) load(ctx context.Context, executionID dur
 	}
 	if record.nextToken == 0 || (record.execution.Lease != nil && record.execution.Lease.Token > record.nextToken) {
 		return nil, fmt.Errorf("durable execution %q has invalid lease token fence", executionID)
+	}
+	if !includeGraph {
+		return record, nil
+	}
+	if err := validateExecutionHashes(execution); err != nil {
+		return nil, executionError(executionID, err)
 	}
 	if err := transaction.loadAttempts(ctx, executionID, record); err != nil {
 		return nil, err
@@ -436,6 +462,10 @@ func (backend *DurableBackend) withRecord(ctx context.Context, executionID durab
 }
 
 func (backend *DurableBackend) LoadExecution(ctx context.Context, executionID durable.ExecutionID) (durable.Execution, error) {
+	return backend.loadExecution(ctx, executionID, true)
+}
+
+func (backend *DurableBackend) loadExecution(ctx context.Context, executionID durable.ExecutionID, includeGraph bool) (durable.Execution, error) {
 	if !validExecutionID(executionID) {
 		return durable.Execution{}, contextOrValidation(ctx, executionError(executionID, durable.ErrInvalidArgument))
 	}
@@ -444,7 +474,7 @@ func (backend *DurableBackend) LoadExecution(ctx context.Context, executionID du
 		return durable.Execution{}, err
 	}
 	defer transaction.rollback()
-	record, err := transaction.load(ctx, executionID)
+	record, err := transaction.loadWithGraph(ctx, executionID, includeGraph)
 	if err != nil {
 		return durable.Execution{}, err
 	}

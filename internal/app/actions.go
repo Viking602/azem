@@ -308,6 +308,9 @@ func gitBranchSnapshot(ctx context.Context, root string) ([]GitBranchEntry, stri
 	inside, err := gitOutputLimited(ctx, root, 1024, "rev-parse", "--is-inside-work-tree")
 	if err != nil || strings.TrimSpace(string(inside)) != "true" {
 		if err != nil {
+			if ctx.Err() == nil && strings.Contains(err.Error(), "fatal: not a git repository") {
+				return []GitBranchEntry{}, "", false, 0, nil
+			}
 			return nil, "", false, 0, fmt.Errorf("inspect git workspace: %w", err)
 		}
 		return nil, "", false, 0, fmt.Errorf("workspace %q is not a git work tree", root)
@@ -917,29 +920,46 @@ func reconciledStatus(value string) (agentruntime.ActionAttemptStatus, error) {
 }
 
 func (s *Service) createSession(ctx context.Context, title string) error {
-	if s.sessions == nil {
-		return fmt.Errorf("session store is unavailable")
-	}
-	id, err := randomID("session")
+	projection, err := s.NewSessionProjection(ctx, title)
 	if err != nil {
 		return err
 	}
-	if title == "" {
-		title = "New session"
-	}
-	projection := session.Projection{Session: session.Session{
-		ID: id, Title: title, ProviderID: s.cfg.Defaults.Provider, ModelID: s.cfg.Defaults.Model,
-		Reasoning: s.cfg.Defaults.Reasoning, AgentMode: s.cfg.Defaults.AgentMode,
-	}}
-	s.emit(ctx, Event{Kind: EventSessionLoaded, SessionID: id, State: "new", Data: sessionProjectionData(projection, "[]")})
-	if err := s.switchSessionHooks(ctx, id, "clear", projection.Session.ModelID); err != nil {
+	legacy := session.Projection{Session: projection.Session}
+	s.emit(ctx, Event{Kind: EventSessionLoaded, SessionID: projection.Session.ID, State: "new", Data: sessionProjectionData(legacy, "[]")})
+	if err := s.switchSessionHooks(ctx, projection.Session.ID, "clear", projection.Session.ModelID); err != nil {
 		return err
 	}
 	s.mu.Lock()
-	s.currentSession = id
+	s.currentSession = projection.Session.ID
 	s.mu.Unlock()
-	_ = s.emitContextProfile(ctx, id)
+	_ = s.emitContextProfile(ctx, projection.Session.ID)
 	return nil
+}
+
+// NewSessionProjection creates a client-local empty session. It remains
+// ephemeral until StartConfiguredTurn persists its first canonical user block.
+func (s *Service) NewSessionProjection(_ context.Context, title string) (SessionProjection, error) {
+	if s.sessions == nil {
+		return SessionProjection{}, fmt.Errorf("session store is unavailable")
+	}
+	id, err := randomID("session")
+	if err != nil {
+		return SessionProjection{}, err
+	}
+	if strings.TrimSpace(title) == "" {
+		title = "New session"
+	}
+	return SessionProjection{
+		Version: SessionProjectionVersion,
+		Session: session.Session{
+			ID: id, Workspace: s.cfg.Workspace.Root, Title: title,
+			ProviderID: s.cfg.Defaults.Provider, ModelID: s.cfg.Defaults.Model,
+			Reasoning: s.cfg.Defaults.Reasoning, AgentMode: s.cfg.Defaults.AgentMode,
+		},
+		Blocks: []TranscriptBlock{}, ToolRecords: []session.ToolRecord{},
+		Todo:           session.TodoList{Phases: []session.TodoPhase{}},
+		AgentSnapshots: []AgentSnapshotPayload{}, Usage: session.Usage{},
+	}, nil
 }
 
 func (s *Service) markSessionUnread(ctx context.Context, sessionID string) error {
@@ -978,18 +998,26 @@ func (s *Service) ForkSession(ctx context.Context, sourceID string, activate boo
 }
 
 func (s *Service) emitSession(ctx context.Context, id string) error {
-	modelID, err := s.emitSessionProjection(ctx, id, "loaded", true)
+	_, err := s.emitSessionEvent(ctx, id)
+	return err
+}
+
+func (s *Service) emitSessionEvent(ctx context.Context, id string) (Event, error) {
+	event, modelID, err := s.buildSessionProjectionEvent(ctx, id, "loaded", true)
 	if err != nil {
-		return err
+		return Event{}, err
 	}
+	s.emit(ctx, event)
 	if err := s.switchSessionHooks(ctx, id, "resume", modelID); err != nil {
-		return err
+		return Event{}, err
 	}
 	s.mu.Lock()
 	s.currentSession = id
 	s.mu.Unlock()
-	_ = s.emitContextProfile(ctx, id)
-	return nil
+	// Session list unread dots and Inspector context occupancy are useful, but
+	// they must not delay the initiating window's durable transcript readback.
+	s.scheduleSessionSwitchFollowUp(id)
+	return event, nil
 }
 
 func (s *Service) emitSessionProjection(ctx context.Context, id, state string, activate bool) (string, error) {
@@ -999,6 +1027,70 @@ func (s *Service) emitSessionProjection(ctx context.Context, id, state string, a
 	}
 	s.emit(ctx, event)
 	return modelID, nil
+}
+
+// ResumeSession activates a durable conversation once and returns the same
+// projection event the runtime broadcasts. Desktop navigation uses this single
+// readback instead of ExecuteAction plus a second SessionProjection rebuild.
+func (s *Service) ResumeSession(ctx context.Context, id string) (Event, error) {
+	if s.sessions == nil {
+		return Event{}, fmt.Errorf("session store is unavailable")
+	}
+	if err := s.sessions.SetUIState(ctx, id, "unread", false); err != nil {
+		return Event{}, err
+	}
+	if err := s.sessions.SetArchived(ctx, id, false); err != nil {
+		return Event{}, err
+	}
+	return s.emitSessionEvent(ctx, id)
+}
+
+// SelectSession returns a client-local navigation projection. It records the
+// durable workspace preference without changing daemon-global hooks or
+// broadcasting a session_loaded event that would navigate other renderers.
+func (s *Service) SelectSession(ctx context.Context, id string) (Event, error) {
+	if s.sessions == nil {
+		return Event{}, fmt.Errorf("session store is unavailable")
+	}
+	if err := s.sessions.SetUIState(ctx, id, "unread", false); err != nil {
+		return Event{}, err
+	}
+	if err := s.sessions.SetArchived(ctx, id, false); err != nil {
+		return Event{}, err
+	}
+	event, _, err := s.buildSessionProjectionEvent(ctx, id, "loaded", true)
+	if err != nil {
+		return Event{}, err
+	}
+	s.scheduleSessionSwitchFollowUp(id)
+	return event, nil
+}
+
+// PrepareSessionSelection updates durable navigation state without building the
+// legacy session_loaded projection. Typed desktop clients request one
+// RuntimeProjection immediately afterward.
+func (s *Service) PrepareSessionSelection(ctx context.Context, id string) error {
+	if s.sessions == nil {
+		return fmt.Errorf("session store is unavailable")
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return fmt.Errorf("session id is required")
+	}
+	if _, err := s.sessions.LoadSession(ctx, id); err != nil {
+		return err
+	}
+	if err := s.sessions.SetUIState(ctx, id, "unread", false); err != nil {
+		return err
+	}
+	if err := s.sessions.SetArchived(ctx, id, false); err != nil {
+		return err
+	}
+	if err := s.rememberWorkspaceSession(ctx, id); err != nil {
+		return err
+	}
+	s.scheduleSessionSwitchFollowUp(id)
+	return nil
 }
 
 // SessionProjection returns the same durable projection used by the event
@@ -1017,7 +1109,9 @@ func (s *Service) buildSessionProjectionEvent(ctx context.Context, id, state str
 	if id == "" {
 		return Event{}, "", fmt.Errorf("session id is required")
 	}
-	projection, err := s.sessions.LoadProjection(ctx, id)
+	// Navigation paint never needs ModelHistory. Keep the expensive provider
+	// history blob off the session-switch critical path (see LoadDisplayProjection).
+	projection, err := s.sessions.LoadDisplayProjection(ctx, id)
 	if err != nil {
 		return Event{}, "", err
 	}
@@ -1040,12 +1134,33 @@ func (s *Service) buildSessionProjectionEvent(ctx context.Context, id, state str
 	}
 	s.rememberSessionUsage(id, projection.Usage)
 	data := sessionProjectionData(projection, string(blocks))
+	if title := strings.TrimSpace(projection.Session.Title); title != "" {
+		data["title"] = title
+	}
 	s.addActiveRunProjection(data, id)
 	event := Event{
 		Kind: EventSessionLoaded, SessionID: id, State: state,
 		Data: data, AgentSnapshots: s.subagentSnapshots(ctx, id), Todo: &todo, Recap: currentRecap,
 	}
 	return event, projection.Session.ModelID, nil
+}
+
+func (s *Service) scheduleSessionSwitchFollowUp(sessionID string) {
+	if s == nil {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
+		defer cancel()
+		_ = s.emitSessionList(ctx)
+		s.mu.Lock()
+		current := s.currentSession
+		s.mu.Unlock()
+		if current != sessionID {
+			return
+		}
+		_ = s.emitContextProfile(ctx, sessionID)
+	}()
 }
 
 func (s *Service) addActiveRunProjection(data map[string]string, sessionID string) {

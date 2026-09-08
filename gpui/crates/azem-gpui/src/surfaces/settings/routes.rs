@@ -37,8 +37,8 @@ pub(super) fn settings_routes_body(
     div()
         .w_full()
         .flex()
-        .items_start()
-        .gap_4()
+        .flex_col()
+        .gap_6()
         .child(settings_route_card(
             (
                 locale.text("ui.coreWorkflows"),
@@ -82,7 +82,6 @@ fn settings_route_card(
     let (title, description) = copy;
     let (route_picker_target, mut route_picker) = route_picker;
     let empty = routes.is_empty();
-    let has_picker = route_picker.is_some();
     let mut rows = Vec::with_capacity(routes.len());
     for route in routes {
         let scope = route
@@ -107,21 +106,13 @@ fn settings_route_card(
             cx,
         ));
     }
-    div()
-        .flex_1()
-        .min_w(px(320.))
-        .rounded(px(12.))
-        .border_1()
-        .border_color(palette.border)
-        .bg(palette.paper)
-        .when(!has_picker, |card| card.overflow_hidden())
-        .child(settings_card_header(title, description, palette))
-        .when(empty, |card| {
+    settings_group(
+        title,
+        description,
+        settings_rows(rows, palette).when(empty, |card| {
             card.child(
                 div()
-                    .h(px(72.))
-                    .border_t_1()
-                    .border_color(palette.border)
+                    .h(px(80.))
                     .text_color(palette.faint)
                     .text_sm()
                     .flex()
@@ -129,9 +120,10 @@ fn settings_route_card(
                     .justify_center()
                     .child(locale.text("ui.noModelRoutes")),
             )
-        })
-        .children(rows)
-        .into_any_element()
+        }),
+        palette,
+    )
+    .into_any_element()
 }
 
 pub(in crate::surfaces) fn settings_route_title(
@@ -244,7 +236,12 @@ fn settings_route_row(
         .and_then(serde_json::Value::as_str)
         .filter(|value| !value.is_empty())
         .unwrap_or(state.settings.model.as_ref());
-    let provider = configured_provider.to_string();
+    let logo = catalog_provider_logo_id(
+        providers.iter().find(|item| {
+            item.get("id").and_then(serde_json::Value::as_str) == Some(configured_provider)
+        }),
+        configured_provider,
+    );
     let model = settings_route_model_name(providers, configured_provider, configured_model);
     let provider_name = settings_route_provider_name(providers, configured_provider);
     let reasoning = route_value
@@ -264,7 +261,7 @@ fn settings_route_row(
         .unwrap_or("—")
         .to_string();
     let route_id = format!("{}-{}", scope, role);
-    let model_aria = format!("{} {}", title, locale.text("ui.model"));
+    let model_aria = format!("{} {} · {}", title, locale.text("ui.model"), provider_name);
     let reasoning_aria = format!("{} {}", title, locale.text("ui.reasoning"));
     let model_scope = scope.to_string();
     let model_role = role.to_string();
@@ -274,56 +271,77 @@ fn settings_route_row(
     let reasoning_label = label;
     div()
         .id(format!("settings-route-{route_id}"))
-        .min_h(px(62.))
+        .min_h(px(72.))
         .px_3()
-        .py_2()
-        .border_t_1()
-        .border_color(palette.border)
+        .py_3()
         .flex()
         .items_center()
-        .gap_3()
-        .child(provider_logo(&provider, 19., palette.ink))
+        .flex_wrap()
+        .gap(px(16.))
         .child(
             div()
-                .min_w_0()
+                .min_w(px(220.))
                 .flex_1()
                 .flex()
-                .flex_col()
-                .gap_1()
+                .items_center()
+                .gap_3()
                 .child(
                     div()
-                        .truncate()
-                        .text_color(palette.ink)
-                        .text_sm()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .child(title),
+                        .size(px(32.))
+                        .flex_shrink_0()
+                        .rounded(px(8.))
+                        .bg(palette.paper_muted)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(provider_logo(&logo, 18., palette.ink)),
                 )
                 .child(
                     div()
-                        .truncate()
-                        .text_color(palette.faint)
-                        .text_xs()
-                        .child(description),
+                        .min_w_0()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_color(palette.ink)
+                                .text_sm()
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .text_color(palette.muted)
+                                .text_xs()
+                                .line_height(px(18.))
+                                .child(description),
+                        ),
                 ),
         )
         .child(
             div()
                 .relative()
-                .w(px(270.))
+                .ml_auto()
+                .w(px(332.))
+                .max_w_full()
+                .flex_shrink_0()
                 .flex()
                 .items_center()
-                .gap(px(6.))
+                .rounded(px(8.))
+                .bg(palette.paper_muted)
                 .child(
                     settings_route_value(
                         model,
-                        provider_name,
-                        px(176.),
+                        false,
+                        px(224.),
                         expanded_kind == Some(RoutePickerKind::Model),
                         palette,
                     )
                     .id(format!("settings-route-model-{route_id}"))
                     .role(Role::Button)
                     .aria_label(model_aria)
+                    .aria_expanded(expanded_kind == Some(RoutePickerKind::Model))
                     .tab_stop(true)
                     .cursor_pointer()
                     .hover(move |style| style.bg(palette.hover))
@@ -341,14 +359,17 @@ fn settings_route_row(
                 .child(
                     settings_route_value(
                         reasoning,
-                        String::new(),
-                        px(88.),
+                        true,
+                        px(108.),
                         expanded_kind == Some(RoutePickerKind::Reasoning),
                         palette,
                     )
+                    .border_l_1()
+                    .border_color(palette.border)
                     .id(format!("settings-route-reasoning-{route_id}"))
                     .role(Role::Button)
                     .aria_label(reasoning_aria)
+                    .aria_expanded(expanded_kind == Some(RoutePickerKind::Reasoning))
                     .tab_stop(true)
                     .cursor_pointer()
                     .hover(move |style| style.bg(palette.hover))
@@ -364,7 +385,24 @@ fn settings_route_row(
                     })),
                 )
                 .when_some(route_picker, |controls, picker| {
-                    controls.child(deferred(picker).with_priority(10))
+                    let right = if expanded_kind == Some(RoutePickerKind::Model) {
+                        224.
+                    } else {
+                        332.
+                    };
+                    controls.child(
+                        div().absolute().top_0().left_0().child(
+                            deferred(
+                                gpui::anchored()
+                                    .anchor(gpui::Anchor::TopRight)
+                                    .position_mode(gpui::AnchoredPositionMode::Local)
+                                    .position(gpui::point(px(right), px(42.)))
+                                    .snap_to_window_with_margin(px(8.))
+                                    .child(picker),
+                            )
+                            .with_priority(10),
+                        ),
+                    )
                 }),
         )
         .into_any_element()
@@ -372,37 +410,37 @@ fn settings_route_row(
 
 fn settings_route_value(
     primary: String,
-    secondary: String,
+    reasoning: bool,
     width: Pixels,
     expanded: bool,
     palette: ThemePalette,
 ) -> gpui::Div {
     div()
         .w(width)
-        .h(px(40.))
-        .px_2()
-        .rounded(px(8.))
-        .bg(palette.paper_muted)
-        .text_color(palette.muted)
+        .min_w_0()
+        .h(px(36.))
+        .px_3()
+        .rounded(px(6.))
+        .when(expanded, |value| value.bg(palette.hover))
+        .text_color(if reasoning {
+            palette.muted
+        } else {
+            palette.ink
+        })
         .flex()
         .items_center()
         .gap_2()
+        .when(reasoning, |value| {
+            value.child(icon("brain", 14., palette.muted))
+        })
         .child(
             div()
                 .min_w_0()
                 .flex_1()
-                .flex()
-                .flex_col()
-                .child(
-                    div()
-                        .truncate()
-                        .text_sm()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .child(primary),
-                )
-                .when(!secondary.is_empty(), |value| {
-                    value.child(div().truncate().text_xs().child(secondary))
-                }),
+                .truncate()
+                .text_sm()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .child(primary),
         )
         .child(icon(
             if expanded {

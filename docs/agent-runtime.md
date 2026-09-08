@@ -68,6 +68,10 @@ Durable coordination and transient engine construction stay separate:
    tool timeline rows, usage, and terminal projection therefore deduplicate by
    durable execution/operation identity rather than treating frames as an
    exactly-once log.
+6. Desktop reconnect and session-selection projections load the Azem run
+   aggregate and latest execution binding only. They must not call
+   `DurableBackend.LoadExecution` or hash continuations on the IPC command
+   sequencer (GPUI-003).
 
 ## Single and Team modes
 
@@ -147,6 +151,17 @@ does not retry on the parent's open Todo item. Otherwise a foreground child
 that already produced a valid result could never become terminal, while the
 parent simultaneously waits for that terminal state (SUBAGENT-008).
 
+Live user guidance is also a durable Todo mutation boundary. Before acting on
+newly added deliverables, the main agent appends each distinct item to an
+existing phase using the latest revision. Withdrawn open work is cancelled;
+only an explicitly erased non-current item is removed. The main instructions
+and Todo tool definition carry the same rule, so Guide cannot silently add
+untracked work or leave superseded work pending. This intentionally changes the
+static provider prefix and tool schema once; subsequent turns preserve the new
+prefix and message order for cache reuse (TODO-002).
+
+Todo goals, phase labels, and item titles follow the current user's language, including explicit language requests. They describe concise outcomes; command sequences, file inventories, and host verification reminders belong in execution details rather than display titles. The same schema guidance applies to `init` items and `append` content. Existing durable labels are preserved, and required verification checks remain unchanged.
+
 `current-work-verification` accepts equivalent evidence from governed dedicated
 tools. In particular, one completed `coding.gofmt` result per required path
 satisfies a deterministic `gofmt -d` check when its recorded post-format SHA
@@ -155,6 +170,28 @@ than a mutation: it does not move the mutation high-water or make already-run
 checks stale. This prevents a valid model final answer from triggering another
 provider turn solely because the guard failed to recognize dedicated formatter
 evidence (VERIF-002).
+
+A shell check may also be wrapped in a single literal `eval '…'` argument.
+The verifier unwraps that exact form before comparing the command and working
+directory; it never evaluates shell text. Multiple arguments, quote
+concatenation, dynamic double-quoted wrappers, extra statements, failed tools,
+and records before the mutation boundary do not gain verification credit.
+
+JavaScript verification is owned by the nearest valid `package.json`, not an
+ancestor Go file that embeds the frontend. With a declared package manager,
+available scripts select build checks for CSS, test checks for JS/TS test
+files, and typecheck (or build) checks for other JS/TS sources. Go sources and
+non-JavaScript embedded assets retain their Go package checks. A successful
+scoped Vitest command can satisfy a frontend test check only in the required
+working directory, after the current mutation boundary, and when it covers
+every touched test file in that project. Unrelated tests, omitted directories,
+and shell commands that mask failures are not equivalent evidence.
+
+Main and resumed-main runs publish a final answer only after all output
+guardrails allow completion and the canonical turn is persisted. Guard retries
+remain private continuations of that run; rejected candidates are not shown as
+final answers. This preserves the Todo, child-completion, and verification
+gates rather than disabling them to avoid visible restarts (VERIF-003).
 
 After the one allowed evidence retry, an `uncertain` or `fail` result remains
 persisted in the verification store and blocks a successful terminal run.
@@ -204,6 +241,10 @@ engine:
    model, reasoning, Skill/tool identities, workspace anchor, prompt identity,
    and session ownership must still match. Missing or changed facts move the
    run to reconciliation.
+Live approvals wait on the current execution and continue that same execution
+after the decision. They must not suspend and rebuild the main run merely to
+approve a tool. The durable approval decision still survives process restart.
+
 4. A suspended approval remains waiting. After a durable decision, main and
    recovered approval actions call `ResumeRunAtOperation`; app-owned child
    controllers select the latest durable decision and resume that exact
@@ -255,7 +296,7 @@ Hard budgets terminate; the soft budget only advises.
 Budget failures are wrapped with configuration hints
 (`increase agents.main.max_tokens ...`) before they reach the UI.
 
-## OMP-compatible run controls
+## Run controls
 
 Azem keeps every mode on the same application run, v1 durable execution, and
 durable session:
@@ -286,7 +327,7 @@ clients without a responder terminate the waiting context explicitly.
 
 ## Coding tool runtime
 
-`internal/agent` owns OMP-compatible read, write, Hashline edit, glob, grep,
+`internal/agent` owns the built-in read, write, Hashline edit, glob, grep,
 AST, LSP, DAP, eval, browser, computer, web search, GitHub, SSH, jobs, media,
 and memory drivers. Bun bridges are bounded subprocess protocols, not agent
 loops. Python, JavaScript, Ruby, and Julia eval kernels are persistent per
@@ -331,3 +372,52 @@ workspace-claim wait/retry, recursive completion at concurrency one,
 unbounded-concurrency updates, advisory/combined usage budgets, immutable
 binding/profile validation, exact approval resume, v0.15 reconciliation, and
 restart restoration in the agent, app, recovery, and SQLite suites.
+
+Python verification uses touched project files for syntax checks and unittest
+modules identified by their imports. It never imposes Azem-specific test paths
+on unrelated workspaces. Interrupted tool records remain unsuccessful in the UI.
+
+The `replace` driver requests an explicit source read starting at line 1. Default read-file structure summaries are for model navigation and cannot provide replacement text or Hashline anchors; they must not be mistaken for a missing file. The bounded-read and stale-tag protections still apply.
+
+A host verification retry remains part of the same user task. After satisfying the missing checks, the model must report the original request, implementation and verified evidence from the entire run; it must not present only the retry as a new task or deny the earlier work.
+
+### Search snapshots and successive Hashline edits
+
+Search snapshots still hash the entire matched file, but request only one source
+line for the tag instead of rendering and serializing the full file. Successful
+Hashline edits return the new header and up to 20 numbered source lines near the
+first change (at most 8 KiB). This context is omitted if a concurrent write changed
+the observed tag; stale hashes remain rejected. Compact-diff recovery stops before
+this source context so source lines never become synthetic changes.
+
+### Verification before final Todo completion
+
+The last `todo done` performs the existing deterministic evidence checks before
+changing the Todo revision. Missing or failed checks leave that item in progress
+and return the specific checks to finish. Main and Team tools share this rule.
+The final-output guard still checks freshness, but successful current evidence
+does not request another test run. Evidence hydration omits ModelHistory and
+assistant blocks and selects only the relevant runs’ tool records in SQLite
+before allocating or decoding their payloads; full transcript
+loading retains its existing integrity validation.
+
+### On-demand history retrieval
+
+New sends and restored Team runs build their input from canonical messages,
+current model history and the existing archive/checkpoint. They do not perform
+keyword history recall or query-based memory/recap injection before admission.
+The IPC receipt therefore does not wait for optional recall.
+
+Main and Team agents can explicitly call `context.search_history` when prior
+context is missing. It is a read-only, current-session tool with a focused query,
+eight-result limit, `history_retrieval_tokens` budget, 16 KiB content cap and a
+two-second cancellable deadline. Search failures are tool errors, not hidden
+startup delays. Source primary-key lookups retain canonical-ID, source-state,
+private-artifact and session checks. Artifact bodies remain accessible through
+`context.read_artifact`. Existing memory management and archive persistence are
+unchanged; this change adds no background retrieval or summary-generation job.
+
+Regression coverage: `TestHistorySearchLongSessionUsesBoundedLookup`,
+`TestHistoryToolIsExplicitAndSessionScoped`,
+`TestTurnAdmissionDoesNotSearchLongHistory`, and `TestProviderHistoryRecallIsLazy`
+(first model request has no recalled payload; an explicit tool call returns it).

@@ -55,6 +55,13 @@ impl AzemWindow {
                 .unwrap_or_else(|| humanize_model_id(self.state.settings.model.as_ref()))
         };
         let current_provider = self.state.settings.provider.to_string();
+        let current_logo = catalog_provider_logo_id(
+            self.state.catalogs.providers.iter().find(|provider| {
+                provider.get("id").and_then(serde_json::Value::as_str)
+                    == Some(current_provider.as_str())
+            }),
+            &current_provider,
+        );
         let modes = model_modes(
             &self.state.catalogs.providers,
             &current_provider,
@@ -132,13 +139,16 @@ impl AzemWindow {
                 ))
                 .into_any_element()
         };
-        let picker = (self.model_picker_open && self.route_picker_target.is_none())
-            .then(|| self.model_picker_view(palette, cx));
+        let picker = (self.popup_motion("model").visible()
+            && self.model_picker_render_target.is_none())
+        .then(|| self.model_picker_view(palette, cx));
         let locale = Locale::resolve(&self.state.settings.language);
         let context_control = self.composer_context_control(palette, locale, cx);
         let attachment_previews = self.composer_attachments_view(palette, locale, cx);
         let completion_menu = self.completion_menu(palette, cx);
         let selected_skills = self.selected_skills_view(palette, cx);
+        let plan = surfaces::composer_plan(self, palette, locale, cx);
+        let queue = self.queued_prompts_view(palette, labels, plan.is_some(), cx);
         let composer_shell = div()
             .id("composer")
             .role(Role::Group)
@@ -146,16 +156,27 @@ impl AzemWindow {
             .w_full()
             .max_w(px(CHAT_COLUMN_MAX_WIDTH))
             .border_1()
-            .border_color(palette.border_strong)
+            .border_color(palette.border)
             .bg(palette.paper)
-            .rounded(px(18.))
+            .rounded(px(16.))
             .shadow(vec![
-                BoxShadow::new(px(0.), px(1.), hsla(220. / 360., 0.15, 0.15, 0.08))
+                BoxShadow::new(px(0.), px(1.), hsla(220. / 360., 0.12, 0.12, 0.05))
                     .blur_radius(px(10.)),
             ])
             .overflow_hidden()
             .flex()
             .flex_col()
+            .can_drop(|value, _, _| {
+                value.downcast_ref::<ExternalPaths>().is_some_and(|paths| {
+                    paths
+                        .paths()
+                        .iter()
+                        .any(|path| image_mime_from_extension(path).is_some())
+                })
+            })
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                this.attach_image_paths(paths.paths(), cx);
+            }))
             .when(expanded, |composer| {
                 composer.child(
                     div()
@@ -190,6 +211,7 @@ impl AzemWindow {
                     .capture_key_down(cx.listener(Self::completion_key))
                     .capture_action(cx.listener(Self::submit_completion))
                     .capture_action(cx.listener(Self::backspace_completion))
+                    .capture_action(cx.listener(Self::paste_composer_images))
                     .px_1()
                     .overflow_hidden()
                     .flex()
@@ -278,28 +300,6 @@ impl AzemWindow {
                             ))
                             .child(labels.plan),
                     )
-                    .when(self.state.runtime.running, |toolbar| {
-                        toolbar.child(
-                            div()
-                                .id("guide-message")
-                                .role(Role::Button)
-                                .aria_label(labels.guide)
-                                .tab_stop(true)
-                                .h(px(32.))
-                                .px_2()
-                                .rounded_full()
-                                .text_color(palette.accent)
-                                .text_xs()
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .cursor_pointer()
-                                .hover(move |style| style.bg(palette.accent_soft))
-                                .on_click(cx.listener(Self::guide_message))
-                                .child("↳")
-                                .child(labels.guide),
-                        )
-                    })
                     .child(div().flex_1())
                     .child(context_control)
                     .child(
@@ -326,7 +326,7 @@ impl AzemWindow {
                             .cursor_pointer()
                             .hover(move |style| style.bg(palette.paper_muted))
                             .on_click(cx.listener(Self::toggle_model_picker))
-                            .child(provider_logo(&current_provider, 15., palette.ink))
+                            .child(provider_logo(&current_logo, 15., palette.ink))
                             .child(div().min_w_0().truncate().child(model))
                             .child(
                                 div()
@@ -338,14 +338,18 @@ impl AzemWindow {
                     )
                     .child(send_control),
             );
+        let approval = self.pending_approval_view(palette, locale, cx);
         div()
             .id("composer-shell")
             .relative()
             .w_full()
             .max_w(px(CHAT_COLUMN_MAX_WIDTH))
+            .when_some(plan, |shell, plan| shell.child(plan))
+            .when_some(queue, |shell, queue| shell.child(queue))
+            .when_some(approval, |shell, panel| shell.child(panel))
             .child(composer_shell)
             .when_some(completion_menu, |shell, menu| shell.child(menu))
-            .when(self.context_popover_open, |shell| {
+            .when(self.popup_motion("context").visible(), |shell| {
                 shell.child(self.context_popover_view(palette, locale, cx))
             })
             .when_some(picker, |shell, picker| shell.child(picker))
@@ -371,25 +375,8 @@ impl AzemWindow {
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or(locale.text("ui.image"))
                     .to_string();
-                let image = attachment
-                    .get("path")
-                    .and_then(serde_json::Value::as_str)
-                    .filter(|path| !path.is_empty())
-                    .map(|path| {
-                        img(PathBuf::from(path))
-                            .size_full()
-                            .object_fit(ObjectFit::Contain)
-                            .into_any_element()
-                    })
-                    .unwrap_or_else(|| {
-                        div()
-                            .size_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(icon("image", 20., palette.faint))
-                            .into_any_element()
-                    });
+                let image =
+                    attachment_image_preview(attachment_preview_path(&attachment), palette, 20.);
                 div()
                     .id(("attachment-preview", index))
                     .role(Role::Group)
@@ -454,6 +441,7 @@ impl AzemWindow {
         &mut self,
         palette: ThemePalette,
         labels: Labels,
+        has_plan: bool,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let session_id = self.state.navigation.current_session_id.as_ref();
@@ -467,6 +455,12 @@ impl AzemWindow {
             return None;
         }
         let locale = Locale::resolve(&self.state.settings.language);
+        let paused = self
+            .state
+            .runtime
+            .prompt_queues
+            .get(session_id)
+            .is_some_and(|q| q["state"] == "paused");
         let rows = items
             .into_iter()
             .enumerate()
@@ -477,19 +471,44 @@ impl AzemWindow {
                 .id("queued-prompts")
                 .role(Role::List)
                 .aria_label(locale.text("ui.queuedMessages"))
-                .mx(px(22.))
-                .mb(px(-1.))
-                .max_h(px(236.))
-                .overflow_y_scroll()
+                .w(relative(11. / 12.))
+                .mx_auto()
                 .border_1()
                 .border_color(palette.border)
-                .rounded_tl(px(15.))
-                .rounded_tr(px(15.))
+                .border_b_0()
+                .when(!has_plan, |queue| queue.rounded_t(px(12.)))
                 .bg(palette.paper)
-                .shadow(vec![
-                    BoxShadow::new(px(0.), px(8.), hsla(220. / 360., 0.15, 0.12, 0.08))
-                        .blur_radius(px(28.)),
-                ])
+                .p_2()
+                .mb(px(-1.))
+                .max_h(px(144.))
+                .flex_shrink_0()
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .px_1()
+                        .pb_1()
+                        .text_size(px(12.))
+                        .text_color(palette.muted)
+                        .child(locale.text("queue.title")),
+                )
+                .when(paused, |list| {
+                    list.child(
+                        div()
+                            .id("resume-queue")
+                            .role(Role::Button)
+                            .aria_label(locale.text("ui.resumeQueue"))
+                            .tab_stop(true)
+                            .p_2()
+                            .cursor_pointer()
+                            .child(locale.text("ui.resumeQueue"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.mutate_prompt_queue(json!({"operation":"resume"}), None, cx)
+                            })),
+                    )
+                })
                 .children(rows)
                 .into_any_element(),
         )
@@ -504,11 +523,15 @@ impl AzemWindow {
         locale: Locale,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let can_guide = self.state.runtime.running
-            && item.selected_skills.is_empty()
-            && self.editing_queued_id.as_deref() != Some(item.id.as_str())
-            && self.can_guide_prompt(&item.prompt);
         let guide_id = item.id.clone();
+        let can_guide = !item.pending
+            && !item.dispatching
+            && !self.queue_request_pending()
+            && self.state.runtime.guidance_open
+            && self.state.runtime.running
+            && !self.state.runtime.run_id.is_empty()
+            && item.selected_skills.is_empty()
+            && self.can_guide_prompt(&item.prompt);
         let edit_id = item.id.clone();
         let delete_id = item.id.clone();
         let target_id = item.id.clone();
@@ -546,14 +569,16 @@ impl AzemWindow {
             .id(row_id)
             .role(Role::ListItem)
             .aria_label(text.clone())
-            .min_h(px(48.))
+            .min_h(px(32.))
+            .flex_shrink_0()
             .px_2()
-            .border_b_1()
-            .border_color(palette.border)
+            .when(index > 0, |row| {
+                row.border_t_1().border_color(palette.border)
+            })
             .flex()
             .items_center()
             .gap_1()
-            .text_size(px(12.5))
+            .text_size(px(12.))
             .text_color(if item.failed {
                 palette.danger
             } else {
@@ -600,34 +625,56 @@ impl AzemWindow {
                     .text_ellipsis()
                     .child(text),
             )
-            .child(
-                div()
-                    .id(("guide-queued", index))
-                    .role(Role::Button)
-                    .aria_label(labels.guide)
-                    .tab_stop(can_guide)
-                    .h(px(28.))
-                    .px_2()
-                    .rounded(px(8.))
-                    .text_color(if can_guide {
-                        palette.muted
-                    } else {
-                        palette.faint
-                    })
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .when(can_guide, |button| {
-                        button
-                            .cursor_pointer()
-                            .hover(move |style| style.bg(palette.hover))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.guide_queued(&guide_id, cx);
-                            }))
-                    })
-                    .child("↳")
-                    .child(locale.text("ui.guide")),
-            )
+            .when(item.pending, |row| {
+                row.child(
+                    div()
+                        .id(("queue-pending", index))
+                        .role(Role::Status)
+                        .aria_label(locale.text("ui.sending"))
+                        .text_color(palette.muted)
+                        .child(locale.text("ui.sending")),
+                )
+            })
+            .when(can_guide, |row| {
+                row.child(
+                    div()
+                        .id(("guide-queued", index))
+                        .role(Role::Button)
+                        .aria_label(labels.guide)
+                        .tab_stop(true)
+                        .flex_shrink_0()
+                        .whitespace_nowrap()
+                        .rounded(px(6.))
+                        .hover(move |style| style.bg(palette.hover))
+                        .px_2()
+                        .cursor_pointer()
+                        .text_color(palette.accent)
+                        .child(labels.guide)
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.guide_queued(&guide_id, cx)),
+                        ),
+                )
+            })
+            .when(item.failed, |row| {
+                let retry_id = item.id.clone();
+                row.child(
+                    div()
+                        .id(("retry-queued", index))
+                        .role(Role::Button)
+                        .aria_label(locale.text("ui.retryQueuedMessage"))
+                        .tab_stop(true)
+                        .px_2()
+                        .cursor_pointer()
+                        .child(locale.text("ui.retryQueuedMessage"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.mutate_prompt_queue(
+                                json!({"operation":"retry","itemId":retry_id}),
+                                None,
+                                cx,
+                            );
+                        })),
+                )
+            })
             .child(
                 div()
                     .id(("edit-queued", index))

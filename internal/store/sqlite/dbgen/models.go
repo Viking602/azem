@@ -161,6 +161,7 @@ type ContextManifest struct {
 type DesktopProject struct {
 	Workspace string `db:"workspace"`
 	UpdatedAt int64  `db:"updated_at"`
+	Visible   int64  `db:"visible"`
 }
 
 type Event struct {
@@ -523,6 +524,16 @@ type SessionProjection struct {
 	CacheEpoch           int64  `db:"cache_epoch"`
 	CacheIdentityHash    string `db:"cache_identity_hash"`
 	ModelHistorySha256   string `db:"model_history_sha256"`
+}
+
+type SessionPromptQueue struct {
+	SessionID   string `db:"session_id"`
+	Revision    int64  `db:"revision"`
+	State       string `db:"state"`
+	PauseReason string `db:"pause_reason"`
+	ItemsInline []byte `db:"items_inline"`
+	ItemsDigest string `db:"items_digest"`
+	UpdatedAt   int64  `db:"updated_at"`
 }
 
 type SessionSemanticState struct {

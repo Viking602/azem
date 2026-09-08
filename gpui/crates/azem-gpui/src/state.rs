@@ -68,12 +68,14 @@ pub struct TranscriptModel {
 #[derive(Clone, Debug, Default)]
 pub struct RuntimeModel {
     pub running: bool,
+    pub guidance_open: bool,
     pub run_id: Arc<str>,
     pub run_started_at_ms: i64,
     pub active_session_id: Arc<str>,
     pub activity: Arc<str>,
     pub plan_mode: bool,
     pub todo: Value,
+    pub prompt_queues: HashMap<String, Value>,
     pub approvals: Vec<Value>,
     pub questions: Vec<Value>,
     pub plans: Vec<Value>,
@@ -87,6 +89,10 @@ pub struct RuntimeModel {
     pub context_profile: Value,
     pub context_usage: Value,
     pub recap: Value,
+    /// Fingerprint of the last applied resume projection so a broadcast
+    /// `session_loaded` that repeats the direct ResumeSession readback does not
+    /// reparse the full transcript on the initiating window.
+    pub resume_fingerprint: Arc<str>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -230,6 +236,12 @@ pub struct Block {
 struct DesktopEvent {
     #[serde(default)]
     sequence: u64,
+    #[serde(default)]
+    session_projection: Value,
+    #[serde(default)]
+    run_projection: Value,
+    #[serde(default)]
+    prompt_queue: Value,
     #[serde(default)]
     kind: String,
     #[serde(default)]
@@ -435,6 +447,9 @@ impl AppState {
                 }
             }
         }
+        if snapshot.get("selectedSessionId").is_some() {
+            self.apply_projection_snapshot(&snapshot);
+        }
         self.connection.connected = true;
         self.connection.reconnecting = false;
         self.connection.message = "Connected".into();
@@ -455,11 +470,50 @@ impl AppState {
     }
 
     pub fn apply_direct_event(&mut self, value: Value) {
+        if value.get("selectedSessionId").is_some() {
+            if value.get("base").is_some() {
+                self.apply_reconnect_snapshot(value);
+            } else {
+                self.apply_projection_snapshot(&value);
+            }
+            return;
+        }
         match decode_desktop_event(value) {
             Ok(event) => self.apply_desktop_event(event),
             Err(error) => tracing::warn!(%error, "GPUI direct event decode failed"),
         }
     }
+
+    fn apply_model_catalog(&mut self, event: &DesktopEvent) {
+        let models: Vec<Value> = parse_string_json(
+            event
+                .data
+                .get("models")
+                .or_else(|| event.data.get("catalog")),
+        );
+        self.catalogs.models = models.clone();
+        let Some(provider_id) = event
+            .data
+            .get("provider")
+            .map(String::as_str)
+            .filter(|id| !id.is_empty())
+        else {
+            return;
+        };
+        if models.is_empty() {
+            return;
+        }
+        if let Some(provider) = self
+            .catalogs
+            .providers
+            .iter_mut()
+            .find(|provider| provider.get("id").and_then(Value::as_str) == Some(provider_id))
+            && let Some(object) = provider.as_object_mut()
+        {
+            object.insert("models".into(), Value::Array(models));
+        }
+    }
+
     pub fn apply_terminal_binary(&mut self, metadata: BinaryMetadata, _data: &[u8]) {
         if metadata.purpose != "terminal_output" || metadata.transfer_id.is_empty() {
             return;
@@ -471,6 +525,14 @@ impl AppState {
 
     fn apply_desktop_event(&mut self, event: DesktopEvent) {
         self.sequence = self.sequence.max(event.sequence);
+        if event.kind == "run_state" {
+            self.apply_run_projection(&event.run_projection);
+            return;
+        }
+        if event.kind == "prompt_queue_state" {
+            self.apply_prompt_queue(&event.prompt_queue);
+            return;
+        }
         let foreign_session = !event.session_id.is_empty()
             && !self.navigation.current_session_id.is_empty()
             && event.session_id != self.navigation.current_session_id.as_ref();
@@ -517,6 +579,7 @@ impl AppState {
             return;
         }
         match event.kind.as_str() {
+            "session_projection" => self.apply_session_projection(&event.session_projection),
             "session_loaded" | "projection_resync" => self.load_session(event),
             "run_started" => {
                 let is_current = event.session_id == self.navigation.current_session_id.as_ref();
@@ -758,14 +821,7 @@ impl AppState {
             }
             "memory_state" => self.runtime.memories = event.memories,
             "recap_state" => self.runtime.recap = event.recap,
-            "model_catalog" => {
-                self.catalogs.models = parse_string_json(
-                    event
-                        .data
-                        .get("models")
-                        .or_else(|| event.data.get("catalog")),
-                )
-            }
+            "model_catalog" => self.apply_model_catalog(&event),
             "model_routes" => {
                 self.catalogs.routes = event.model_routes;
                 if let Some(enabled) = event
@@ -866,6 +922,14 @@ impl AppState {
             return;
         }
         let loaded_session_id = event.session_id.clone();
+        let fingerprint = resume_projection_fingerprint(&event);
+        if event.state == "loaded"
+            && self.navigation.current_session_id.as_ref() == loaded_session_id
+            && !fingerprint.is_empty()
+            && self.runtime.resume_fingerprint.as_ref() == fingerprint
+        {
+            return;
+        }
         if !self.navigation.current_session_id.is_empty()
             && self.navigation.current_session_id.as_ref() != loaded_session_id
         {
@@ -939,6 +1003,11 @@ impl AppState {
         if !keep_agent_detail {
             self.runtime.selected_agent_id = "".into();
             self.runtime.agent_blocks = event.agent_blocks;
+        }
+        if event.state == "loaded" {
+            self.runtime.resume_fingerprint = fingerprint.into();
+        } else {
+            self.runtime.resume_fingerprint = "".into();
         }
     }
 
@@ -1256,6 +1325,19 @@ fn parse_string_json<T: for<'de> Deserialize<'de>>(value: Option<&String>) -> Ve
 
 fn value_str_map(values: &HashMap<String, String>, key: &str) -> Arc<str> {
     values.get(key).cloned().unwrap_or_default().into()
+}
+
+fn resume_projection_fingerprint(event: &DesktopEvent) -> String {
+    let last_run = event.data.get("lastRunID").cloned().unwrap_or_default();
+    let sequences = event
+        .data
+        .get("blockSequences")
+        .cloned()
+        .unwrap_or_default();
+    if event.session_id.is_empty() {
+        return String::new();
+    }
+    format!("{}|{last_run}|{sequences}", event.session_id)
 }
 
 fn restored_session_blocks(data: &HashMap<String, String>) -> Vec<Block> {
@@ -1606,3 +1688,5 @@ fn upsert_pending(values: &mut Vec<Value>, key: &str, id: &str, value: Value) {
 
 #[cfg(test)]
 mod tests;
+
+mod projection;

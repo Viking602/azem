@@ -111,6 +111,13 @@ impl AzemWindow {
             .iter()
             .map(|(key, _, _)| cx.new(|cx| TextInput::new(cx, window, *key).compact()))
             .collect::<Vec<_>>();
+        let provider_base_url =
+            cx.new(|cx| TextInput::new(cx, window, locale.text("ui.customAPIBaseURL")).compact());
+        let provider_api_key = cx.new(|cx| {
+            TextInput::new(cx, window, locale.text("ui.apiKey"))
+                .compact()
+                .password()
+        });
         for input in [
             &model_search,
             &settings_provider_search,
@@ -119,6 +126,8 @@ impl AzemWindow {
             &marketplace_source,
             &settings_search,
             &font_search,
+            &provider_base_url,
+            &provider_api_key,
         ]
         .into_iter()
         .chain(&security_fields)
@@ -192,10 +201,15 @@ impl AzemWindow {
                 security_baseline: serde_json::Value::Null,
                 security_busy: false,
                 security_saved: false,
+                provider_base_url,
+                provider_api_key,
+                catalog_loaded_id: None,
+                catalog_enabled: false,
             },
             model_picker_open: false,
             model_picker_error: String::new(),
             route_picker_target: None,
+            model_picker_render_target: None,
             subagent_setting_menu: None,
             context_popover_open: false,
             reply_popover: None,
@@ -213,12 +227,16 @@ impl AzemWindow {
             archive_days_menu_open: false,
             usage_hover: None,
             environment_open: true,
-            environment_expanded: None,
             side_panel_open: false,
             side_panel_agents_open: false,
             side_panel_add_menu_open: false,
             side_panel_closing: false,
             side_panel_width: SIDE_PANEL_DEFAULT_WIDTH,
+            surface_motion: SurfaceMotion::default(),
+            popup_motions: HashMap::new(),
+            sidebar_open: true,
+            sidebar_visible_width: SIDEBAR_WIDTH,
+            sidebar_animation: None,
             side_panel_visible_width: 0.,
             side_panel_animation_started: None,
             side_panel_animation_from: 0.,
@@ -238,6 +256,7 @@ impl AzemWindow {
             provider_catalog_logged: false,
             window_state_path,
             window_size: window.window_bounds().get_bounds().size,
+            window_placement: current_window_placement(window, cx),
             _connection_task: Task::ready(()),
             transcript_list,
         };
@@ -314,7 +333,6 @@ impl AzemWindow {
         let locale = Locale::resolve(&self.state.settings.language);
         let old_language = self.state.settings.language.clone();
         let old_block_count = self.state.transcript.blocks.borrow().len();
-        let old_runtime_busy = runtime_busy(&self.state);
         let old_run_id = self.state.runtime.run_id.clone();
         let old_pending_process = needs_pending_process(
             &self.state.transcript.blocks.borrow(),
@@ -338,8 +356,9 @@ impl AzemWindow {
                 self.state.apply_reconnect_snapshot(snapshot);
                 if self.new_session_after_workspace_switch {
                     self.new_session_after_workspace_switch = false;
-                    self.runtime
-                        .request(Method::Execute, json!({"kind": "new_session"}));
+                    let id = self.runtime.request(Method::CreateSession, json!({}));
+                    self.pending_requests
+                        .insert(id, PendingRequest::ResumeSession { sequence: None });
                 } else if let Some(sequence) = self.pending_workspace_sequence.take()
                     && let Some(index) =
                         self.state
@@ -508,8 +527,18 @@ impl AzemWindow {
                 Ok(value) => {
                     if let Some(pending) = self.pending_requests.remove(&id) {
                         match pending {
+                            PendingRequest::PromptQueueRefresh => {
+                                self.state.apply_direct_event(
+                                    json!({"kind":"prompt_queue_state","promptQueue":value}),
+                                );
+                            }
                             PendingRequest::CompletionFiles { generation } => {
                                 self.completion.receive_files(generation, Ok(value), locale);
+                            }
+                            PendingRequest::ApprovalDecision { approval_id } => {
+                                self.state.runtime.approvals.retain(|value| {
+                                    value["approvalId"].as_str() != Some(&approval_id)
+                                });
                             }
                             PendingRequest::ApprovalMode => {
                                 self.approval_picker.open = false;
@@ -636,14 +665,32 @@ impl AzemWindow {
                                     self.queued_prompts.retain(|item| item.id != queued_id);
                                 }
                             }
-                            PendingRequest::QueuedGuide {
-                                queued_id,
-                                prompt,
-                                attachments,
+                            PendingRequest::PromptQueue {
+                                session_id,
+                                source_text,
+                                submission,
                             } => {
-                                self.queued_prompts.retain(|item| item.id != queued_id);
-                                self.state
-                                    .append_optimistic_user(id.as_str(), prompt, attachments);
+                                self.state.apply_direct_event(
+                                    json!({"kind":"prompt_queue_state","promptQueue":value}),
+                                );
+                                if session_id == self.state.navigation.current_session_id.as_ref()
+                                    && source_text.is_some_and(|text| {
+                                        self.composer.read(cx).submission_text() == text
+                                    })
+                                {
+                                    self.composer.update(cx, |composer, cx| composer.clear(cx));
+                                    if let Some(item) = submission {
+                                        if self.state.transcript.attachments == item.attachments {
+                                            self.state.transcript.attachments.clear();
+                                        }
+                                        if self.completion.selected_skills == item.selected_skills {
+                                            self.completion.selected_skills.clear();
+                                        }
+                                        if self.editing_queued_id.as_deref() == Some(&item.id) {
+                                            self.editing_queued_id = None;
+                                        }
+                                    }
+                                }
                             }
                             PendingRequest::ResumeSession { sequence } => {
                                 self.state.apply_direct_event(value);
@@ -687,7 +734,7 @@ impl AzemWindow {
                             }
                             PendingRequest::ReplyFork { target_id } => {
                                 let request_id = self.runtime.request(
-                                    Method::ResumeSession,
+                                    Method::SelectSession,
                                     json!({"sessionId": target_id}),
                                 );
                                 self.pending_requests.insert(
@@ -789,6 +836,17 @@ impl AzemWindow {
                         cx.notify();
                         return;
                     }
+                    if let Some(PendingRequest::PromptQueue { session_id, .. }) = &pending {
+                        self.completion.submission_error = error.clone();
+                        let refresh = self
+                            .runtime
+                            .request(Method::PromptQueue, json!({"sessionId":session_id}));
+                        self.pending_requests
+                            .insert(refresh, PendingRequest::PromptQueueRefresh);
+                    }
+                    if matches!(&pending, Some(PendingRequest::ApprovalDecision { .. })) {
+                        self.completion.submission_error = error.clone();
+                    }
                     if matches!(&pending, Some(PendingRequest::ApprovalMode)) {
                         self.approval_picker.error = error.clone();
                     }
@@ -826,18 +884,14 @@ impl AzemWindow {
                     if matches!(&pending, Some(PendingRequest::ExtensionAction { .. })) {
                         self.extension_settings.busy = false;
                     }
-                    if matches!(
-                        &pending,
-                        Some(PendingRequest::Turn { .. } | PendingRequest::QueuedGuide { .. })
-                    ) {
+                    if matches!(&pending, Some(PendingRequest::Turn { .. })) {
                         self.state.append_request_error(&id, error.clone());
                     }
                     if let Some(queued_id) = match &pending {
                         Some(PendingRequest::Turn {
                             queued_id: Some(queued_id),
                             ..
-                        })
-                        | Some(PendingRequest::QueuedGuide { queued_id, .. }) => Some(queued_id),
+                        }) => Some(queued_id),
                         _ => None,
                     } && let Some(item) = self
                         .queued_prompts
@@ -863,10 +917,14 @@ impl AzemWindow {
                     ) {
                         self.completion.submission_error = error.clone();
                     }
+                    if matches!(&pending, Some(PendingRequest::Attachment)) {
+                        self.completion.submission_error = error.clone();
+                    }
                     if matches!(pending, Some(PendingRequest::Search)) {
                         self.state.navigation.search_error = error.into();
                     } else if matches!(pending, Some(PendingRequest::EnvironmentGit)) {
                         tracing::warn!(request_id = id, %error, "refresh environment metrics");
+                    } else if matches!(&pending, Some(PendingRequest::Attachment)) {
                     } else if let Some(PendingRequest::GitBranches { target, confirmed }) = pending
                     {
                         self.branch_picker.open = true;
@@ -940,8 +998,37 @@ impl AzemWindow {
         {
             self.schedule_run_elapsed_tick(self.state.runtime.run_id.to_string(), cx);
         }
-        if should_start_next_queued(old_runtime_busy, session_changed, &self.state) {
-            self.start_next_queued(cx);
+        self.queued_prompts = self
+            .state
+            .runtime
+            .prompt_queues
+            .iter()
+            .flat_map(|(session, queue)| {
+                queue["items"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(move |item| QueuedPrompt {
+                        id: item["id"].as_str().unwrap_or_default().into(),
+                        session_id: session.clone(),
+                        prompt: item["text"].as_str().unwrap_or_default().into(),
+                        selected_skills: vec![],
+                        attachments: item["attachments"].as_array().cloned().unwrap_or_default(),
+                        failed: item["state"] == "failed",
+                        pending: false,
+                        dispatching: item["state"] == "dispatching",
+                    })
+            })
+            .collect();
+        for request in self.pending_requests.values() {
+            if let PendingRequest::PromptQueue {
+                submission: Some(item),
+                ..
+            } = request
+            {
+                self.queued_prompts.retain(|queued| queued.id != item.id);
+                self.queued_prompts.push(item.clone());
+            }
         }
     }
 
@@ -954,6 +1041,9 @@ impl AzemWindow {
                 self.state.runtime.running,
             ),
         );
+        let index =
+            surfaces::completed_process_range(&self.state.transcript.blocks.borrow(), index)
+                .map_or(index, |range| range.start);
         if item_count > 0 && index < item_count {
             self.transcript_list.remeasure_items(index..index + 1);
         }

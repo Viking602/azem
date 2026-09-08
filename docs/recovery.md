@@ -1,6 +1,6 @@
 # Recovery
 
-Last verified: 2026-08-31
+Last verified: 2026-09-06
 
 This guide covers the runtime recovery contract: which process may recover,
 what crash recovery restores, how interrupted work is represented, and which
@@ -34,8 +34,10 @@ modes:
 Session navigation between projects must not emit `SessionEnd`; the single
 renderer detaches and background work owned by the previous daemon keeps
 running.
-Closing a GPUI renderer asks an idle workspace daemon to stop; an active run
-keeps the daemon alive. Explicit desktop Stop cancels main plus children.
+Closing the last TUI or GPUI client lets an idle workspace daemon stop
+after a five-second reconnect grace period. Active main runs, detached children,
+scans, shell executions, and supervised background processes keep it alive;
+it exits after they finish if no client reconnects. Explicit desktop Stop cancels main plus children.
 `azem daemon stop` refuses an active main run unless `--include-active` is
 supplied. Venat's durable runtime is execution state inside that daemon, not a
 second daemon/session owner.
@@ -54,8 +56,9 @@ Recovery runs only under the exclusive process fence:
    quarantines incomplete legacy action attempts/provider requests.
 4. `recovery.Service.RecoverPrepared` scans non-terminal application runs and
    pending approvals without repeating preparation. `ClassifyRunRecovery`
-   validates each v1 binding, sealed manifest, profile hash, and persisted
-   execution state.
+   validates each v1 binding, sealed manifest, and profile hash, then peeks
+   the execution catalog status. It must not load execution blobs, attempt
+   graphs, or continuation hashes before the daemon can listen.
 5. Non-terminal v0.15 runs without a v1 binding are marked
    `reconcile_required`. Their durable history remains intact; recovery does
    not fabricate a continuation or execute an old pending tool.
@@ -114,7 +117,10 @@ them honest across interruptions:
   file facts). Each completed file observation is re-hashed against the
   current workspace: a matching SHA-256 becomes `verified_unchanged`, a
   mismatch becomes `stale`, and an unreadable path stays `unverified` with an
-  error code. The policy forbids replaying completed side effects and forbids
+  error code. Absolute paths under the workspace are relativized before capture;
+  parent-directory escapes and foreign absolute paths are dropped so they cannot
+  fail `ObservationEnvelopeV1` validation and abort tool finish (TOOL-009). The
+  policy forbids replaying completed side effects and forbids
   re-reading `verified_unchanged` paths merely because execution resumed;
   `stale` paths may be re-read only when their contents are needed. All
   embedded names are untrusted data, never instructions.

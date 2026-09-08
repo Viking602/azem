@@ -64,7 +64,7 @@ func (m AppModel) genericOverlayFrame(width, height int) overlayFrameLayout {
 	maxBoxWidth := 82
 	switch m.overlay {
 	case OverlayAgentTypes, OverlayPersonas, OverlaySkills, OverlayMemory, OverlayRecap,
-		OverlayModelRoutes, OverlaySettings, OverlayStatus, OverlayContext, OverlayBackground, OverlaySecurity, OverlayUserInput, OverlayPlan:
+		OverlayModelRoutes, OverlaySettings, OverlayStatus, OverlayContext, OverlayBackground, OverlaySecurity, OverlayUserInput, OverlayPlan, OverlayQueue:
 		maxBoxWidth = 110
 	}
 	boxWidth := min(maxBoxWidth, max(3, width-2))
@@ -855,6 +855,12 @@ func (m AppModel) overlayHeading() (string, string) {
 		return m.tr("overlay.reasoning.title"), m.provider + "/" + first(m.model, m.tr("value.no_model")) + " · " + m.tr("overlay.reasoning.applied_next")
 	case OverlaySessions:
 		return m.tr("overlay.sessions.title"), m.tr("overlay.sessions.subtitle")
+	case OverlayQueue:
+		queue := m.currentPromptQueue()
+		if m.catalog.Language() == "zh-CN" {
+			return "后续任务队列", fmt.Sprintf("修订 %d · %s", queue.Revision, queue.State)
+		}
+		return "Prompt queue", fmt.Sprintf("Revision %d · %s", queue.Revision, queue.State)
 	case OverlayBranches:
 		return m.tr("overlay.branches.title"), m.tr("overlay.branches.subtitle")
 	case OverlayBranchConfirm:
@@ -987,6 +993,16 @@ func (m AppModel) overlayDescription() []string {
 			return []string{m.tr("overlay.sessions.empty")}
 		}
 		return []string{m.tr("overlay.sessions.instructions")}
+	case OverlayQueue:
+		queue := m.currentPromptQueue()
+		if len(queue.Items) == 0 {
+			return []string{"Queue is empty. New queued work appears here on every connected client."}
+		}
+		hint := "e edit · d delete · Ctrl+↑/↓ reorder · r retry · p pause/resume"
+		if queue.PauseReason != "" {
+			hint = "Paused: " + queue.PauseReason + " · " + hint
+		}
+		return []string{hint}
 	case OverlayBranches:
 		if len(m.branches) == 0 {
 			return []string{m.tr("overlay.branches.empty")}
@@ -1167,21 +1183,30 @@ func (m AppModel) overlayOptions() []overlayOption {
 		}
 		return options
 	case OverlayProvider:
-		options := make([]overlayOption, 0, 3)
-		for _, provider := range []string{"chatgpt", "grok", "cursor"} {
-			auth := m.auth[provider]
+		providers := m.providerIDs(m.overlayPurpose == "login")
+		options := make([]overlayOption, 0, len(providers))
+		for _, providerID := range providers {
+			auth := m.auth[providerID]
+			label := providerDisplayName(providerID)
 			detail := m.tr("provider.not_signed_in")
 			state := auth.State
-			if auth.Email != "" {
-				detail = auth.Email
+			if provider, ok := m.modelProvider(providerID); ok && !provider.Subscription {
+				label = first(provider.DisplayName, label)
+				credential := m.tr("provider.credential.missing")
+				if provider.CredentialConfigured {
+					credential = m.tr("provider.credential." + first(provider.CredentialSource, "configured"))
+				}
+				detail = m.tr("provider.models", map[string]string{"count": strconv.Itoa(len(m.modelsByProvider[providerID]))}) + " · " + credential
+			} else if account := first(auth.DisplayName, auth.Email); account != "" {
+				detail = account
 				if auth.Plan != "" {
 					detail += " · " + auth.Plan
 				}
 			}
-			if provider == m.provider && m.overlayPurpose != "login" {
+			if providerID == m.provider && m.overlayPurpose != "login" {
 				state = "selected"
 			}
-			options = append(options, overlayOption{Label: provider, Detail: detail, State: state})
+			options = append(options, overlayOption{Label: label, Detail: detail, State: state})
 		}
 		return options
 	case OverlayModel:
@@ -1271,6 +1296,19 @@ func (m AppModel) overlayOptions() []overlayOption {
 				state = "current"
 			}
 			options = append(options, overlayOption{Label: first(session.Title, session.ID), Detail: detail, State: state})
+		}
+		return options
+	case OverlayQueue:
+		queue := m.currentPromptQueue()
+		options := make([]overlayOption, 0, len(queue.Items))
+		for _, item := range queue.Items {
+			detail := fmt.Sprintf("%s · attempts %d", item.State, item.Attempts)
+			if item.Error != "" {
+				detail += " · " + item.Error
+			} else if item.RunID != "" {
+				detail += " · " + item.RunID
+			}
+			options = append(options, overlayOption{Label: item.Text, Detail: detail, State: string(item.State)})
 		}
 		return options
 	case OverlayBranches:

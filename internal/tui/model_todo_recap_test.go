@@ -369,6 +369,7 @@ func TestRecapUpdateIsVisibleWhenIdleAndResumesWithSession(t *testing.T) {
 		t.Fatalf("recap status escaped viewport: got %d lines, want %d", lines, model.height)
 	}
 
+	model.sessionID = "session-2"
 	model.applyEvent(app.Event{
 		Kind: app.EventSessionLoaded, SessionID: "session-2", State: "loaded", Recap: &recap.Recap{
 			SessionID: "session-2", Summary: "Resumed continuity", Revision: 1,

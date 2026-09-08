@@ -48,7 +48,7 @@ func (driver *preEmissionRetryMeteringDriver) Stream(_ context.Context, _ hyprov
 	if driver.calls == 1 {
 		return nil, preEmissionRetryError{}
 	}
-	return hyprovider.NewSliceStream([]hyprovider.Event{{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete}}), nil
+	return hyprovider.NewSliceStream([]hyprovider.Event{{Kind: hyprovider.EventTextDelta, Text: "ok"}, {Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete}}), nil
 }
 
 type cursorContextMeteringDriver struct{}
@@ -176,22 +176,28 @@ func TestProviderStreamSinkSynthesizesOneCommentaryBeforeEachToolBatch(t *testin
 	}
 }
 
-func TestProviderStreamSinkMarksUnphasedTextAsPendingFinalAnswer(t *testing.T) {
+func TestProviderStreamSinkPublishesFinalTextOnlyAfterAcceptance(t *testing.T) {
 	host := NewService(context.Background(), config.Default())
 	sink := host.providerStreamSink("s", "r", "deepseek", "deepseek-v4-flash", "high", "llmux:deepseek")
-	if err := sink.Emit(context.Background(), hyagent.Frame{Kind: hyagent.FrameText, Text: "最终正文"}); err != nil {
+	if err := sink.Emit(context.Background(), hyagent.Frame{Kind: hyagent.FrameText, Text: "candidate A"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.PublishAccepted(context.Background(), "accepted B"); err != nil {
 		t.Fatal(err)
 	}
 	event, err := host.NextEvent(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if event.Kind != EventTextDelta || event.Text != "最终正文" || event.TextPhase != string(hyprovider.TextPhaseFinalAnswer) || event.Data["textPhasePending"] != "true" {
+	if event.Kind != EventTextDelta || event.Text != "accepted B" || event.TextPhase != string(hyprovider.TextPhaseFinalAnswer) || event.Data["textPhasePending"] != "" {
 		t.Fatalf("text event=%+v", event)
 	}
 
 	explicit := host.providerStreamSink("s", "explicit", "chatgpt", "gpt", "high", "responses")
 	if err := explicit.Emit(context.Background(), hyagent.Frame{Kind: hyagent.FrameText, Text: "明确正文", TextPhase: hyprovider.TextPhaseFinalAnswer}); err != nil {
+		t.Fatal(err)
+	}
+	if err := explicit.PublishAccepted(context.Background(), "明确正文"); err != nil {
 		t.Fatal(err)
 	}
 	event, err = host.NextEvent(context.Background())
@@ -482,6 +488,9 @@ func TestProviderRetryPersistsEachPhysicalRequestFact(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer stream.Close()
+	if event, err := stream.Recv(); err != nil || event.Text != "ok" {
+		t.Fatalf("text=%+v err=%v", event, err)
+	}
 	if event, recvErr := stream.Recv(); recvErr != nil || event.Kind != hyprovider.EventDone {
 		t.Fatalf("event=%#v error=%v", event, recvErr)
 	}

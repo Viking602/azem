@@ -67,6 +67,7 @@ pub struct TextInput {
     multiline: bool,
     compact: bool,
     terminal: bool,
+    password: bool,
     cursor_visible: bool,
     blink_task: Option<Task<()>>,
 }
@@ -233,6 +234,7 @@ impl TextInput {
             multiline: false,
             compact: false,
             terminal: false,
+            password: false,
             cursor_visible: false,
             blink_task: None,
         }
@@ -285,6 +287,11 @@ impl TextInput {
 
     pub fn compact(mut self) -> Self {
         self.compact = true;
+        self
+    }
+
+    pub fn password(mut self) -> Self {
+        self.password = true;
         self
     }
 
@@ -989,6 +996,8 @@ impl Element for TextElement {
                 input.placeholder.clone(),
                 ThemePalette::for_window(window, cx).faint.into(),
             )
+        } else if input.password {
+            (password_mask(&content).into(), style.color)
         } else {
             (content, style.color)
         };
@@ -1229,9 +1238,22 @@ impl Focusable for TextInput {
     }
 }
 
+fn password_mask(content: &str) -> String {
+    "*".repeat(content.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn password_mask_keeps_ascii_length_and_hides_secret() {
+        let secret = "sk-test";
+        let masked = password_mask(secret);
+        assert_eq!(masked.len(), secret.len());
+        assert_eq!(masked, "*******");
+        assert!(!masked.contains('s'));
+    }
 
     #[test]
     fn file_labels_hide_paths_but_copy_and_submission_keep_distinct_targets() {

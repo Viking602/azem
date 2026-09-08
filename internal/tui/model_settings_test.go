@@ -13,7 +13,26 @@ import (
 	agentservice "github.com/Viking602/azem/internal/agent"
 	"github.com/Viking602/azem/internal/app"
 	"github.com/Viking602/azem/internal/config"
+	"github.com/Viking602/azem/internal/desktop"
 )
+
+func TestTUIInitRequestsCompleteProviderProjection(t *testing.T) {
+	runtime := &recordedRuntime{}
+	model := NewModel(runtime, "/tmp/workspace", "chatgpt", "gpt-main", "high", "single")
+	message := model.Init()()
+	batch, ok := message.(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("Init message=%T, want tea.BatchMsg", message)
+	}
+	for _, command := range batch {
+		if command != nil {
+			_ = command()
+		}
+	}
+	if len(runtime.actions) != 1 || runtime.actions[0].Kind != ActionListModelProviders {
+		t.Fatalf("initial actions=%+v", runtime.actions)
+	}
+}
 
 func TestReasoningPickerUsesSelectedModelLevelsAndConfiguresTurn(t *testing.T) {
 	runtime := &configuredTurnRuntime{}
@@ -445,6 +464,61 @@ func TestModelOverlaySearchFiltersClearsAndSelects(t *testing.T) {
 	model = updated.(AppModel)
 	if model.overlay != OverlayNone || model.provider != "grok" || model.model != "grok-4.5" {
 		t.Fatalf("searched model selection = overlay:%q provider:%q model:%q", model.overlay, model.provider, model.model)
+	}
+}
+
+func TestTUIProjectsAllLLMuxModelsAndSharedCredentials(t *testing.T) {
+	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "gpt-main", "high", "single")
+	model.applyEvent(appEventFromDesktop(desktop.Event{
+		Kind: string(app.EventModelProviders),
+		ModelProviders: []app.ModelProviderEntry{
+			{
+				ID: "chatgpt", DisplayName: "OpenAI / ChatGPT", Backend: "subscription",
+				Subscription: true, Enabled: true, CredentialConfigured: true,
+				AccountID: "shared-account", AccountLabel: "Shared User", AccountPlan: "Pro",
+				Models: []config.LLMuxModelConfig{{ID: "gpt-main", Name: "GPT Main"}},
+			},
+			{
+				ID: "openrouter", DisplayName: "OpenRouter", Backend: "openai-responses",
+				Enabled: true, CredentialConfigured: true, CredentialSource: "stored",
+				Models: []config.LLMuxModelConfig{
+					{ID: "vendor/alpha", Name: "Alpha", Aliases: []string{"alpha-latest"}, ContextWindow: 200_000, Capabilities: []string{"tools", "reasoning"}, ReasoningLevels: []string{"low", "high"}},
+					{ID: "vendor/disabled", Name: "Disabled", Disabled: true},
+				},
+			},
+			{
+				ID: "anthropic", DisplayName: "Anthropic", Enabled: false, CredentialConfigured: true,
+				Models: []config.LLMuxModelConfig{{ID: "claude-disabled"}},
+			},
+		},
+	}))
+	model.applyEvent(appEventFromDesktop(desktop.Event{
+		Kind: string(app.EventAuthState), State: "connected",
+		Data: map[string]string{"provider": "chatgpt", "accountID": "shared-account", "email": "shared@example.com", "displayName": "Shared User", "plan": "Pro"},
+	}))
+
+	if got := model.auth["chatgpt"]; got.AccountID != "shared-account" || got.Email != "shared@example.com" || got.Plan != "Pro" {
+		t.Fatalf("shared subscription projection=%+v", got)
+	}
+	if got := model.modelsByProvider["openrouter"]; len(got) != 1 || got[0].ID != "vendor/alpha" || !got[0].SupportsTools || !got[0].SupportsReasoning {
+		t.Fatalf("llmux model projection=%+v", got)
+	}
+	if _, exists := model.modelsByProvider["anthropic"]; exists {
+		t.Fatalf("disabled provider entered selectable catalogs: %+v", model.modelsByProvider)
+	}
+	model.openOverlay(OverlayProvider)
+	options := model.overlayOptions()
+	if len(options) != 2 || options[1].Label != "OpenRouter" || !strings.Contains(options[1].Detail, "1 models") || !strings.Contains(options[1].Detail, "shared stored credential") {
+		t.Fatalf("provider options=%+v", options)
+	}
+	updated, _ := model.executeCommand(Command{Name: "provider", Args: []string{"openrouter"}})
+	model = updated.(AppModel)
+	if model.provider != "openrouter" || model.model != "vendor/alpha" {
+		t.Fatalf("llmux selection=%s/%s", model.provider, model.model)
+	}
+	entries := model.modelPickerEntries()
+	if len(entries) != 2 || entries[1].Provider != "openrouter" || entries[1].Model.ID != "vendor/alpha" {
+		t.Fatalf("combined model picker=%+v", entries)
 	}
 }
 

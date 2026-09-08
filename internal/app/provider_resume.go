@@ -276,7 +276,6 @@ func (r *ProviderRuntime) ResumeTeam(_ context.Context, runID string) error {
 	}
 	runCtx, cancel := context.WithCancel(host.BaseContext())
 	originalPrompt := firstNonempty(run.Metadata["original_prompt"], request.Prompt)
-	request.historicalContext = host.LoadTurnHistoricalContext(host.BaseContext(), request.SessionID, originalPrompt, historicalRetrievalBoundary(request.modelHistory))
 	if err := host.ClaimActiveRun(runID, "", cancel, false); err != nil {
 		cancel()
 		return err

@@ -118,6 +118,13 @@ func TestReliableSearchUsesRipgrepRegexPathGlobAndEmptyResult(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(
+		filepath.Join(root, "src", "literal.txt"),
+		[]byte("needle[0-9]+\n"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
 	service := &Service{allowWrite: true, shellPolicy: "deny"}
 	search := findWorkspaceTool(t, service, root, ToolSearch)
 	call := func(id, arguments string) tool.Result {
@@ -134,12 +141,20 @@ func TestReliableSearchUsesRipgrepRegexPathGlobAndEmptyResult(t *testing.T) {
 	}
 
 	matched := call(
-		"regexp",
-		`{"query":"needle[0-9]+","regexp":true,"path":"src","glob":"*.go"}`,
+		"default-regexp",
+		`{"query":"needle[0-9]+","path":"src","glob":"*.go"}`,
 	)
 	if matched.IsError || !strings.Contains(matched.Content, "[src/match.go#") ||
 		strings.Contains(matched.Content, "ignored.txt") {
 		t.Fatalf("ripgrep result = %+v", matched)
+	}
+	literal := call(
+		"literal",
+		`{"query":"needle[0-9]+","literal":true,"path":"src","glob":"*.txt"}`,
+	)
+	if literal.IsError || !strings.Contains(literal.Content, "[src/literal.txt#") ||
+		strings.Contains(literal.Content, "ignored.txt") {
+		t.Fatalf("literal result = %+v", literal)
 	}
 	empty := call("empty", `{"query":"definitely absent","path":"src"}`)
 	if empty.IsError || empty.Content != "No matches found." {
@@ -150,9 +165,13 @@ func TestReliableSearchUsesRipgrepRegexPathGlobAndEmptyResult(t *testing.T) {
 		len(decoded.Files) != 0 || decoded.Truncated {
 		t.Fatalf("empty structured result = %+v, %v", decoded, err)
 	}
-	invalid := call("invalid", `{"query":"[","regexp":true}`)
+	invalid := call("invalid", `{"query":"["}`)
 	if !invalid.IsError || !strings.Contains(strings.ToLower(invalid.Content), "regex") {
 		t.Fatalf("invalid regexp result = %+v", invalid)
+	}
+	conflict := call("conflict", `{"query":"needle","regexp":true,"literal":true}`)
+	if !conflict.IsError || !strings.Contains(conflict.Content, "mutually exclusive") {
+		t.Fatalf("conflicting mode result = %+v", conflict)
 	}
 }
 
@@ -363,5 +382,24 @@ func TestWorkspaceDriversExposeToolkit(t *testing.T) {
 		if !got[name] {
 			t.Fatalf("missing %s in %v", name, got)
 		}
+	}
+}
+
+func TestReplaceReadsSourceInsteadOfStructuralSummary(t *testing.T) {
+	dir := t.TempDir()
+	before := "def stock():\n    return 'before'\n"
+	path := filepath.Join(dir, "stock.py")
+	if err := os.WriteFile(path, []byte(before), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	driver := testReplaceDriver(t, dir)
+	args, _ := json.Marshal(replaceInput{Path: "stock.py", Edits: []replaceEdit{{OldText: "'before'", NewText: "'after'"}}})
+	result, err := driver.Execute(context.Background(), tool.Call{ID: "replace-python", Name: ToolReplace, Arguments: args}, nil)
+	if err != nil || result.IsError {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != strings.ReplaceAll(before, "'before'", "'after'") {
+		t.Fatalf("file=%q err=%v", data, err)
 	}
 }

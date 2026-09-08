@@ -1,6 +1,6 @@
 # Security
 
-Last verified: 2026-08-30
+Last verified: 2026-09-03
 
 Azem is a local development agent. Its approvals, typed Bridge, credential
 stores, and durable action ledger are governance boundaries, not an operating-
@@ -9,34 +9,38 @@ matches the work you intend to authorize.
 
 ## Trust boundaries
 
-- The TUI and GPUI desktop request operations;
-  `internal/app` validates them and owns durable state.
-- The desktop Bridge exposes a closed action allowlist. Its workspace viewer
-  has only bounded read methods; it does not expose an arbitrary shell, write,
-  or unrestricted filesystem method. GPUI's IPC dispatcher calls this same
-  allowlist and does not create another mutation boundary.
+- The TUI and GPUI desktop submit typed operations over
+  the same authenticated workspace-daemon protocol; `internal/app` validates
+  them and owns durable state.
+- The desktop Bridge exposes a closed action/method allowlist. Its workspace
+  viewer has only bounded read methods; it does not expose an arbitrary shell,
+  write, or unrestricted filesystem method. Every client reaches the same
+  dispatcher and cannot create another mutation boundary.
 - Native IPC is local and per-workspace. Endpoint and token files are
   owner-only; Unix sockets are mode 0600 and Windows named pipes allow only the
   owner and LocalSystem. HMAC authentication binds nonce, client, workspace,
   and protocol version. Control and binary frames are length-bounded before
   allocation, attachment order/size/SHA-256 are verified before import, and
   duplicate or unknown fields remain rejected at the typed dispatcher.
-- IPC disconnect is intentionally not runtime authority. A renderer cannot
-  cancel a run merely by closing or crashing. Explicit daemon stop is a
-  separate authenticated frame; the CLI refuses it while a main run is active
-  unless the person supplies `--include-active`.
+- A client disconnect is intentionally not runtime authority. Closing or
+  crashing TUI or GPUI cannot cancel a run merely by dropping the
+  socket. Explicit daemon stop is a separate authenticated frame; the CLI
+  refuses it while a main run is active unless the person supplies
+  `--include-active`. Stop, Guide, and queue mutations carry exact identities;
+  successful retries are receipt-deduplicated and stale queue revisions fail
+  instead of overwriting newer state.
 - The embedded desktop terminal is a separate human-only Bridge surface
   (`CreateTerminal`, `WriteTerminal`, `ResizeTerminal`, `CloseTerminal`,
   `ListTerminals`). Those methods are not `ActionKind` values, are not on the
   Execute allowlist, and are not agent tools. The model cannot inject
   keystrokes into this PTY. Spawn uses a process argv for the user shell;
   typed input is written as bytes to the PTY. The initial `cwd` is the
-  workspace; the user may `cd` afterwards. GPUI keeps PTYs in the daemon across renderer detach and
-  reaps them on typed close or daemon shutdown. This does not replace
-  `coding.shell` approvals.
+  workspace; the user may `cd` afterwards. Every client keeps PTYs in the
+  daemon across renderer detach and reaps them on typed close or daemon
+  shutdown. This does not replace `coding.shell` approvals.
 - Global session search is a separate read-only Bridge method. It accepts at
   most 200 characters and returns at most 30 title/message matches. Message
-  content remains in SQLite; GPUI receives only a short FTS snippet,
+  content remains in SQLite; either desktop receives only a short FTS snippet,
   session/project identity, and the stable block sequence needed to navigate.
   Cross-project launch arguments contain the sequence but never the search
   query or matched conversation text.
@@ -311,17 +315,16 @@ still apply to that implementation turn.
 
 ## Embedded desktop terminal
 
-The bottom terminal panel is an interactive login shell owned by the desktop
-process, not a second Azem-owned shell-tool executor.
+The bottom terminal panel is an interactive login shell owned by the selected
+desktop runtime, not a second Azem-owned shell-tool executor.
 
 - Only the human in that window can write to the PTY, through the typed
   Bridge methods above. There is no `write_terminal` tool and no Venat route
   for these keystrokes.
 - Spawn is confined to the window workspace at start. Later `cd` is expected
   for a real terminal and is not re-validated by Azem.
-- The renderer receives only session identity, title, spawn cwd, shell name,
-  grid size, exit code, and bounded base64 output. It does not receive the
-  environment, PTY device path, or process credentials.
+- GPUI receives bounded terminal metadata and output on the binary IPC channel.
+  It never receives the environment, PTY device path, or process credentials.
 - Agent file, shell, network, MCP, hook, and approval policy still apply to
   model-driven tools. Using the embedded terminal does not bypass TOOL-001.
 

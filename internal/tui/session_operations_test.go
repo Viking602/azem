@@ -2,28 +2,56 @@ package tui
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/Viking602/azem/internal/app"
+	"github.com/Viking602/azem/internal/desktopipc"
 	"github.com/Viking602/azem/internal/session"
+	"github.com/Viking602/azem/internal/sessionexport"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 )
 
 type sessionOpsRuntime struct {
+	inertRuntime
 	sessions *session.Service
 	actions  []Action
 }
 
-func (runtime *sessionOpsRuntime) NextEvent(context.Context) (app.Event, error) {
-	return app.Event{}, errors.New("closed")
+func (runtime *sessionOpsRuntime) Request(ctx context.Context, method desktopipc.Method, payload any, target any) error {
+	encoded, _ := json.Marshal(payload)
+	var params map[string]any
+	_ = json.Unmarshal(encoded, &params)
+	sessionID, _ := params["sessionId"].(string)
+	var result any
+	var err error
+	switch method {
+	case desktopipc.MethodSessionTree:
+		result, err = runtime.sessions.LoadSessionTree(ctx, sessionID)
+	case desktopipc.MethodSetSessionEntryLabel:
+		err = runtime.sessions.SetSessionEntryLabel(ctx, sessionID, params["entryId"].(string), params["label"].(string))
+		if err == nil {
+			result, err = runtime.sessions.LoadSessionTree(ctx, sessionID)
+		}
+	case desktopipc.MethodNavigateSessionTree:
+		_, err = runtime.sessions.NavigateSessionTree(ctx, sessionID, params["entryId"].(string))
+		result = map[string]any{}
+	case desktopipc.MethodExportSession:
+		result, err = sessionexport.New(runtime.sessions).ExportFile(ctx, params["outputPath"].(string), sessionID, sessionexport.Format(params["format"].(string)), sessionexport.Options{})
+	case desktopipc.MethodUsageReport:
+		result, err = runtime.sessions.UsageReport(ctx, session.UsageReportQuery{Scope: session.UsageScopeAll})
+	default:
+		return errActionUnsupported
+	}
+	if err != nil || target == nil {
+		return err
+	}
+	encoded, _ = json.Marshal(result)
+	return json.Unmarshal(encoded, target)
 }
-func (runtime *sessionOpsRuntime) StartTurn(string) (string, error) { return "", nil }
-func (runtime *sessionOpsRuntime) CancelActive() bool               { return false }
-func (runtime *sessionOpsRuntime) Sessions() *session.Service       { return runtime.sessions }
+
 func (runtime *sessionOpsRuntime) ExecuteAction(_ context.Context, action Action) error {
 	runtime.actions = append(runtime.actions, action)
 	return nil

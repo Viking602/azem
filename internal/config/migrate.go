@@ -119,6 +119,27 @@ func legacyHomeRoots(goos, userHome, dest string) []string {
 	return roots
 }
 
+// ClientDatabaseCandidates returns current and legacy database locations
+// without moving, creating, or opening any of them.
+func ClientDatabaseCandidates() ([]string, error) {
+	dest, err := Home()
+	if err != nil {
+		return nil, err
+	}
+	candidates := []string{filepath.Join(dest, databaseFileName)}
+	if strings.TrimSpace(os.Getenv(HomeEnv)) != "" {
+		return candidates, nil
+	}
+	userHome, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("resolve user home directory: %w", err)
+	}
+	for _, root := range legacyHomeRoots(runtime.GOOS, userHome, dest) {
+		candidates = append(candidates, filepath.Join(root, databaseFileName))
+	}
+	return candidates, nil
+}
+
 func remapMigratedLegacyPath(path, dest string) string {
 	if fileExists(path) {
 		return path

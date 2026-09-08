@@ -10,13 +10,26 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	agentservice "github.com/Viking602/azem/internal/agent"
 	"github.com/Viking602/azem/internal/app"
+	"github.com/Viking602/azem/internal/desktop"
+	"github.com/Viking602/azem/internal/desktopipc"
+	"github.com/Viking602/azem/internal/session"
 )
 
 type Runtime interface {
 	NextEvent(context.Context) (app.Event, error)
-	StartTurn(string) (string, error)
-	CancelActive() bool
+	StartConfiguredTurn(app.TurnRequest) (string, error)
+	GuideActiveTurnWithAttachments(sessionID, runID, text string, attachments []session.Attachment) error
+	CancelRunWithChildren(sessionID, runID string, includeChildren bool) (bool, error)
+	ExecuteAction(context.Context, Action) error
+	Request(context.Context, desktopipc.Method, any, any) error
+	ImportImage(sessionID, path string) (session.Attachment, error)
+	ImportImageBytes(sessionID, name, mimeType string, data []byte) (session.Attachment, error)
+	HasActiveChildren() bool
+	ApprovalModeState() (ApprovalMode, bool)
+	ActiveShellExecutions() []agentservice.ShellExecutionSnapshot
+	Detach() error
 }
 
 type (
@@ -31,6 +44,7 @@ const (
 )
 
 const (
+	ActionSetQueueMode             = app.ActionSetQueueMode
 	ActionLogin                    = app.ActionLogin
 	ActionLogout                   = app.ActionLogout
 	ActionNewSession               = app.ActionNewSession
@@ -57,6 +71,7 @@ const (
 	ActionForgetMemory             = app.ActionForgetMemory
 	ActionShowRecap                = app.ActionShowRecap
 	ActionListModelRoutes          = app.ActionListModelRoutes
+	ActionListModelProviders       = app.ActionListModelProviders
 	ActionSetModelRoute            = app.ActionSetModelRoute
 	ActionResetModelRoute          = app.ActionResetModelRoute
 	ActionSetSubagentConcurrency   = app.ActionSetSubagentConcurrency
@@ -122,7 +137,7 @@ var slashCommands = []SlashCommand{
 	{Name: "extensions", Usage: "/extensions"},
 	{Name: "marketplace", Usage: "/marketplace [list|discover [market]|add <source>|remove <name>|update [name]|install <id> [user|project]|uninstall <id> <user|project>|upgrade [id] [user|project]|enable <id> <user|project>|disable <id> <user|project>]"},
 	{Name: "skill", Usage: "/skill <name> [instruction]"},
-	{Name: "provider", Usage: "/provider [chatgpt|grok|cursor]"},
+	{Name: "provider", Usage: "/provider [provider-id]"},
 	{Name: "reasoning", Usage: "/reasoning [level]"},
 	{Name: "login", Usage: "/login [chatgpt|grok|cursor]"},
 	{Name: "logout", Usage: "/logout [chatgpt|grok|cursor]"},
@@ -133,6 +148,8 @@ var slashCommands = []SlashCommand{
 	{Name: "security", Usage: "/security [scan [standard|deep] | scans | findings <scan-id> | show <scan-id> | cancel <scan-id> | resume <scan-id> | patch <occurrence-id> | patch-pr <occurrence-id> | triage <occurrence-id> <open|false-positive|already-fixed|wont-fix> | export <scan-id> <json|csv|sarif> | publish <scan-id> | reconcile-publication <scan-id> <occurrence-id> <published|retry>]"},
 	{Name: "todos", Usage: "/todos"},
 	{Name: "todo", Usage: "/todo"},
+	{Name: "delivery", Usage: "/delivery queue|guide"},
+	{Name: "queue", Usage: "/queue"},
 	{Name: "agent-types", Usage: "/agent-types"},
 	{Name: "personas", Usage: "/personas"},
 	{Name: "new", Usage: "/new"},
@@ -291,43 +308,33 @@ func waitForAppEvent(runtime Runtime) tea.Cmd {
 
 func startTurn(runtime Runtime, request app.TurnRequest) tea.Cmd {
 	return func() tea.Msg {
-		var runID string
-		var err error
-		if configured, ok := runtime.(interface {
-			StartConfiguredTurn(app.TurnRequest) (string, error)
-		}); ok {
-			runID, err = configured.StartConfiguredTurn(request)
-		} else {
-			runID, err = runtime.StartTurn(request.Prompt)
-		}
-		return startTurnResultMsg{RunID: runID, Err: err}
+		runID, err := runtime.StartConfiguredTurn(request)
+		return startTurnResultMsg{RunID: runID, Text: request.Prompt, Attachments: append([]session.Attachment(nil), request.Images...), Err: err}
 	}
 }
 
-func cancelTurn(runtime Runtime, children bool) tea.Cmd {
+func cancelTurn(runtime Runtime, sessionID, runID string, children bool) tea.Cmd {
 	return func() tea.Msg {
-		if scoped, ok := runtime.(interface{ CancelActiveWithChildren(bool) bool }); ok {
-			return cancelResultMsg{Cancelled: scoped.CancelActiveWithChildren(children)}
-		}
-		return cancelResultMsg{Cancelled: runtime.CancelActive()}
+		cancelled, err := runtime.CancelRunWithChildren(sessionID, runID, children)
+		return cancelResultMsg{Cancelled: cancelled, Err: err}
 	}
 }
 
 func hasActiveChildren(runtime Runtime) bool {
-	if scoped, ok := runtime.(interface{ HasActiveChildren() bool }); ok {
-		return scoped.HasActiveChildren()
+	return runtime.HasActiveChildren()
+}
+
+func selectSession(runtime Runtime, sessionID string) tea.Cmd {
+	return func() tea.Msg {
+		var snapshot desktop.ReconnectSnapshot
+		err := runtime.Request(context.Background(), desktopipc.MethodResumeSession, map[string]string{"sessionId": sessionID}, &snapshot)
+		return sessionSelectedMsg{Snapshot: snapshot, Err: err}
 	}
-	scoped, ok := runtime.(interface{ HasActiveForegroundChildren() bool })
-	return ok && scoped.HasActiveForegroundChildren()
 }
 
 func executeAction(ctx context.Context, runtime Runtime, action Action) tea.Cmd {
 	return func() tea.Msg {
-		actionRuntime, ok := runtime.(ActionRuntime)
-		if !ok {
-			return actionResultMsg{Action: action, Err: errActionUnsupported}
-		}
-		err := actionRuntime.ExecuteAction(ctx, action)
+		err := runtime.ExecuteAction(ctx, action)
 		return actionResultMsg{Action: action, Err: err}
 	}
 }
@@ -340,21 +347,13 @@ func pollBackground(processID string, generation uint64) tea.Cmd {
 
 func refreshBackground(runtime Runtime, processID string, generation uint64) tea.Cmd {
 	return func() tea.Msg {
-		actionRuntime, ok := runtime.(ActionRuntime)
-		if !ok {
-			return backgroundPollResultMsg{Generation: generation, ProcessID: processID, Err: errActionUnsupported}
-		}
-		err := actionRuntime.ExecuteAction(context.Background(), Action{Kind: ActionLogsBackground, Target: processID, Offset: -1, Limit: 400})
+		err := runtime.ExecuteAction(context.Background(), Action{Kind: ActionLogsBackground, Target: processID, Offset: -1, Limit: 400})
 		return backgroundPollResultMsg{Generation: generation, ProcessID: processID, Err: err}
 	}
 }
 
 func shutdownApplication(runtime Runtime) tea.Cmd {
 	return func() tea.Msg {
-		shutdown, ok := runtime.(interface{ Shutdown(context.Context) error })
-		if !ok {
-			return shutdownResultMsg{}
-		}
-		return shutdownResultMsg{Err: shutdown.Shutdown(context.Background())}
+		return shutdownResultMsg{Err: runtime.Detach()}
 	}
 }

@@ -33,6 +33,7 @@ func TestPTYStreamResizeCancelAndExit(t *testing.T) {
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build PTY binary: %v\n%s", err, output)
 	}
+	t.Cleanup(func() { stopPTYWorkspaceDaemon(binary, temp, temp) })
 
 	command := exec.Command(binary)
 	command.Dir = temp
@@ -104,6 +105,7 @@ func TestPTYStreamResizeCancelAndExit(t *testing.T) {
 		_ = command.Process.Kill()
 		t.Fatal("PTY process did not exit after idle Ctrl+C")
 	}
+	assertPTYDaemonSurvivesDetach(t, binary, temp, temp)
 }
 
 func TestPTYRecoveryApprovalDoesNotReplayPendingEdit(t *testing.T) {
@@ -121,6 +123,7 @@ func TestPTYRecoveryApprovalDoesNotReplayPendingEdit(t *testing.T) {
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build PTY binary: %v\n%s", err, output)
 	}
+	t.Cleanup(func() { stopPTYWorkspaceDaemon(binary, temp, temp) })
 	command := exec.Command(binary)
 	command.Dir = temp
 	command.Env = append(os.Environ(),
@@ -168,6 +171,7 @@ func TestPTYRecoveryApprovalDoesNotReplayPendingEdit(t *testing.T) {
 		_ = command.Process.Kill()
 		t.Fatal("recovery PTY process did not exit")
 	}
+	assertPTYDaemonSurvivesDetach(t, binary, temp, temp)
 }
 
 func TestPTYSkillsOverlayAndReload(t *testing.T) {
@@ -195,6 +199,7 @@ func TestPTYSkillsOverlayAndReload(t *testing.T) {
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build PTY binary: %v\n%s", err, output)
 	}
+	t.Cleanup(func() { stopPTYWorkspaceDaemon(binary, temp, temp) })
 	command := exec.Command(binary)
 	command.Dir = temp
 	command.Env = append(os.Environ(),
@@ -248,6 +253,7 @@ func TestPTYSkillsOverlayAndReload(t *testing.T) {
 		_ = command.Process.Kill()
 		t.Fatal("skills PTY process did not exit")
 	}
+	assertPTYDaemonSurvivesDetach(t, binary, temp, temp)
 }
 
 func seedPendingEditApproval(t *testing.T, workspace string) {
@@ -295,6 +301,31 @@ func seedPendingEditApproval(t *testing.T, workspace string) {
 	if err := service.Close(ctx); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func assertPTYDaemonSurvivesDetach(t *testing.T, binary, workspace, home string) {
+	t.Helper()
+	command := exec.Command(binary, "daemon", "status", "--workspace", workspace, "--json")
+	command.Env = append(os.Environ(), "HOME="+home)
+	output, err := command.Output()
+	if err != nil {
+		t.Fatalf("daemon did not survive TUI detach: %v", err)
+	}
+	var status struct {
+		Endpoint struct {
+			PID int `json:"pid"`
+		} `json:"endpoint"`
+	}
+	if err := json.Unmarshal(output, &status); err != nil || status.Endpoint.PID <= 0 {
+		t.Fatalf("detached daemon status = %q, error=%v", output, err)
+	}
+	stopPTYWorkspaceDaemon(binary, workspace, home)
+}
+
+func stopPTYWorkspaceDaemon(binary, workspace, home string) {
+	command := exec.Command(binary, "daemon", "stop", "--workspace", workspace, "--include-active")
+	command.Env = append(os.Environ(), "HOME="+home)
+	_ = command.Run()
 }
 
 type ptyRead struct {

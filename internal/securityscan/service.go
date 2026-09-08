@@ -205,6 +205,12 @@ func (s *Service) startRecovered(ctx context.Context, scan Scan) bool {
 	return true
 }
 
+func (s *Service) HasActiveWork() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.active) > 0
+}
+
 func (s *Service) Shutdown(ctx context.Context) error {
 	s.lifecycleMu.Lock()
 	s.shuttingDown = true

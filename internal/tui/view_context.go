@@ -372,6 +372,12 @@ func (m AppModel) helpItems(width int) []helpItem {
 func (m AppModel) renderStatusCluster() string {
 	statusText := stateMark(m.status) + " " + m.displayState(m.status)
 	status := m.stateStyle(m.status).Bold(true).Render(" " + statusText + " ")
+	if !m.mutationsEnabled() {
+		status += " " + m.theme.Chip.Render(strings.ToUpper(string(m.connection.State)))
+	}
+	if run, exists := m.globalRunProjection(); exists && run.SessionID != m.sessionID {
+		status += " " + m.theme.Chip.Render("RUN "+run.SessionID)
+	}
 	switch m.approvalMode {
 	case ApprovalModeYolo:
 		status += " " + m.theme.ChipDanger.Render("⚠ "+m.tr("status.approval.yolo"))
@@ -712,7 +718,14 @@ func (m AppModel) statusReportLines() []string {
 		agentMode = m.tr("mode.plan")
 	}
 	// Lead with the dense counters users open /status to read, then identity/context.
-	lines := []string{m.tr("overlay.status.section.diagnostics")}
+	lines := []string{
+		fmt.Sprintf("Connection: %s · cursor %d", first(string(m.connection.State), "connected"), m.lastWireCursor),
+		fmt.Sprintf("Delivery: %s · queue r%d (%s)", m.deliveryMode, m.currentPromptQueue().Revision, m.currentPromptQueue().State),
+	}
+	if run, exists := m.globalRunProjection(); exists {
+		lines = append(lines, fmt.Sprintf("Run: %s · session %s · %s · %s/%s", first(run.RunID, "preparing"), run.SessionID, run.Activity, run.Provider, run.Model))
+	}
+	lines = append(lines, m.tr("overlay.status.section.diagnostics"))
 	if metrics.detailSuffix == "" && m.usage.UncachedInputTokens == 0 && m.usage.ReasoningTokens == 0 &&
 		!m.showsCacheWrite() && m.usage.CompactionInput == 0 && m.usage.TeamInput == 0 &&
 		m.usage.LastRequestKind == "" && m.usage.LastTransport == "" &&
@@ -1173,13 +1186,7 @@ func (m AppModel) rawContextContributionLabel(contribution app.ContextContributi
 }
 
 func activeShellExecutions(runtime Runtime) []agentservice.ShellExecutionSnapshot {
-	provider, ok := runtime.(interface {
-		ActiveShellExecutions() []agentservice.ShellExecutionSnapshot
-	})
-	if !ok {
-		return nil
-	}
-	return provider.ActiveShellExecutions()
+	return runtime.ActiveShellExecutions()
 }
 
 func (m AppModel) approvalModeLabel() string {

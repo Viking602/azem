@@ -90,7 +90,7 @@ func dynamicToolSource(name string) string {
 		return "workspace"
 	case name == subagentSpawnTool || name == subagentGetOutputTool || name == subagentKillTool:
 		return "subagent"
-	case name == "todo" || name == goalToolName || name == checkpointToolName || name == rewindToolName || name == contextReadArtifactTool || name == askToolName || name == submitPlanToolName:
+	case name == "todo" || name == goalToolName || name == checkpointToolName || name == rewindToolName || name == contextReadArtifactTool || name == contextSearchHistoryTool || name == askToolName || name == submitPlanToolName:
 		return "control"
 	default:
 		return "extension"

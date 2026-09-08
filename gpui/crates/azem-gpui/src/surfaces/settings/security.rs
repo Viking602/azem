@@ -94,47 +94,53 @@ pub(super) fn settings_security_body(
         .w_full()
         .flex()
         .flex_col()
-        .gap_4()
-        .child(
-            div()
-                .rounded(px(12.))
-                .border_1()
-                .border_color(palette.border)
-                .bg(palette.paper)
-                .child(settings_card_header(
-                    locale.text("ui.executionPolicy"),
-                    locale.text("ui.appliesToNewScansActiveScansRetainTheirCapturedSettings"),
-                    palette,
-                ))
-                .child(settings_children_row(
-                    locale.text("ui.enableSecurityScans"),
-                    locale.text("ui.allowStandardAndDeepScansWithoutDeletingResults"),
-                    div()
-                        .id("security-enabled")
-                        .role(Role::Switch)
-                        .aria_label(locale.text("ui.enableSecurityScans"))
-                        .aria_toggled(enabled.into())
-                        .tab_stop(editable)
-                        .when(editable, |b| b.cursor_pointer())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if editable {
-                                this.native_settings.security_draft["enabled"] = json!(!enabled);
-                                this.native_settings.security_saved = false;
-                                cx.notify();
-                            }
-                        }))
-                        .child(settings_switch(enabled, palette))
-                        .into_any_element(),
-                    palette,
-                ))
-                .child(settings_children_row(
-                    locale.text("ui.defaultMode"),
-                    locale.text("ui.defaultAuditDepthForNewScans"),
-                    div().flex().gap_2().children(modes).into_any_element(),
-                    palette,
-                ))
-                .children(numbers),
-        )
+        .gap_6()
+        .child(settings_group(
+            locale.text("ui.executionPolicy"),
+            locale.text("ui.appliesToNewScansActiveScansRetainTheirCapturedSettings"),
+            settings_rows(
+                vec![
+                    settings_children_row(
+                        locale.text("ui.enableSecurityScans"),
+                        locale.text("ui.allowStandardAndDeepScansWithoutDeletingResults"),
+                        div()
+                            .id("security-enabled")
+                            .role(Role::Switch)
+                            .aria_label(locale.text("ui.enableSecurityScans"))
+                            .aria_toggled(enabled.into())
+                            .tab_stop(editable)
+                            .when(editable, |b| b.cursor_pointer())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if editable {
+                                    this.native_settings.security_draft["enabled"] =
+                                        json!(!enabled);
+                                    this.native_settings.security_saved = false;
+                                    cx.notify();
+                                }
+                            }))
+                            .child(settings_switch(enabled, palette))
+                            .into_any_element(),
+                        palette,
+                    )
+                    .into_any_element(),
+                    settings_children_row(
+                        locale.text("ui.defaultMode"),
+                        locale.text("ui.defaultAuditDepthForNewScans"),
+                        div().flex().gap_2().children(modes).into_any_element(),
+                        palette,
+                    )
+                    .into_any_element(),
+                ],
+                palette,
+            ),
+            palette,
+        ))
+        .child(settings_group(
+            locale.text("ui.capacityAndIsolation"),
+            "",
+            settings_rows(numbers, palette),
+            palette,
+        ))
         .child(settings_detail_card(
             locale.text("ui.publication"),
             locale.text("ui.readOnlyExternalPublicationToolsAreConfiguredByTheHost"),

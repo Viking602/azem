@@ -143,6 +143,17 @@ Skill is removed from model context, slash suggestions, eager activation, and
 the runtime registry. The stopped entry remains visible in Extensions for
 restoration.
 
+Bundled `verify` and `simplify` instructions honor read-only requests: they
+report defects without editing unless the current task authorizes repair.
+`skill-author` still shows the proposed content and destination before an
+explicit save request; that approval remains valid across turns unless the
+content or destination materially changes. These instructions do not grant
+tool permissions. Their bodies are embedded in the binary, so updated bundled
+instructions require a rebuilt runtime. Names and catalog descriptions remain
+stable; this change affects activated Skill bodies, not the base system
+prompt or provider message ordering. Updated bodies and repository instructions
+change their context content once; subsequent turns can reuse the stable text.
+
 Plugin hook files are always copied into the catalog so the Hooks tab can
 show name, source, and event before trust. Execution still requires
 `plugins.trust_hooks`. After that global decision, each command can be stopped

@@ -51,6 +51,24 @@ func TestHashlineAppliesBlocksRegistersMovesAndRemovals(t *testing.T) {
 	assertFileContent(t, filepath.Join(root, "later.py"), "def greet():\n    return 'hi'\n")
 }
 
+func TestHashlineResultSupportsNextEditWithoutAnotherRead(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	service := newWriteTestService(t, ctx, root)
+	edit := findWorkspaceTool(t, service, root, ToolEditHashline)
+	writeTestFile(t, filepath.Join(root, "a.txt"), "old\ntail\n")
+	result := executeHashline(t, ctx, edit, "*** Begin Patch\n"+sectionHeader("a.txt", "old\ntail\n")+"\nPUT 1.=1:\n+new\n*** End Patch\n")
+	if !strings.Contains(result.Content, "1:new\n2:tail") {
+		t.Fatalf("missing numbered post-edit context: %s", result.Content)
+	}
+	var changed EditHashlineResult
+	if err := json.Unmarshal(result.Structured, &changed); err != nil {
+		t.Fatal(err)
+	}
+	executeHashline(t, ctx, edit, "*** Begin Patch\n"+changed.Sections[0].Header+"\nPUT 2.=2:\n+done\n*** End Patch\n")
+	assertFileContent(t, filepath.Join(root, "a.txt"), "new\ndone\n")
+}
+
 func TestHashlineSupportsOriginalLineGapsAndMarkdownBlocks(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()

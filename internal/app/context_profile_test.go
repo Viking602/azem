@@ -123,6 +123,14 @@ func TestEstimateContextProfileUsesLiveSubagentCatalog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	service := &Service{providers: runtime}
+	selectionProfile, err := service.SessionContextProfile(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selectionProfile == nil || selectionProfile.TotalTokens() != profile.TotalTokens() {
+		t.Fatalf("selection profile = %+v, want bootstrap total %d", selectionProfile, profile.TotalTokens())
+	}
 	for _, contribution := range profile.Contributions {
 		if contribution.Category == ContextCategoryBuiltinTools && contribution.Name == subagentSpawnTool {
 			if contribution.Tokens != expected {

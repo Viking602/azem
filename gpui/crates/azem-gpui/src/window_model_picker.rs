@@ -19,7 +19,10 @@ impl AzemWindow {
             .text()
             .trim()
             .to_ascii_lowercase();
-        let route_picker_kind = self.route_picker_target.as_ref().map(|target| target.kind);
+        let route_picker_kind = self
+            .model_picker_render_target
+            .as_ref()
+            .map(|target| target.kind);
         let (selected_provider, selected_model, current_reasoning) = self.model_picker_selection();
         let modes = self.selected_model_modes();
         let fast_supported = modes.fast_available || modes.fast;
@@ -46,7 +49,7 @@ impl AzemWindow {
                 _ => None,
             })
             .unwrap_or_else(|| modes.reasoning.clone());
-        let editable = self.model_controls_enabled();
+        let editable = self.model_picker_open && self.model_controls_enabled();
         let locale = Locale::resolve(&self.state.settings.language);
         let mut rows = Vec::new();
         for provider in self.state.catalogs.providers.clone() {
@@ -61,6 +64,7 @@ impl AzemWindow {
             if provider_id.is_empty() {
                 continue;
             }
+            let logo_id = catalog_provider_logo_id(Some(&provider), &provider_id);
             let provider_name = ["displayName", "name"]
                 .into_iter()
                 .find_map(|key| {
@@ -131,10 +135,14 @@ impl AzemWindow {
                         .aria_label(model_aria)
                         .aria_selected(active)
                         .tab_stop(editable)
-                        .min_h(px(47.))
+                        .min_h(px(if route_picker_kind.is_some() {
+                            34.
+                        } else {
+                            47.
+                        }))
                         .px_2()
                         .py(px(5.))
-                        .rounded(px(9.))
+                        .rounded(px(if route_picker_kind.is_some() { 5. } else { 9. }))
                         .bg(if active {
                             if route_picker_kind.is_some() {
                                 palette.paper_muted
@@ -166,7 +174,15 @@ impl AzemWindow {
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .child(provider_logo(&provider_id, 20., palette.ink)),
+                                .child(provider_logo(
+                                    &logo_id,
+                                    if route_picker_kind.is_some() {
+                                        16.
+                                    } else {
+                                        20.
+                                    },
+                                    palette.ink,
+                                )),
                         )
                         .child(
                             div()
@@ -175,12 +191,20 @@ impl AzemWindow {
                                 .flex()
                                 .flex_col()
                                 .gap(px(2.))
+                                .when(route_picker_kind.is_some() && !choice.no_zdr, |detail| {
+                                    detail.flex_row().items_center().gap_2()
+                                })
                                 .child(
                                     div()
                                         .truncate()
                                         .text_color(palette.ink)
                                         .text_size(px(11.))
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .font_weight(if route_picker_kind.is_some() {
+                                            gpui::FontWeight::MEDIUM
+                                        } else {
+                                            gpui::FontWeight::SEMIBOLD
+                                        })
+                                        .when(route_picker_kind.is_some(), |name| name.flex_1())
                                         .child(model_name),
                                 )
                                 .child(
@@ -188,6 +212,9 @@ impl AzemWindow {
                                         .truncate()
                                         .text_color(palette.faint)
                                         .text_size(px(9.))
+                                        .when(route_picker_kind.is_some(), |label| {
+                                            label.max_w(px(72.))
+                                        })
                                         .child(metadata),
                                 )
                                 .when(choice.no_zdr, |detail| {
@@ -222,24 +249,21 @@ impl AzemWindow {
             locale.text("ui.noAvailableModelsMatch")
         };
         if route_picker_kind == Some(RoutePickerKind::Model) {
-            return div()
+            let popup = div()
                 .id("route-model-picker")
                 .occlude()
                 .on_mouse_down_out(cx.listener(Self::dismiss_picker))
                 .role(Role::Region)
                 .aria_label(locale.text("ui.selectModel"))
-                .absolute()
-                .top(px(44.))
-                .right(px(94.))
-                .w(px(292.))
+                .w(px(300.))
                 .max_h(px(310.))
-                .rounded(px(12.))
+                .rounded(px(8.))
                 .border_1()
-                .border_color(palette.border_strong)
+                .border_color(palette.border)
                 .bg(palette.paper)
                 .shadow(vec![
-                    BoxShadow::new(px(0.), px(8.), hsla(220. / 360., 0.15, 0.15, 0.14))
-                        .blur_radius(px(22.)),
+                    BoxShadow::new(px(0.), px(4.), hsla(220. / 360., 0.15, 0.15, 0.10))
+                        .blur_radius(px(12.)),
                 ])
                 .overflow_hidden()
                 .flex()
@@ -262,11 +286,11 @@ impl AzemWindow {
                         .role(Role::ListBox)
                         .aria_label(locale.text("ui.models3"))
                         .max_h(px(260.))
-                        .p(px(5.))
+                        .p(px(4.))
                         .overflow_y_scroll()
                         .flex()
                         .flex_col()
-                        .gap(px(2.))
+                        .gap_0()
                         .when(no_results, |list| {
                             list.child(
                                 div()
@@ -280,8 +304,8 @@ impl AzemWindow {
                             )
                         })
                         .children(rows),
-                )
-                .into_any_element();
+                );
+            return popup_transition(popup, self.popup_motion("model"));
         }
         let reasoning_levels = &modes.levels;
         let reasoning_editable = editable && reasoning_levels.len() > 1;
@@ -301,9 +325,10 @@ impl AzemWindow {
                         .aria_label(reasoning_display_name(level, locale))
                         .aria_selected(selected)
                         .tab_stop(reasoning_editable)
-                        .h(px(34.))
+                        .h(px(28.))
+                        .flex_shrink_0()
                         .px_2()
-                        .rounded(px(8.))
+                        .rounded(px(4.))
                         .bg(if selected {
                             palette.paper_muted
                         } else {
@@ -311,7 +336,7 @@ impl AzemWindow {
                         })
                         .text_color(palette.ink)
                         .text_sm()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .font_weight(gpui::FontWeight::NORMAL)
                         .flex()
                         .items_center()
                         .when(reasoning_levels.len() == 1, |option| {
@@ -336,30 +361,27 @@ impl AzemWindow {
                         .into_any_element(),
                 );
             }
-            return div()
+            let popup = div()
                 .id("route-reasoning-picker")
                 .occlude()
                 .on_mouse_down_out(cx.listener(Self::dismiss_picker))
                 .role(Role::RadioGroup)
                 .aria_label(locale.text("ui.reasoningEffort"))
-                .absolute()
-                .top(px(44.))
-                .right_0()
-                .w(px(148.))
-                .p(px(5.))
-                .rounded(px(12.))
+                .w(px(120.))
+                .p(px(4.))
+                .rounded(px(8.))
                 .border_1()
-                .border_color(palette.border_strong)
+                .border_color(palette.border)
                 .bg(palette.paper)
                 .shadow(vec![
-                    BoxShadow::new(px(0.), px(8.), hsla(220. / 360., 0.15, 0.15, 0.14))
-                        .blur_radius(px(22.)),
+                    BoxShadow::new(px(0.), px(4.), hsla(220. / 360., 0.15, 0.15, 0.10))
+                        .blur_radius(px(12.)),
                 ])
                 .flex()
                 .flex_col()
-                .gap(px(2.))
-                .children(options)
-                .into_any_element();
+                .gap_0()
+                .children(options);
+            return popup_transition(popup, self.popup_motion("model"));
         }
         let mut selected_reasoning_index = reasoning_levels
             .iter()
@@ -497,7 +519,7 @@ impl AzemWindow {
         let slider_owner = cx.entity();
         let slider_mouse_move = cx.listener(Self::reasoning_mouse_move);
         let slider_mouse_up = cx.listener(Self::reasoning_mouse_up);
-        div()
+        let popup = div()
         .id("model-picker")
         .occlude()
         .on_mouse_down_out(cx.listener(Self::dismiss_picker))
@@ -508,7 +530,7 @@ impl AzemWindow {
         .bottom(px(48.))
         .w(px(MODEL_PICKER_WIDTH))
         .max_h(px(560.))
-        .rounded(px(13.))
+        .rounded(px(16.))
         .border_1()
         .border_color(palette.border_strong)
         .bg(palette.paper)
@@ -800,6 +822,7 @@ impl AzemWindow {
                     .child(self.model_picker_error.clone()),
             )
         })
-        .into_any_element()
+        ;
+        popup_transition(popup, self.popup_motion("model"))
     }
 }

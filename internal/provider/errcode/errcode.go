@@ -39,12 +39,21 @@ const (
 	CodeServer Code = "server"
 	// CodeTransport covers connection, TLS, and stream interruption failures.
 	CodeTransport Code = "transport"
-	// CodeCancelled covers local cancellation and deadline expiry.
+	// CodeTimeout covers a local deadline that expired while the caller was
+	// still healthy. This is not user cancellation: Go 1.25 HTTP header
+	// timeouts and context.WithTimeout both unwrap as DeadlineExceeded.
+	CodeTimeout Code = "timeout"
+	// CodeCancelled covers local cancellation.
 	CodeCancelled Code = "cancelled"
 	// CodeUnknown is the explicit fallback; consumers must treat it as
 	// non-retryable and show the original message.
 	CodeUnknown Code = "unknown"
 )
+
+// TimeoutMessage is the stable user-visible copy for CodeTimeout. Desktop
+// clients may localize it from the error code; this string is the English
+// fallback so TUI/GPUI never render the raw Go sentinel.
+const TimeoutMessage = "The model response timed out before the next output arrived."
 
 // DataKey is the runtime event Data key carrying the classified code.
 const DataKey = "errorCode"
@@ -56,8 +65,11 @@ func Classify(err error) Code {
 	if err == nil {
 		return CodeUnknown
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if errors.Is(err, context.Canceled) {
 		return CodeCancelled
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return CodeTimeout
 	}
 	var apiErr *responses.APIError
 	if errors.As(err, &apiErr) {
@@ -78,11 +90,23 @@ func Classify(err error) Code {
 // with Venat's RetryableError contract.
 func Retryable(code Code) bool {
 	switch code {
-	case CodeRateLimit, CodeServer, CodeTransport:
+	case CodeRateLimit, CodeServer, CodeTransport, CodeTimeout:
 		return true
 	default:
 		return false
 	}
+}
+
+// Display returns the user-visible failure text. Deadline expiry keeps a
+// stable product sentence instead of Go's "context deadline exceeded".
+func Display(err error) string {
+	if err == nil {
+		return ""
+	}
+	if Classify(err) == CodeTimeout {
+		return TimeoutMessage
+	}
+	return err.Error()
 }
 
 func fromAPIError(err *responses.APIError) Code {

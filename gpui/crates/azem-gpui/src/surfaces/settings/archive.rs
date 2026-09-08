@@ -32,22 +32,13 @@ pub(super) fn settings_archive_body(
             )
         })
         .collect::<Vec<_>>();
-    let list = div()
-        .min_h(px(158.))
-        .rounded(px(12.))
-        .border_1()
-        .border_color(palette.border)
-        .bg(palette.paper)
-        .overflow_hidden()
-        .child(settings_card_header(
-            locale.text("ui.archivedSessions"),
-            locale.text("ui.groupedByProjectRestoredSessionsReturnToTheirSidebar"),
-            palette,
-        ))
-        .when(archived_count == 0, |card| {
+    let list = settings_group(
+        locale.text("ui.archivedSessions"),
+        locale.text("ui.groupedByProjectRestoredSessionsReturnToTheirSidebar"),
+        settings_rows(project_rows, palette).when(archived_count == 0, |card| {
             card.child(
                 div()
-                    .h(px(94.))
+                    .h(px(110.))
                     .text_color(palette.faint)
                     .text_sm()
                     .flex()
@@ -55,8 +46,9 @@ pub(super) fn settings_archive_body(
                     .justify_center()
                     .child(locale.text("ui.noArchivedSessions")),
             )
-        })
-        .children(project_rows);
+        }),
+        palette,
+    );
     let days_label = locale.format(
         "ui.inactiveForArchiveDaysDays",
         &[("archive_days", (archive_days).to_string())],
@@ -66,40 +58,27 @@ pub(super) fn settings_archive_body(
         .w_full()
         .flex()
         .flex_col()
-        .gap_4()
-        .child(
-            div()
-                .rounded(px(12.))
-                .border_1()
-                .border_color(palette.border)
-                .bg(palette.paper)
-                .p_4()
-                .flex()
-                .flex_col()
-                .gap_4()
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .child(locale.text("ui.archiveInactiveSessions")),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(palette.muted)
-                                .child(locale.text("ui.moveOldUnpinnedSessionsOutOfTheSidebarTheCurrent")),
-                        ),
-                )
+        .gap_6()
+        .child(settings_group(
+            locale.text("ui.archiveInactiveSessions"),
+            locale.text("ui.moveOldUnpinnedSessionsOutOfTheSidebarTheCurrent"),
+            div().p_4()
                 .child(
                     div()
                         .flex()
                         .items_center()
+                        .justify_end()
+                        .flex_wrap()
                         .gap_2()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(160.))
+                                .text_sm()
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(palette.ink)
+                                .child(locale.text("ui.archiveAge")),
+                        )
                         .child(
                             div()
                                 .relative()
@@ -111,7 +90,7 @@ pub(super) fn settings_archive_body(
                                         .aria_expanded(days_menu_open)
                                         .tab_stop(true)
                                         .w(px(174.))
-                                        .h(px(30.))
+                                        .h(px(34.))
                                         .px_2()
                                         .rounded(px(8.))
                                         .border_1()
@@ -148,7 +127,7 @@ pub(super) fn settings_archive_body(
                                                 .role(Role::RadioGroup)
                                                 .aria_label(locale.text("ui.archiveAge"))
                                                 .absolute()
-                                                .top(px(36.))
+                                                .top(px(40.))
                                                 .left_0()
                                                 .w(px(174.))
                                                 .p(px(5.))
@@ -176,7 +155,7 @@ pub(super) fn settings_archive_body(
                                 .role(Role::Button)
                                 .aria_label(locale.text("ui.archiveInactiveSessions"))
                                 .tab_stop(connected)
-                                .h(px(29.))
+                                .h(px(34.))
                                 .px_2()
                                 .rounded(px(8.))
                                 .bg(palette.paper_muted)
@@ -201,7 +180,8 @@ pub(super) fn settings_archive_body(
                                 .child(locale.text("ui.archiveInactiveSessions")),
                         ),
                 ),
-        )
+            palette,
+        ))
         .child(list)
         .into_any_element()
 }
@@ -237,8 +217,6 @@ fn archive_project_row(
     };
     div()
         .id(("archive-project", group_index))
-        .border_t_1()
-        .border_color(palette.border)
         .flex()
         .flex_col()
         .child(

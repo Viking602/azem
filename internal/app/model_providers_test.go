@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -439,7 +440,7 @@ func TestListModelProvidersAttachesCachedGrokModels(t *testing.T) {
 			break
 		}
 	}
-	if grok.AccountID != "grok-acct" || len(grok.Models) != 9 {
+	if grok.AccountID != "grok-acct" || len(grok.Models) != 1 {
 		t.Fatalf("grok provider = %+v", grok)
 	}
 	var grok46 config.LLMuxModelConfig
@@ -451,6 +452,105 @@ func TestListModelProvidersAttachesCachedGrokModels(t *testing.T) {
 	}
 	if strings.Join(grok46.ReasoningLevels, ",") != "low,medium,high,xhigh" || grok46.DefaultReasoning != "high" {
 		t.Fatalf("cold-start Grok reasoning = %+v", grok46)
+	}
+}
+
+func TestDiscoverSubscriptionModelsRefreshesProviderCatalog(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	credentials, err := authservice.NewFileStore(filepath.Join(t.TempDir(), "credentials.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	authentication := authservice.NewService(store.DB(), credentials, nil, nil)
+	now := time.Now().UTC().UnixNano()
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO accounts(id,provider_id,email,display_name,plan,credential_ref,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+		"chatgpt-acct", "chatgpt", "user@example.com", "user@example.com", "pro", "file:chatgpt:chatgpt-acct", "active", now, now); err != nil {
+		t.Fatal(err)
+	}
+	modelCatalog := catalogsvc.NewService(store.DB(), authentication)
+	oldPayload := `{"id":"gpt-old","name":"GPT Old","supportsTools":true}`
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO model_catalog(provider_id,account_id,model_id,etag,fetched_at,expires_at,data) VALUES(?,?,?,?,?,?,?)`,
+		"chatgpt", "chatgpt-acct", "gpt-old", `"stale-etag"`, now, now+int64(time.Hour), []byte(oldPayload)); err != nil {
+		t.Fatal(err)
+	}
+	var fetches atomic.Int32
+	modelCatalog.Fetchers["chatgpt"] = func(context.Context, string) ([]catalogsvc.Model, error) {
+		fetches.Add(1)
+		return []catalogsvc.Model{{ID: "gpt-new", Name: "GPT New", SupportsTools: true}}, nil
+	}
+	service := NewService(ctx, config.Default())
+	service.AttachAuth(authentication, modelCatalog)
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionDiscoverProviderModels, Target: "chatgpt"}); err != nil {
+		t.Fatal(err)
+	}
+	if fetches.Load() != 1 {
+		t.Fatalf("forced catalog fetch count = %d", fetches.Load())
+	}
+	catalogEvent, err := service.NextEvent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if catalogEvent.Kind != EventModelCatalog || catalogEvent.Data["provider"] != "chatgpt" || catalogEvent.Data["accountID"] != "chatgpt-acct" {
+		t.Fatalf("catalog event = %+v", catalogEvent)
+	}
+	if !strings.Contains(catalogEvent.Data["models"], `"id":"gpt-new"`) || strings.Contains(catalogEvent.Data["models"], "gpt-old") {
+		t.Fatalf("catalog models = %s", catalogEvent.Data["models"])
+	}
+	providersEvent, err := service.NextEvent(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if providersEvent.Kind != EventModelProviders || providersEvent.State != "catalog_updated" {
+		t.Fatalf("providers event = %+v", providersEvent)
+	}
+	var chatgpt ModelProviderEntry
+	for _, provider := range providersEvent.ModelProviders {
+		if provider.ID == "chatgpt" {
+			chatgpt = provider
+			break
+		}
+	}
+	if chatgpt.AccountID != "chatgpt-acct" || len(chatgpt.Models) != 1 || chatgpt.Models[0].ID != "gpt-new" || chatgpt.Models[0].Name != "GPT New" {
+		t.Fatalf("chatgpt provider = %+v", chatgpt)
+	}
+}
+
+func TestDiscoverSubscriptionModelsFailsWhenForcedFetchFails(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	credentials, err := authservice.NewFileStore(filepath.Join(t.TempDir(), "credentials.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	authentication := authservice.NewService(store.DB(), credentials, nil, nil)
+	now := time.Now().UTC().UnixNano()
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO accounts(id,provider_id,email,display_name,plan,credential_ref,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+		"chatgpt-acct", "chatgpt", "user@example.com", "user@example.com", "pro", "file:chatgpt:chatgpt-acct", "active", now, now); err != nil {
+		t.Fatal(err)
+	}
+	modelCatalog := catalogsvc.NewService(store.DB(), authentication)
+	oldPayload := `{"id":"gpt-old","name":"GPT Old","supportsTools":true}`
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO model_catalog(provider_id,account_id,model_id,etag,fetched_at,expires_at,data) VALUES(?,?,?,?,?,?,?)`,
+		"chatgpt", "chatgpt-acct", "gpt-old", `"stale-etag"`, now, now+int64(time.Hour), []byte(oldPayload)); err != nil {
+		t.Fatal(err)
+	}
+	modelCatalog.Fetchers["chatgpt"] = func(context.Context, string) ([]catalogsvc.Model, error) {
+		return nil, fmt.Errorf("chatgpt catalog returned HTTP 500")
+	}
+	service := NewService(ctx, config.Default())
+	service.AttachAuth(authentication, modelCatalog)
+	err = service.ExecuteAction(ctx, Action{Kind: ActionDiscoverProviderModels, Target: "chatgpt"})
+	if err == nil || !strings.Contains(err.Error(), "HTTP 500") {
+		t.Fatalf("forced fetch error = %v", err)
 	}
 }
 
@@ -602,6 +702,42 @@ func TestSubscriptionQuotaTimeoutRefreshesUntilSuccess(t *testing.T) {
 	}
 	if got := defaultSubscriptionQuotaRetryDelay(100); got != subscriptionQuotaRetryMaxDelay {
 		t.Fatalf("retry delay is not capped: %s", got)
+	}
+}
+
+func TestQuotaRefreshReusesListedProviderSnapshot(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	credentials, err := authservice.NewFileStore(filepath.Join(t.TempDir(), "credentials.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	authentication := authservice.NewService(store.DB(), credentials, nil, nil)
+	now := time.Now().UTC().UnixNano()
+	if _, err := store.DB().ExecContext(ctx, `INSERT INTO accounts(id,provider_id,email,credential_ref,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`,
+		"grok-reuse", "grok", "owner@example.com", "file:grok:grok-reuse", "active", now, now); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(ctx, config.Default())
+	service.AttachAuth(authentication, nil)
+	service.subscriptionQuotaLookup = func(context.Context, string, string) (authservice.SubscriptionQuota, error) {
+		return authservice.SubscriptionQuota{Plan: "SuperGrok", Period: "weekly", UsedPercent: 4}, nil
+	}
+	if err := service.ExecuteAction(ctx, Action{Kind: ActionListModelProviders}); err != nil {
+		t.Fatal(err)
+	}
+	listed, err := service.NextEvent(ctx)
+	if err != nil || listed.Kind != EventModelProviders {
+		t.Fatalf("listed = %#v, %v", listed, err)
+	}
+	service.authentication = nil
+	target := ModelProviderEntry{ID: "grok", Subscription: true, AccountID: "grok-reuse"}
+	if !service.emitSubscriptionQuotaState(ctx, target, "quota_updated") {
+		t.Fatal("quota emit rebuilt provider catalogs after the initial listing")
 	}
 }
 

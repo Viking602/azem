@@ -1,4 +1,5 @@
 use super::*;
+#[allow(clippy::too_many_arguments)]
 pub(super) fn settings_catalog_body(
     state: &AppState,
     palette: ThemePalette,
@@ -6,6 +7,7 @@ pub(super) fn settings_catalog_body(
     selected_provider: &str,
     searches: (Entity<TextInput>, Entity<TextInput>),
     scrolls: (UniformListScrollHandle, UniformListScrollHandle),
+    native: &NativeSettings,
     cx: &mut Context<AzemWindow>,
 ) -> gpui::AnyElement {
     let (provider_search, model_search) = searches;
@@ -64,30 +66,25 @@ pub(super) fn settings_catalog_body(
             .to_string();
         let detail_name = provider_detail_name(&provider, &provider_id);
         let logo_id = provider_logo_id(&provider, &provider_id);
-        let account = provider
-            .get("accountLabel")
-            .and_then(serde_json::Value::as_str)
-            .filter(|value| !value.trim().is_empty())
-            .or_else(|| {
-                provider
-                    .get("credentialSource")
-                    .and_then(serde_json::Value::as_str)
-            })
-            .unwrap_or_default()
-            .to_string();
+        let subscription = provider
+            .get("subscription")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let account = provider_detail_subtitle(&provider, subscription);
         let plan = provider
             .get("accountPlan")
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default()
             .to_string();
-        let enabled = provider
+        let server_enabled = provider
             .get("enabled")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
-        let subscription = provider
-            .get("subscription")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
+        let enabled = if subscription {
+            server_enabled
+        } else {
+            native.catalog_enabled
+        };
         let quota_available = provider
             .get("quotaAvailable")
             .and_then(serde_json::Value::as_bool)
@@ -295,7 +292,10 @@ pub(super) fn settings_catalog_body(
             .h_full()
             .into_any_element()
         };
-        let refresh_action = model_discovery_request(&provider, &session_id);
+        let refresh_action = model_discovery_request(&provider, &session_id, "");
+        let fetch_provider = provider.clone();
+        let fetch_session = session_id.clone();
+        let fetch_subscription = subscription;
         div()
             .min_w_0()
             .flex_1()
@@ -424,7 +424,6 @@ pub(super) fn settings_catalog_body(
                                 )
                             })
                             .when(!subscription, |actions| {
-                                let action = provider_action.clone();
                                 actions.child(
                                     div()
                                         .id("provider-enabled")
@@ -450,7 +449,8 @@ pub(super) fn settings_catalog_body(
                                         .when(!enabled, |toggle| toggle.justify_start())
                                         .cursor_pointer()
                                         .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.runtime.request(Method::Execute, action.clone());
+                                            this.native_settings.catalog_enabled =
+                                                !this.native_settings.catalog_enabled;
                                             cx.notify();
                                         }))
                                         .child(
@@ -460,6 +460,16 @@ pub(super) fn settings_catalog_body(
                             }),
                     ),
             )
+            .when(!subscription, |detail| {
+                detail.child(provider_credential_card(
+                    &provider,
+                    &session_id,
+                    native,
+                    palette,
+                    locale,
+                    cx,
+                ))
+            })
             .when(quota_available, |detail| {
                 detail.child(
                     div()
@@ -600,8 +610,35 @@ pub(super) fn settings_catalog_body(
                                     .hover(move |style| style.bg(palette.hover))
                                     .active(|style| style.opacity(0.72))
                                     .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.runtime
-                                            .request(Method::Execute, refresh_action.clone());
+                                        if fetch_subscription {
+                                            this.runtime
+                                                .request(Method::Execute, refresh_action.clone());
+                                        } else {
+                                            let secret = this
+                                                .native_settings
+                                                .provider_api_key
+                                                .read(cx)
+                                                .text()
+                                                .to_string();
+                                            let base_url = this
+                                                .native_settings
+                                                .provider_base_url
+                                                .read(cx)
+                                                .text()
+                                                .to_string();
+                                            this.runtime.request(
+                                                Method::Execute,
+                                                model_discovery_request(
+                                                    &with_provider_draft(
+                                                        &fetch_provider,
+                                                        this.native_settings.catalog_enabled,
+                                                        &base_url,
+                                                    ),
+                                                    &fetch_session,
+                                                    &secret,
+                                                ),
+                                            );
+                                        }
                                         cx.notify();
                                     }))
                                     .child(icon("rotate-ccw", 13., palette.muted))
@@ -708,13 +745,20 @@ pub(super) fn settings_catalog_body(
                                     .gap_3()
                                     .cursor_pointer()
                                     .hover(move |style| style.bg(palette.hover))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.settings_provider = Some(selected_id.clone());
-                                        this.settings_model_search
-                                            .update(cx, |search, cx| search.clear(cx));
-                                        this.settings_model_scroll
-                                            .scroll_to_item_strict(0, ScrollStrategy::Top);
-                                        cx.notify();
+                                    .on_click(cx.listener({
+                                        let selected_provider_json = provider.clone();
+                                        move |this, _, _, cx| {
+                                            this.settings_provider = Some(selected_id.clone());
+                                            this.load_catalog_provider_fields(
+                                                &selected_provider_json,
+                                                cx,
+                                            );
+                                            this.settings_model_search
+                                                .update(cx, |search, cx| search.clear(cx));
+                                            this.settings_model_scroll
+                                                .scroll_to_item_strict(0, ScrollStrategy::Top);
+                                            cx.notify();
+                                        }
                                     }))
                                     .child(
                                         div()
@@ -890,8 +934,9 @@ pub(in crate::surfaces) fn provider_matches_query(
 pub(in crate::surfaces) fn model_discovery_request(
     provider: &serde_json::Value,
     session_id: &str,
+    secret: &str,
 ) -> serde_json::Value {
-    if provider
+    let mut request = if provider
         .get("subscription")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false)
@@ -907,7 +952,285 @@ pub(in crate::surfaces) fn model_discovery_request(
             "sessionId": session_id,
             "provider": provider,
         })
+    };
+    if !secret.is_empty() {
+        request["secret"] = json!(secret);
     }
+    request
+}
+
+pub(in crate::surfaces) fn model_provider_save_request(
+    provider: &serde_json::Value,
+    session_id: &str,
+    enabled: bool,
+    base_url: &str,
+    secret: &str,
+) -> serde_json::Value {
+    let mut request = json!({
+        "kind": "set_model_provider",
+        "sessionId": session_id,
+        "provider": with_provider_draft(provider, enabled, base_url),
+    });
+    if !secret.is_empty() {
+        request["secret"] = json!(secret);
+    }
+    request
+}
+
+pub(in crate::surfaces) fn with_provider_draft(
+    provider: &serde_json::Value,
+    enabled: bool,
+    base_url: &str,
+) -> serde_json::Value {
+    let mut draft = provider.clone();
+    if let Some(fields) = draft.as_object_mut() {
+        fields.insert("enabled".into(), json!(enabled));
+        if !provider_url_locked(provider) {
+            fields.insert("baseUrl".into(), json!(base_url.trim()));
+        }
+    }
+    draft
+}
+
+pub(in crate::surfaces) fn provider_base_url(provider: &serde_json::Value) -> String {
+    ["baseUrl", "defaultBaseUrl"]
+        .into_iter()
+        .find_map(|key| {
+            provider
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or_default()
+        .to_string()
+}
+
+pub(in crate::surfaces) fn provider_url_locked(provider: &serde_json::Value) -> bool {
+    provider
+        .get("defaultBaseUrl")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
+pub(in crate::surfaces) fn provider_detail_subtitle(
+    provider: &serde_json::Value,
+    subscription: bool,
+) -> String {
+    if subscription {
+        return provider
+            .get("accountLabel")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_default()
+            .to_string();
+    }
+    let url = provider_base_url(provider);
+    if !url.is_empty() {
+        return url;
+    }
+    let backend = provider
+        .get("backend")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let id = provider
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if backend.is_empty() || backend == "none" {
+        id.to_string()
+    } else {
+        format!("{backend} · {id}")
+    }
+}
+
+fn provider_credential_hint(provider: &serde_json::Value, locale: Locale) -> String {
+    let source = provider
+        .get("credentialSource")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("none");
+    let env = provider
+        .get("envKey")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    match source {
+        "stored" => locale.text("ui.credentialStored").to_string(),
+        "environment" => locale.format("ui.credentialEnvironment", &[("key", env.to_string())]),
+        "pending" => locale.text("ui.credentialPending").to_string(),
+        _ if provider
+            .get("credentialConfigured")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false) =>
+        {
+            locale.text("ui.credentialNotRequired").to_string()
+        }
+        _ => locale.format("ui.credentialMissing", &[("key", env.to_string())]),
+    }
+}
+
+fn provider_credential_card(
+    provider: &serde_json::Value,
+    session_id: &str,
+    native: &NativeSettings,
+    palette: ThemePalette,
+    locale: Locale,
+    cx: &mut Context<AzemWindow>,
+) -> gpui::AnyElement {
+    let locked = provider_url_locked(provider);
+    let url = provider_base_url(provider);
+    let url_hint = if locked {
+        locale.text("ui.officialAPIAddressLocked")
+    } else {
+        locale.text("ui.customAPIAddressHint")
+    };
+    let save_provider = provider.clone();
+    let save_session = session_id.to_string();
+    let url_field = div()
+        .min_w_0()
+        .flex_1()
+        .flex()
+        .flex_col()
+        .gap(px(6.))
+        .child(
+            div()
+                .text_color(palette.muted)
+                .text_size(px(10.))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .child(locale.text("ui.apiBaseURL")),
+        )
+        .child(
+            div()
+                .id("provider-base-url")
+                .h(px(36.))
+                .px_2()
+                .rounded(px(8.))
+                .border_1()
+                .border_color(palette.border)
+                .bg(if locked {
+                    palette.paper_muted
+                } else {
+                    palette.paper
+                })
+                .flex()
+                .items_center()
+                .overflow_hidden()
+                .child(if locked {
+                    div()
+                        .w_full()
+                        .truncate()
+                        .text_color(palette.muted)
+                        .text_sm()
+                        .child(url)
+                        .into_any_element()
+                } else {
+                    native.provider_base_url.clone().into_any_element()
+                }),
+        )
+        .child(
+            div()
+                .text_color(palette.faint)
+                .text_size(px(10.))
+                .child(url_hint),
+        );
+    let key_field = div()
+        .min_w_0()
+        .flex_1()
+        .flex()
+        .flex_col()
+        .gap(px(6.))
+        .child(
+            div()
+                .text_color(palette.muted)
+                .text_size(px(10.))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .child(locale.text("ui.apiKey")),
+        )
+        .child(
+            div()
+                .id("provider-api-key")
+                .h(px(36.))
+                .px_2()
+                .rounded(px(8.))
+                .border_1()
+                .border_color(palette.border)
+                .bg(palette.paper)
+                .flex()
+                .items_center()
+                .overflow_hidden()
+                .child(native.provider_api_key.clone()),
+        )
+        .child(
+            div()
+                .text_color(palette.faint)
+                .text_size(px(10.))
+                .child(provider_credential_hint(provider, locale)),
+        );
+    div()
+        .rounded(px(12.))
+        .border_1()
+        .border_color(palette.border)
+        .bg(palette.paper)
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .px(px(18.))
+                .pt(px(16.))
+                .pb(px(8.))
+                .flex()
+                .gap(px(16.))
+                .child(url_field)
+                .child(key_field),
+        )
+        .child(
+            div().px(px(18.)).pb(px(14.)).flex().justify_end().child(
+                div()
+                    .id("save-provider")
+                    .role(Role::Button)
+                    .aria_label(locale.text("ui.saveProvider"))
+                    .tab_stop(true)
+                    .h(px(32.))
+                    .px_3()
+                    .rounded(px(8.))
+                    .bg(palette.button)
+                    .text_color(palette.button_text)
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .flex()
+                    .items_center()
+                    .cursor_pointer()
+                    .hover(move |style| style.opacity(0.92))
+                    .active(|style| style.opacity(0.72))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let secret = this
+                            .native_settings
+                            .provider_api_key
+                            .read(cx)
+                            .text()
+                            .to_string();
+                        let base_url = this
+                            .native_settings
+                            .provider_base_url
+                            .read(cx)
+                            .text()
+                            .to_string();
+                        this.runtime.request(
+                            Method::Execute,
+                            model_provider_save_request(
+                                &save_provider,
+                                &save_session,
+                                this.native_settings.catalog_enabled,
+                                &base_url,
+                                &secret,
+                            ),
+                        );
+                        cx.notify();
+                    }))
+                    .child(locale.text("ui.saveProvider")),
+            ),
+        )
+        .into_any_element()
 }
 
 pub(in crate::surfaces) fn model_provider_action(

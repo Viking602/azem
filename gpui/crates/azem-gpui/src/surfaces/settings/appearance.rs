@@ -21,60 +21,70 @@ pub(super) fn settings_appearance_body(
             settings_theme_preview(index, name, &preferences.theme, palette, cx)
         }))
         .into_any_element();
-    let primary = div()
-        .rounded(px(12.))
-        .border_1()
-        .border_color(palette.border)
-        .bg(palette.paper)
-        .child(settings_children_row(
-            locale.text("ui.interfaceLanguage"),
-            locale.text("ui.menusButtonsAndSystemMessages"),
-            settings_language_control(state, native, locale, palette, cx),
-            palette,
-        ))
-        .child(settings_children_row(
-            locale.text("ui.theme"),
-            locale.text("ui.systemModeFollowsLightAndDarkAppearance"),
-            themes,
-            palette,
-        ))
-        .child(settings_children_row(
-            locale.text("ui.interfaceFont"),
-            locale.text("ui.chooseFromInstalledFontsCodeRemainsMonospaced"),
-            settings_font_family_control(native, &preferences, locale, palette, cx),
-            palette,
-        ))
-        .child(settings_children_row(
-            locale.text("ui.interfaceFontSize"),
-            locale.text("ui.adjustSidebarSettingsAndOtherUiText"),
-            settings_font_size_control(
-                "uiFontSize",
-                preferences.ui_font_size,
-                11.,
-                20.,
-                locale,
+    let primary = settings_rows(
+        vec![
+            settings_children_row(
+                locale.text("ui.interfaceLanguage"),
+                locale.text("ui.menusButtonsAndSystemMessages"),
+                settings_language_control(state, native, locale, palette, cx),
                 palette,
-                cx,
-            ),
-            palette,
-        ))
-        .child(settings_children_row(
-            locale.text("ui.reduceMotion"),
-            locale.text("ui.makeTransitionsAndStreamingUpdatesImmediate"),
-            div()
-                .id("appearance-reduced-motion")
-                .role(Role::Switch)
-                .aria_label(locale.text("ui.reduceMotion"))
-                .aria_toggled(reduced_motion.into())
-                .tab_stop(true)
-                .cursor_pointer()
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.set_appearance("reducedMotion", json!(!reduced_motion), window, cx)
-                }))
-                .child(settings_switch(reduced_motion, palette))
-                .into_any_element(),
-            palette,
-        ));
+            )
+            .into_any_element(),
+            settings_children_row(
+                locale.text("ui.theme"),
+                locale.text("ui.systemModeFollowsLightAndDarkAppearance"),
+                themes,
+                palette,
+            )
+            .into_any_element(),
+            settings_children_row(
+                locale.text("ui.reduceMotion"),
+                locale.text("ui.makeTransitionsAndStreamingUpdatesImmediate"),
+                div()
+                    .id("appearance-reduced-motion")
+                    .role(Role::Switch)
+                    .aria_label(locale.text("ui.reduceMotion"))
+                    .aria_toggled(reduced_motion.into())
+                    .tab_stop(true)
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.set_appearance("reducedMotion", json!(!reduced_motion), window, cx)
+                    }))
+                    .child(settings_switch(reduced_motion, palette))
+                    .into_any_element(),
+                palette,
+            )
+            .into_any_element(),
+        ],
+        palette,
+    );
+    let typography = settings_rows(
+        vec![
+            settings_children_row(
+                locale.text("ui.interfaceFont"),
+                locale.text("ui.chooseFromInstalledFontsCodeRemainsMonospaced"),
+                settings_font_family_control(native, &preferences, locale, palette, cx),
+                palette,
+            )
+            .into_any_element(),
+            settings_children_row(
+                locale.text("ui.interfaceFontSize"),
+                locale.text("ui.adjustSidebarSettingsAndOtherUiText"),
+                settings_font_size_control(
+                    "uiFontSize",
+                    preferences.ui_font_size,
+                    11.,
+                    20.,
+                    locale,
+                    palette,
+                    cx,
+                ),
+                palette,
+            )
+            .into_any_element(),
+        ],
+        palette,
+    );
     let chat = settings_detail_card(
         locale.text("ui.chatText"),
         locale.text("ui.onlyAffectsTranscriptAndCodeBlockSizes"),
@@ -116,8 +126,19 @@ pub(super) fn settings_appearance_body(
         .w_full()
         .flex()
         .flex_col()
-        .gap_4()
-        .child(primary)
+        .gap_6()
+        .child(settings_group(
+            locale.text("ui.appearance"),
+            "",
+            primary,
+            palette,
+        ))
+        .child(settings_group(
+            locale.text("ui.interfaceFont"),
+            "",
+            typography,
+            palette,
+        ))
         .child(chat)
         .into_any_element()
 }
@@ -660,17 +681,16 @@ pub(super) fn settings_children_row(
     palette: ThemePalette,
 ) -> gpui::Div {
     div()
-        .min_h(px(76.))
-        .px_4()
-        .py_2()
-        .border_t_1()
-        .border_color(palette.border)
+        .min_h(px(64.))
+        .px_3()
+        .py(px(10.))
         .flex()
         .items_center()
+        .flex_wrap()
         .gap_4()
         .child(
             div()
-                .min_w_0()
+                .min_w(px(220.))
                 .flex_1()
                 .flex()
                 .flex_col()
@@ -678,10 +698,17 @@ pub(super) fn settings_children_row(
                 .child(
                     div()
                         .text_sm()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(palette.ink)
                         .child(title),
                 )
-                .child(div().text_sm().text_color(palette.muted).child(description)),
+                .child(
+                    div()
+                        .text_sm()
+                        .line_height(px(20.))
+                        .text_color(palette.muted)
+                        .child(description),
+                ),
         )
-        .child(control)
+        .child(div().ml_auto().max_w_full().flex_shrink_0().child(control))
 }

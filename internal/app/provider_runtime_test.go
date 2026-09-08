@@ -94,6 +94,16 @@ func TestMainInstructionsContract(t *testing.T) {
 		"On `init`, provide only the goal, phase titles, and item content",
 		"host assigns IDs and status",
 	})
+	requireInstructionFragments(t, "user-facing Todo labels", []string{
+		"Apply this to Todo labels", "short action-and-object titles", "not commands or host-policy text",
+	})
+	requireInstructionFragments(t, "dynamic Todo guidance", []string{
+		"later user guidance",
+		"`append` new deliverables",
+		"`cancel` withdrawn open work",
+		"`remove` only an explicitly erased non-current item",
+		"Never leave superseded work pending",
+	})
 	requireInstructionFragments(t, "language and contract", []string{
 		"language of the current user message",
 		"Settings language is for the UI only",
@@ -370,7 +380,7 @@ func (d *retryConfiguredDriver) Stream(context.Context, hyprovider.Request) (hyp
 	if d.calls <= 2 {
 		return nil, retryConfiguredError{}
 	}
-	return hyprovider.NewSliceStream([]hyprovider.Event{{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete}}), nil
+	return hyprovider.NewSliceStream([]hyprovider.Event{{Kind: hyprovider.EventTextDelta, Text: "ok"}, {Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete}}), nil
 }
 
 func TestRetryProviderDriverUsesConfiguredAttemptCount(t *testing.T) {
@@ -386,6 +396,9 @@ func TestRetryProviderDriverUsesConfiguredAttemptCount(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer stream.Close()
+	if event, err := stream.Recv(); err != nil || event.Text != "ok" {
+		t.Fatalf("text=%+v err=%v", event, err)
+	}
 	if event, recvErr := stream.Recv(); recvErr != nil || event.Kind != hyprovider.EventDone {
 		t.Fatalf("event=%#v error=%v", event, recvErr)
 	}

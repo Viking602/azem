@@ -29,6 +29,13 @@ pub enum RuntimeCommand {
         name: String,
         mime_type: String,
     },
+    UploadAttachmentBytes {
+        id: String,
+        session_id: String,
+        name: String,
+        mime_type: String,
+        data: Vec<u8>,
+    },
     Disconnect {
         stop_daemon: bool,
         completed: std::sync::mpsc::SyncSender<()>,
@@ -100,8 +107,17 @@ impl RuntimeConnection {
             .is_ok_and(|startup| startup.recv_timeout(timeout).is_ok())
     }
 
-    pub fn request(&self, method: Method, payload: Value) -> String {
+    pub fn request(&self, method: Method, mut payload: Value) -> String {
         let id = Uuid::new_v4().to_string();
+        if matches!(
+            method,
+            Method::StartTurn | Method::Guide | Method::FollowUp | Method::MutatePromptQueue
+        ) && let Some(object) = payload.as_object_mut()
+        {
+            object
+                .entry("mutationId")
+                .or_insert_with(|| Value::String(id.clone()));
+        }
         if let Err(error) = self.commands.try_send(RuntimeCommand::Request {
             id: id.clone(),
             method,
@@ -130,6 +146,32 @@ impl RuntimeConnection {
             name,
             mime_type,
         }) {
+            let _ = self.message_tx.try_send(RuntimeMessage::Response {
+                id: id.clone(),
+                result: Err(format!("IPC command queue unavailable: {error}")),
+            });
+        }
+        id
+    }
+
+    pub fn upload_attachment_bytes(
+        &self,
+        session_id: String,
+        name: String,
+        mime_type: String,
+        data: Vec<u8>,
+    ) -> String {
+        let id = Uuid::new_v4().to_string();
+        if let Err(error) = self
+            .commands
+            .try_send(RuntimeCommand::UploadAttachmentBytes {
+                id: id.clone(),
+                session_id,
+                name,
+                mime_type,
+                data,
+            })
+        {
             let _ = self.message_tx.try_send(RuntimeMessage::Response {
                 id: id.clone(),
                 result: Err(format!("IPC command queue unavailable: {error}")),
@@ -182,6 +224,7 @@ async fn supervise(
     let mut startup = Some(startup);
     let client_id = Uuid::new_v4().to_string();
     let mut last_sequence = 0_u64;
+    let mut daemon_epoch = String::new();
     let mut backoff = Duration::from_millis(100);
     loop {
         let _ = messages
@@ -202,6 +245,10 @@ async fn supervise(
                 continue;
             }
         };
+        if daemon_epoch != endpoint.daemon_epoch {
+            last_sequence = 0;
+            daemon_epoch.clone_from(&endpoint.daemon_epoch);
+        }
         let (client, acknowledgement, mut events) =
             match Client::connect(&endpoint, Some(client_id.clone()), last_sequence).await {
                 Ok(connection) => connection,
@@ -216,7 +263,6 @@ async fn supervise(
                     continue;
                 }
             };
-        backoff = Duration::from_millis(100);
         let mut forward_after = acknowledgement.current_sequence;
         let _ = messages
             .send(RuntimeMessage::Connected {
@@ -238,19 +284,22 @@ async fn supervise(
         )
         .await
         {
-            Ok(snapshot) => {
-                let _ = messages.send(RuntimeMessage::Snapshot(snapshot)).await;
+            Ok(_) => {
+                backoff = Duration::from_millis(100);
                 if let Some(startup) = startup.take() {
                     let _ = startup.send(());
                 }
             }
             Err(error) => {
+                tracing::warn!(%error, "Azem IPC startup snapshot failed");
                 let _ = messages
                     .send(RuntimeMessage::Connecting(format!(
                         "Snapshot failed: {error}"
                     )))
                     .await;
                 let _ = client.close().await;
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(Duration::from_secs(5));
                 continue;
             }
         }
@@ -286,9 +335,7 @@ async fn supervise(
                         )
                         .await
                         {
-                            Ok(snapshot) => {
-                                let _ = messages.send(RuntimeMessage::Snapshot(snapshot)).await;
-                            }
+                            Ok(_) => {}
                             Err(error) => {
                                 let _ = messages.send(RuntimeMessage::Connecting(format!("Resync failed ({reason}): {error}"))).await;
                                 break;
@@ -326,6 +373,14 @@ async fn supervise(
                             let _ = response_messages.send(RuntimeMessage::Response { id, result }).await;
                         });
                     }
+                    Ok(RuntimeCommand::UploadAttachmentBytes { id, session_id, name, mime_type, data }) => {
+                        let request_client = client.clone();
+                        let response_messages = messages.clone();
+                        tokio::spawn(async move {
+                            let result = request_client.upload_attachment_bytes(&session_id, &name, &mime_type, &data).await.map_err(|error| error.to_string());
+                            let _ = response_messages.send(RuntimeMessage::Response { id, result }).await;
+                        });
+                    }
                     Ok(RuntimeCommand::Disconnect { stop_daemon, completed }) => {
                         if stop_daemon {
                             let _ = client.stop_daemon(false).await;
@@ -359,36 +414,59 @@ async fn request_snapshot_while_forwarding(
     snapshot_request: &Value,
     forward_after: &mut u64,
     last_sequence: &mut u64,
-) -> Result<Value> {
+) -> Result<()> {
     let request = client.request(Method::ReconnectSnapshot, snapshot_request);
     tokio::pin!(request);
+    let mut pending = Vec::new();
+    let mut pending_bytes = 0usize;
     loop {
         tokio::select! {
-            result = &mut request => return result,
-            event = events.recv() => match event {
-                Ok(ClientEvent::Envelope(envelope)) => {
-                    *last_sequence = (*last_sequence).max(envelope.sequence);
-                    if should_forward_envelope(&envelope, *forward_after) {
-                        let _ = messages.send(RuntimeMessage::Event(ClientEvent::Envelope(envelope))).await;
-                    }
-                }
-                Ok(ClientEvent::Binary(metadata, data)) => {
-                    *last_sequence = (*last_sequence).max(metadata.sequence);
-                    if metadata.sequence > *forward_after {
-                        let _ = messages.send(RuntimeMessage::Event(ClientEvent::Binary(metadata, data))).await;
-                    }
-                }
-                Ok(ClientEvent::ResyncRequired { sequence, .. }) => {
+            result = &mut request => {
+                let snapshot = result?;
+                *forward_after = snapshot["wireSequence"].as_u64().unwrap_or(*forward_after);
+                *last_sequence = *forward_after;
+                let _ = messages.send(RuntimeMessage::Snapshot(snapshot)).await;
+                for event in pending {
+                    let sequence = match &event {
+                        ClientEvent::Envelope(envelope) => envelope.sequence,
+                        ClientEvent::Binary(metadata, _) => metadata.sequence,
+                        _ => continue,
+                    };
                     *last_sequence = (*last_sequence).max(sequence);
-                    *forward_after = (*forward_after).max(sequence);
+                    if sequence > *forward_after {
+                        let _ = messages.send(RuntimeMessage::Event(event)).await;
+                    }
                 }
-                Ok(ClientEvent::Disconnected(reason)) => {
-                    return Err(anyhow!("disconnected while loading snapshot: {reason}"));
+                return Ok(());
+            },
+            event = events.recv() => {
+                let event = event.map_err(|error| anyhow!("event stream failed while loading snapshot: {error}"))?;
+                match &event {
+                    ClientEvent::Disconnected(reason) => return Err(anyhow!("disconnected while loading snapshot: {reason}")),
+                    ClientEvent::ResyncRequired { sequence, .. } if *sequence <= *forward_after => continue,
+                    ClientEvent::ResyncRequired { .. } => return Err(anyhow!("event gap while loading snapshot")),
+                    ClientEvent::Envelope(envelope) if !snapshot_event_is_live(envelope.sequence, *forward_after) => {
+                        *last_sequence = (*last_sequence).max(envelope.sequence);
+                        continue;
+                    }
+                    ClientEvent::Binary(metadata, _) if !snapshot_event_is_live(metadata.sequence, *forward_after) => {
+                        *last_sequence = (*last_sequence).max(metadata.sequence);
+                        continue;
+                    }
+                    ClientEvent::Envelope(envelope) => pending_bytes += serde_json::to_vec(envelope)?.len(),
+                    ClientEvent::Binary(_, bytes) => pending_bytes += bytes.len(),
                 }
-                Err(error) => return Err(anyhow!("event stream failed while loading snapshot: {error}")),
+                if pending.len() >= 2048 || pending_bytes > 16 * 1024 * 1024 {
+                    return Err(anyhow!("snapshot event buffer exceeded its limit"));
+                }
+                pending.push(event);
             }
         }
     }
+}
+
+fn snapshot_event_is_live(sequence: u64, forward_after: u64) -> bool {
+    sequence > forward_after
 }
 
 fn should_forward_envelope(envelope: &azem_ipc::Envelope, baseline: u64) -> bool {
@@ -480,12 +558,47 @@ fn try_claim_daemon_start(endpoint_path: &Path) -> Result<Option<std::fs::File>>
 }
 
 async fn endpoint_alive(endpoint: &Endpoint) -> bool {
-    match Client::connect(endpoint, Some("azem-probe".into()), 0).await {
-        Ok((client, _, _)) => {
-            let _ = client.close().await;
-            true
+    if endpoint.pid != 0 && !process_is_alive(endpoint.pid) {
+        return false;
+    }
+    tokio::time::timeout(
+        Duration::from_millis(250),
+        connect_listener(&endpoint.address),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .is_some()
+}
+
+fn process_is_alive(pid: u32) -> bool {
+    let pid = i32::try_from(pid).unwrap_or(0);
+    if pid <= 0 {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        unsafe extern "C" {
+            fn kill(pid: i32, sig: i32) -> i32;
         }
-        Err(_) => false,
+        // SAFETY: signal 0 does not deliver a signal; it only tests whether pid exists.
+        unsafe { kill(pid, 0) == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+async fn connect_listener(address: &str) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        tokio::net::UnixStream::connect(address).await.map(|_| ())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = address;
+        Ok(())
     }
 }
 
@@ -617,9 +730,14 @@ fn spawn_daemon(options: &RuntimeOptions, endpoint_path: &Path) -> Result<()> {
         .stdout(Stdio::from(log.try_clone()?))
         .stderr(Stdio::from(log));
     detach_command(&mut command);
-    command
+    let mut child = command
         .spawn()
         .with_context(|| format!("start Azem daemon with {}", binary.display()))?;
+    std::thread::spawn(move || {
+        if let Err(error) = child.wait() {
+            tracing::warn!(%error, "failed to reap Azem daemon");
+        }
+    });
     Ok(())
 }
 
@@ -645,14 +763,28 @@ mod tests {
         time::Duration,
     };
 
-    use azem_ipc::{Envelope, Method};
+    use azem_ipc::{Envelope, Method, generated::PROTOCOL_VERSION};
     use serde_json::json;
     use uuid::Uuid;
 
     use super::{
         RuntimeCommand, RuntimeConnection, RuntimeMessage, RuntimeOptions, endpoint_path,
-        restore_desktop_workspace, should_forward_envelope,
+        process_is_alive, restore_desktop_workspace, should_forward_envelope,
+        snapshot_event_is_live,
     };
+
+    #[test]
+    fn snapshot_wait_drops_replay_already_covered_by_hello_cursor() {
+        assert!(!snapshot_event_is_live(0, 12));
+        assert!(!snapshot_event_is_live(12, 12));
+        assert!(snapshot_event_is_live(13, 12));
+    }
+
+    #[test]
+    fn process_liveness_probe_sees_the_current_pid() {
+        assert!(process_is_alive(std::process::id()));
+        assert!(!process_is_alive(0));
+    }
 
     #[test]
     fn workspace_switch_detaches_without_stopping_the_daemon() {
@@ -694,9 +826,10 @@ mod tests {
         std::fs::write(
             &endpoint_path,
             serde_json::to_vec(&json!({
-                "protocol": 1,
+                "protocol": PROTOCOL_VERSION,
                 "workspaceId": "recent",
                 "workspace": workspace,
+                "daemonEpoch": "epoch",
                 "address": endpoint_dir.join("azem.sock"),
                 "tokenFile": endpoint_dir.join("token"),
                 "pid": 42,

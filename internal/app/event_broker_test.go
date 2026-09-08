@@ -417,9 +417,13 @@ func TestProviderStreamContinuesAfterEventBacklogCompaction(t *testing.T) {
 	service := NewService(context.Background(), config.Default())
 	service.events.maxBytes = 32
 	sink := service.providerStreamSink("session", "run", "grok", "model", "high", "responses")
-	err := sink.Emit(context.Background(), hyagent.Frame{Kind: hyagent.FrameText, Text: strings.Repeat("x", 64)})
+	text := strings.Repeat("x", 64)
+	err := sink.Emit(context.Background(), hyagent.Frame{Kind: hyagent.FrameText, Text: text})
 	if err != nil {
-		t.Fatalf("provider sink stopped on UI backlog: %v", err)
+		t.Fatalf("provider sink stopped on private final candidate: %v", err)
+	}
+	if err := sink.PublishAccepted(context.Background(), text); err != nil {
+		t.Fatalf("provider sink stopped on accepted output backlog: %v", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)

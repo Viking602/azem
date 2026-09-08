@@ -332,6 +332,22 @@ pub(super) fn prepare_prompt(
     Ok((prompt, active))
 }
 
+pub(super) fn attachment_wire_values(attachments: Vec<Value>, queue: bool) -> Vec<Value> {
+    attachments
+        .into_iter()
+        .map(|mut attachment| {
+            if let Some(fields) = attachment.as_object_mut() {
+                let mime = fields.remove("mimeType").or_else(|| fields.remove("mime"));
+                fields.remove("mime");
+                if let Some(mime) = mime {
+                    fields.insert(if queue { "mime" } else { "mimeType" }.into(), mime);
+                }
+            }
+            attachment
+        })
+        .collect()
+}
+
 pub(super) fn turn_payload(
     state: &crate::state::AppState,
     source: &str,
@@ -354,7 +370,7 @@ pub(super) fn turn_payload(
         "planMode": state.runtime.plan_mode,
         "disableSubagents": false,
         "activeSkills": active_skills,
-        "images": attachments,
+        "images": attachment_wire_values(attachments, false),
     }))
 }
 
@@ -541,12 +557,17 @@ impl AzemWindow {
                     );
                 }
             }
-            "compact" | "rebuild" | "reload-skills" | "archive" | "new" => {
+            "new" => {
+                let id = self.runtime.request(Method::CreateSession, json!({}));
+                self.pending_requests
+                    .insert(id, crate::PendingRequest::ResumeSession { sequence: None });
+            }
+            "compact" | "rebuild" | "reload-skills" | "archive" => {
                 let kind = match command {
                     "compact" | "rebuild" => "compact",
                     "reload-skills" => "reload_skills",
                     "archive" => "archive_session",
-                    _ => "new_session",
+                    _ => "archive_session",
                 };
                 self.runtime.request(
                     Method::Execute,

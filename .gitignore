@@ -1,5 +1,7 @@
 # Build outputs
 /azem
+# Legacy desktop build output
+/azem-gui
 /bin/
 /dist/
 /runtime-js/node_modules/

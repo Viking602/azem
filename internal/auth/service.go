@@ -51,6 +51,15 @@ func (e EntitlementError) Error() string {
 	return fmt.Sprintf("%s subscription does not permit this operation (HTTP %d)", e.Provider, e.Status)
 }
 
+// streamingResponseHeaderTimeout bounds how long a streaming request may wait
+// for the first response headers after the body is written. Go 1.25 reports
+// that stall as context.DeadlineExceeded, which Venat treats as caller
+// cancellation and will not retry. Grok 4.6 xhigh on a large cached prompt
+// routinely thinks longer than 30s before the first SSE headers, so this must
+// stay well above a single thinking pause. Zero still means no total body
+// timeout; this value only covers the header wait.
+const streamingResponseHeaderTimeout = 10 * time.Minute
+
 type Service struct {
 	db               *sql.DB
 	store            CredentialStore
@@ -79,7 +88,7 @@ func NewService(db *sql.DB, store CredentialStore, chatgptClient *chatgpt.Client
 	httpClient := resty.New().SetTimeout(30 * time.Second)
 	netproxy.ConfigureTransport(httpClient.Transport())
 	streamClient := resty.NewWithTransportSettings(&resty.TransportSettings{
-		ResponseHeaderTimeout: 30 * time.Second,
+		ResponseHeaderTimeout: streamingResponseHeaderTimeout,
 	}).SetResponseDoNotParse(true)
 	netproxy.ConfigureTransport(streamClient.Transport())
 	return &Service{

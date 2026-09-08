@@ -241,8 +241,8 @@ fn security_scan_list_loads_selected_or_latest_projection() {
 #[test]
 fn environment_plan_items_wrap_inside_the_sidebar() {
     let source = crate::SURFACES_SOURCE;
-    let start = source.find("todo_items.into_iter().map").unwrap();
-    let item = &source[start..source.len().min(start + 2_500)];
+    let start = source.find("fn plan_list(").unwrap();
+    let item = &source[start..source.len().min(start + 5_000)];
     assert!(item.contains(".min_w_0()"));
     assert!(item.contains(".whitespace_normal()"));
 }
@@ -443,6 +443,8 @@ fn queued_messages_reorder_only_inside_their_session() {
         selected_skills: Vec::new(),
         attachments: Vec::new(),
         failed: false,
+        pending: false,
+        dispatching: false,
     };
     let mut prompts = vec![
         queued("a", "one"),
@@ -475,6 +477,28 @@ fn image_attachments_expand_the_composer_input() {
     assert_eq!(composer_input_height(1, false, 0), 60.);
     assert_eq!(composer_input_height(1, false, 1), 72.);
     assert_eq!(composer_input_height(1, true, 1), 112.);
+}
+
+#[test]
+fn composer_paste_and_attach_images_and_timeline_renders_them() {
+    let source = crate::MAIN_SOURCE;
+    for required in [
+        "capture_action(cx.listener(Self::paste_composer_images))",
+        "fn paste_composer_images(",
+        "ClipboardEntry::Image(image)",
+        "upload_attachment_bytes(",
+        "fn attach_file(",
+        "prompt_for_paths(PathPromptOptions",
+        "fn attach_image_paths(",
+        "PendingRequest::Attachment",
+    ] {
+        assert!(source.contains(required), "{required}");
+    }
+    let surfaces = crate::SURFACES_SOURCE;
+    assert!(surfaces.contains("fn user_attachment_previews("));
+    assert!(surfaces.contains("user_attachment_previews(index, block, palette)"));
+    assert!(composer_has_submission("", &[json!({"id":"image-1"})]));
+    assert!(!composer_has_submission("", &[]));
 }
 
 #[test]
@@ -526,6 +550,30 @@ fn image_only_submission_is_allowed() {
 }
 
 #[test]
+fn model_picker_uses_catalog_logo_ids() {
+    let picker = crate::MAIN_SOURCE
+        .split("fn model_picker_view(")
+        .nth(1)
+        .unwrap()
+        .split("\n    pub(super) fn ")
+        .next()
+        .unwrap();
+    assert!(picker.contains("catalog_provider_logo_id(Some(&provider), &provider_id)"));
+    let compact = picker.split_whitespace().collect::<String>();
+    assert!(compact.contains("provider_logo(&logo_id,"));
+    assert!(!compact.contains("provider_logo(&provider_id,"));
+    let composer = crate::MAIN_SOURCE
+        .split("fn composer_view(")
+        .nth(1)
+        .unwrap()
+        .split("\n    pub(super) fn ")
+        .next()
+        .unwrap();
+    assert!(composer.contains("provider_logo(&current_logo, 15., palette.ink)"));
+    assert!(!composer.contains("provider_logo(&current_provider, 15., palette.ink)"));
+}
+
+#[test]
 fn model_picker_uses_product_names_and_capability_copy() {
     let model = json!({
         "id": "stealth/ox-alpha",
@@ -561,9 +609,9 @@ fn closed_model_picker_does_not_build_the_catalog() {
         .split("\n    pub(super) fn ")
         .next()
         .unwrap();
-    assert!(composer.contains(
-            "(self.model_picker_open && self.route_picker_target.is_none())\n            .then(|| self.model_picker_view(palette, cx))"
-        ));
+    assert!(composer.contains("self.popup_motion(\"model\").visible()"));
+    assert!(composer.contains("self.model_picker_render_target.is_none()"));
+    assert!(composer.contains(".then(|| self.model_picker_view(palette, cx))"));
     assert!(composer.contains(".when_some(picker, |shell, picker| shell.child(picker))"));
 }
 
@@ -666,7 +714,7 @@ fn every_reasoning_depth_has_a_distinct_localized_name() {
                 "Low",
                 "Medium",
                 "High",
-                "Very high",
+                "Extra High",
                 "Max",
                 "Ultra",
             ],
@@ -799,10 +847,25 @@ fn persisted_window_size_rejects_invalid_or_too_small_values() {
 #[test]
 fn window_size_persistence_round_trips_on_disk() {
     let path = std::env::temp_dir().join(format!("azem-window-{}.json", Uuid::new_v4()));
-    save_window_size(&path, gpui::size(gpui::px(1536.), gpui::px(960.))).unwrap();
+    let placement = crate::WindowPlacement {
+        uuid: "external-display".into(),
+        x: 120.,
+        y: 80.,
+    };
+    save_window_size(
+        &path,
+        gpui::size(gpui::px(1536.), gpui::px(960.)),
+        Some(&placement),
+    )
+    .unwrap();
     let restored = load_window_size(&path).unwrap();
     assert_eq!(f32::from(restored.width), 1536.);
     assert_eq!(f32::from(restored.height), 960.);
+    let saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(saved["display"]["uuid"], "external-display");
+    assert_eq!(saved["display"]["x"], 120.);
+    assert_eq!(saved["display"]["y"], 80.);
     std::fs::remove_file(path).unwrap();
 }
 
@@ -857,4 +920,212 @@ fn pending_question_replaces_running_header_status() {
     assert!(cancel.contains("\"sessionId\": session_id"));
     assert!(cancel.contains("\"runId\": run_id"));
     assert!(cancel.contains("PendingRequest::CancelActive"));
+}
+
+#[test]
+fn live_tool_group_opens_then_settles_without_overriding_manual_toggle() {
+    let mut expansion = ProcessExpansion::default();
+    assert!(expansion.group_is_expanded("live", true));
+    expansion.toggle("live");
+    assert!(!expansion.group_is_expanded("live", true));
+    assert!(!expansion.group_is_expanded("live", false));
+    expansion.toggle("live");
+    assert!(expansion.group_is_expanded("live", false));
+    assert!(!expansion.group_is_expanded("history", false));
+}
+
+#[test]
+fn disclosure_motion_matches_css_ease_out_and_reverses_continuously() {
+    use crate::{DisclosureMotion, disclosure_ease};
+    use std::time::{Duration, Instant};
+    assert_eq!(disclosure_ease(0.), 0.);
+    assert_eq!(disclosure_ease(1.), 1.);
+    assert!((disclosure_ease(0.5) - 0.6846).abs() < 0.001);
+    let now = Instant::now();
+    let mut motion = DisclosureMotion {
+        from: 0.,
+        target: 1.,
+        started: now,
+        height: 200.,
+        index: 0,
+    };
+    let midway = now + Duration::from_millis(110);
+    let position = motion.progress(midway);
+    motion.from = position;
+    motion.target = 0.;
+    motion.started = midway;
+    assert_eq!(motion.progress(midway), position);
+    assert_eq!(motion.progress(midway + Duration::from_millis(220)), 0.);
+    let mut expansion = ProcessExpansion::default();
+    expansion.disclosure("test", 0, false, false);
+    expansion.disclosure("test", 0, true, false);
+    assert!(expansion.disclosure("test", 0, true, false).2);
+    assert_eq!(
+        expansion.disclosure("test", 0, false, true),
+        (0., 0., false)
+    );
+}
+
+#[test]
+fn window_placement_restores_offsets_and_falls_back_to_center() {
+    use gpui::{Bounds, point, px, size};
+    let screen = Bounds::new(point(px(-1920.), px(0.)), size(px(1920.), px(1080.)));
+    let saved = crate::WindowPlacement {
+        uuid: "external".into(),
+        x: 120.,
+        y: 60.,
+    };
+    let restored = crate::restored_window_bounds(screen, size(px(1440.), px(920.)), Some(&saved));
+    assert_eq!(restored.origin, point(px(-1800.), px(60.)));
+    let primary = Bounds::new(point(px(0.), px(0.)), size(px(1440.), px(900.)));
+    let fallback = crate::restored_window_bounds(primary, size(px(1200.), px(800.)), None);
+    assert_eq!(fallback.origin, point(px(120.), px(50.)));
+    let clipped = crate::restored_window_bounds(primary, size(px(2000.), px(1200.)), Some(&saved));
+    assert_eq!(clipped, primary);
+}
+
+#[test]
+fn queue_attachments_convert_upload_mime_and_restore_turn_wire_shape() {
+    let uploaded = json!({"id":"image","name":"screen.png","mimeType":"image/png","path":"/tmp/image","size":42});
+    let queued = crate::composer_completion::attachment_wire_values(vec![uploaded.clone()], true);
+    assert_eq!(queued[0]["mime"], "image/png");
+    assert!(queued[0].get("mimeType").is_none());
+    let restored = crate::composer_completion::attachment_wire_values(queued, false);
+    assert_eq!(restored, vec![uploaded]);
+}
+
+#[test]
+fn pending_approval_is_visible_only_in_its_session() {
+    let mut state = crate::state::AppState::default();
+    state.runtime.running = true;
+    state.navigation.current_session_id = "approval-session".into();
+    state.runtime.approvals = vec![json!({
+        "sessionId": "approval-session", "approvalId": "approval-1", "state": "pending"
+    })];
+    for status in ["pending", "interrupted"] {
+        state.runtime.approvals[0]["state"] = json!(status);
+        assert!(crate::window_controls::pending_native_approval(&state).is_some());
+        assert_eq!(
+            crate::window_render::thread_status(&state),
+            ("approval.required", false)
+        );
+    }
+    for status in ["resolved", "reviewing"] {
+        state.runtime.approvals[0]["state"] = json!(status);
+        assert!(crate::window_controls::pending_native_approval(&state).is_none());
+    }
+    state.runtime.approvals[0]["state"] = json!("pending");
+    state.navigation.current_session_id = "other-session".into();
+    assert!(crate::window_controls::pending_native_approval(&state).is_none());
+}
+
+#[test]
+fn approval_command_hides_wire_json_without_rewriting_shell() {
+    let command = "git diff --check && printf 'a && b'";
+    let args = json!({"command": command, "timeout_seconds": 20}).to_string();
+    assert_eq!(crate::window_controls::approval_action_text(&args), command);
+    assert_eq!(
+        crate::window_controls::approval_action_text(command),
+        command
+    );
+    assert_eq!(
+        crate::window_controls::approval_action_text("{invalid"),
+        "{invalid"
+    );
+}
+
+#[test]
+fn session_motion_replays_navigation_but_never_stream_updates() {
+    let now = std::time::Instant::now();
+    let mut motion = super::SurfaceMotion::default();
+    assert_eq!(motion.opacity(super::Surface::Thread, "a", false, now), 1.);
+    assert_eq!(motion.opacity(super::Surface::Thread, "b", false, now), 0.);
+    let middle = motion.opacity(
+        super::Surface::Thread,
+        "b",
+        false,
+        now + std::time::Duration::from_millis(70),
+    );
+    assert!(middle > 0. && middle < 1.);
+    assert_eq!(
+        motion.opacity(
+            super::Surface::Thread,
+            "b",
+            false,
+            now + std::time::Duration::from_millis(140)
+        ),
+        1.
+    );
+    assert_eq!(
+        motion.opacity(
+            super::Surface::Thread,
+            "a",
+            false,
+            now + std::time::Duration::from_millis(150)
+        ),
+        0.
+    );
+    assert_eq!(
+        motion.opacity(
+            super::Surface::Thread,
+            "a",
+            true,
+            now + std::time::Duration::from_millis(151)
+        ),
+        1.
+    );
+    assert_eq!(
+        motion.opacity(
+            super::Surface::Thread,
+            "a",
+            false,
+            now + std::time::Duration::from_millis(152)
+        ),
+        1.
+    );
+}
+
+#[test]
+fn synara_sidebar_curve_is_bounded_and_reversible() {
+    let duration = super::SIDE_PANEL_TRANSITION;
+    assert_eq!(duration, std::time::Duration::from_millis(300));
+    let middle = super::eased_side_panel_width(0., super::SIDEBAR_WIDTH, duration / 2);
+    assert!(middle > super::SIDEBAR_WIDTH / 2. && middle < super::SIDEBAR_WIDTH);
+    assert_eq!(
+        super::eased_side_panel_width(middle, 0., std::time::Duration::ZERO),
+        middle
+    );
+    assert_eq!(super::eased_side_panel_width(middle, 0., duration), 0.);
+    assert!((super::css_ease_out(0.5) - 0.6846).abs() < 0.001);
+}
+
+#[test]
+fn popup_motion_retains_exit_and_reverses_without_jumping() {
+    use std::time::{Duration, Instant};
+    let now = Instant::now();
+    let at = |ms| now + Duration::from_millis(ms);
+    let mut motion = super::PopupMotion::default();
+    assert!(!motion.update(false, false, now));
+    assert!(!motion.visible());
+    assert!(motion.update(true, false, now));
+    assert!(motion.visible());
+    assert!(!motion.update(true, false, at(200)));
+    assert_eq!(motion.opacity, 1.);
+    assert!(motion.update(false, false, at(200)));
+    assert!(!motion.open);
+    assert!(motion.visible());
+    motion.update(false, false, at(300));
+    let halfway = motion.opacity;
+    assert!((halfway - 0.5).abs() < 0.001);
+    assert!(motion.update(true, false, at(300)));
+    assert_eq!(motion.opacity, halfway);
+    assert!(!motion.update(true, false, at(500)));
+    assert_eq!(motion.opacity, 1.);
+    motion.update(false, false, at(500));
+    assert!(!motion.update(false, false, at(700)));
+    assert!(!motion.visible());
+    assert!(!motion.update(true, true, at(701)));
+    assert_eq!(motion.opacity, 1.);
+    assert!(!motion.update(false, true, at(702)));
+    assert!(!motion.visible());
 }

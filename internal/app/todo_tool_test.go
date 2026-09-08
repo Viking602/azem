@@ -150,10 +150,37 @@ func TestTodoDefinitionKeepsInitIdentityHostOwned(t *testing.T) {
 	if !strings.Contains(definition.Description, "IDs and status are host-assigned") {
 		t.Fatalf("Todo description omits host ownership: %q", definition.Description)
 	}
+	for _, fragment := range []string{"Reconcile later user guidance before acting", "append each distinct added deliverable", "cancel withdrawn open work", "remove only an explicitly erased non-current item"} {
+		if !strings.Contains(definition.Description, fragment) {
+			t.Fatalf("Todo description omits dynamic guidance contract %q: %q", fragment, definition.Description)
+		}
+	}
 	for _, required := range definition.InputSchema.Required {
 		if required == "op" {
 			t.Fatal("Todo init schema still requires the inferred op discriminator")
 		}
+	}
+}
+
+func TestTodoGuidanceOperationsAppendAndCancelDurably(t *testing.T) {
+	todo := session.TodoList{Phases: []session.TodoPhase{{
+		ID: "repair", Title: "Repair", Items: []session.TodoItem{
+			{ID: "current", Content: "Fix original defect", Status: session.TodoInProgress},
+			{ID: "verify", Content: "Verify original defect", Status: session.TodoPending},
+		},
+	}}}
+
+	if err := applyTodoOp(&todo, todoInput{Op: "append", PhaseID: "repair", Content: "Implement newly guided behavior"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := todo.Phases[0].Items[2]; got.Content != "Implement newly guided behavior" || got.Status != session.TodoPending {
+		t.Fatalf("guided item = %+v", got)
+	}
+	if err := applyTodoOp(&todo, todoInput{Op: "cancel", ItemID: "current"}); err != nil {
+		t.Fatal(err)
+	}
+	if todo.Phases[0].Items[0].Status != session.TodoCancelled || todo.Phases[0].Items[1].Status != session.TodoInProgress {
+		t.Fatalf("cancelled guidance did not advance Todo: %+v", todo)
 	}
 }
 
@@ -310,5 +337,76 @@ func TestCompactRejectsWhenContextArchivingIsDisabled(t *testing.T) {
 
 	if err := service.ExecuteAction(ctx, Action{Kind: ActionCompact, Target: "session-1"}); !errors.Is(err, ErrContextArchivingDisabled) {
 		t.Fatalf("disabled compact error = %v", err)
+	}
+}
+
+func TestTodoDefinitionGuidesLocalizedOutcomeLabelsForInitAndAppend(t *testing.T) {
+	definition := (&todoDriver{}).Definition()
+	phase := definition.InputSchema.Properties["phases"].Items
+	item := phase.Properties["items"].Items
+	for name, schema := range map[string]tool.Schema{
+		"init item":   item.Properties["content"],
+		"append item": definition.InputSchema.Properties["content"],
+	} {
+		for _, want := range []string{"current user message language", "not execution instructions", "do not paste shell commands", "核对修改并运行相关测试"} {
+			if !strings.Contains(schema.Description, want) {
+				t.Errorf("%s is missing label guidance %q", name, want)
+			}
+		}
+	}
+	if !strings.Contains(phase.Properties["title"].Description, "current user message language") {
+		t.Fatal("phase title must follow the user's language")
+	}
+}
+
+func TestFinalTodoCompletionWaitsForVerification(t *testing.T) {
+	ctx := context.Background()
+	db, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "completion.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(ctx)
+	sessions := session.NewService(db.DB(), db.Blobs())
+	if _, err := sessions.Ensure(ctx, session.Session{ID: "s"}); err != nil {
+		t.Fatal(err)
+	}
+	checked := 0
+	ready := false
+	driver := &todoDriver{sessionID: "s", store: sessions, beforeComplete: func(context.Context) error {
+		checked++
+		if !ready {
+			return errors.New("verification still missing")
+		}
+		return nil
+	}}
+	result, _ := driver.Execute(ctx, tool.Call{ID: "init", Name: "todo", Arguments: json.RawMessage(`{"op":"init","goal":"ship","phases":[{"title":"Work","items":[{"content":"implement"},{"content":"verify"}]}]}`)}, nil)
+	if result.IsError {
+		t.Fatal(result.Content)
+	}
+	done := func() tool.Result {
+		todo, _ := sessions.LoadTodo(ctx, "s")
+		items := incompleteTodoItems(todo)
+		args, _ := json.Marshal(map[string]any{"op": "done", "expected_revision": todo.Revision, "item_id": items[0].ID})
+		result, _ := driver.Execute(ctx, tool.Call{ID: "done", Name: "todo", Arguments: args}, nil)
+		return result
+	}
+	if result := done(); result.IsError || checked != 0 {
+		t.Fatalf("early item: %+v checks=%d", result, checked)
+	}
+	before, _ := sessions.LoadTodo(ctx, "s")
+	if result := done(); !result.IsError {
+		t.Fatal("final item completed without verification")
+	}
+	after, _ := sessions.LoadTodo(ctx, "s")
+	if after.Revision != before.Revision || len(incompleteTodoItems(after)) != 1 {
+		t.Fatal("failed verification mutated Todo")
+	}
+	ready = true
+	if result := done(); result.IsError {
+		t.Fatal(result.Content)
+	}
+	after, _ = sessions.LoadTodo(ctx, "s")
+	if len(incompleteTodoItems(after)) != 0 || checked != 2 {
+		t.Fatal("verified final item did not complete")
 	}
 }

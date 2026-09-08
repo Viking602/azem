@@ -30,8 +30,80 @@ import (
 // truncated turn as a normal completed answer.
 var errOutputTruncated = errors.New("model output reached the token limit before finishing")
 
-func (s *Service) providerStreamSink(sessionID, runID, providerID, modelID, reasoning, transport string) hyagent.Sink {
+func (s *Service) providerStreamSink(sessionID, runID, providerID, modelID, reasoning, transport string) *providerStreamSink {
 	return s.providerStreamSinkWithFacts(sessionID, runID, providerID, modelID, reasoning, transport, false)
+}
+
+// providerStreamSink keeps terminal assistant text private until the Engine has
+// applied all output guardrails. Commentary, thinking, and tool activity remain
+// live; PublishAccepted is the only path that publishes a successful answer.
+type providerStreamSink struct {
+	service     *Service
+	timeline    *durableToolTimeline
+	commentary  durableCommentaryCollector
+	unphased    strings.Builder
+	providerID  string
+	modelID     string
+	reasoning   string
+	transport   string
+	factMetered bool
+	published   bool
+}
+
+func (p *providerStreamSink) flushUnphasedCommentary(ctx context.Context) error {
+	if p.unphased.Len() == 0 {
+		return nil
+	}
+	text := p.unphased.String()
+	p.unphased.Reset()
+	p.commentary.append(text)
+	if !p.service.emit(ctx, Event{
+		Kind: EventTextDelta, SessionID: p.commentary.sessionID, RunID: p.commentary.runID,
+		State: "streaming", Text: text, TextPhase: string(hyprovider.TextPhaseCommentary),
+	}) {
+		return eventDeliveryError(ctx)
+	}
+	return nil
+}
+
+// PublishAccepted publishes the final result only after Engine execution has
+// returned successfully, which means every configured output guardrail has
+// allowed (or replaced) it.
+func (p *providerStreamSink) PublishAccepted(ctx context.Context, text string) error {
+	if p == nil || p.published || strings.TrimSpace(text) == "" {
+		return nil
+	}
+	p.published = true
+	if !p.service.emit(ctx, Event{
+		Kind: EventTextDelta, SessionID: p.commentary.sessionID, RunID: p.commentary.runID,
+		State: "streaming", Text: text, TextPhase: string(hyprovider.TextPhaseFinalAnswer),
+	}) {
+		return eventDeliveryError(ctx)
+	}
+	return nil
+}
+
+// PublishFailedPartial preserves the existing provider-error behavior without
+// presenting the text as a successful answer. It is intentionally never used
+// for output-guardrail rejection or cancellation.
+func (p *providerStreamSink) PublishFailedPartial(ctx context.Context, text string) error {
+	if p == nil || p.published || strings.TrimSpace(text) == "" {
+		return nil
+	}
+	p.published = true
+	if !p.service.emit(ctx, Event{
+		Kind: EventTextDelta, SessionID: p.commentary.sessionID, RunID: p.commentary.runID,
+		State: "failed", Text: text, TextPhase: string(hyprovider.TextPhaseFinalAnswer),
+	}) {
+		return eventDeliveryError(ctx)
+	}
+	return nil
+}
+
+func (p *providerStreamSink) discardAttempt() {
+	if p != nil {
+		p.unphased.Reset()
+	}
 }
 
 // sanitizeFinalAnswerText drops internal host context that Venat may pick up as
@@ -49,177 +121,194 @@ func sanitizeFinalAnswerText(text string) string {
 	return text
 }
 
-func (s *Service) providerStreamSinkWithFacts(sessionID, runID, providerID, modelID, reasoning, transport string, factMetered bool) hyagent.Sink {
+func (s *Service) providerStreamSinkWithFacts(sessionID, runID, providerID, modelID, reasoning, transport string, factMetered bool) *providerStreamSink {
 	timeline := newDurableToolTimeline(s.sessions, s.cfg.Workspace.Root, sessionID, runID)
-	commentary := durableCommentaryCollector{
-		store: s.sessions, tools: timeline, sessionID: sessionID, runID: runID,
+	return &providerStreamSink{
+		service:     s,
+		timeline:    timeline,
+		providerID:  providerID,
+		modelID:     modelID,
+		reasoning:   reasoning,
+		transport:   transport,
+		factMetered: factMetered,
+		commentary: durableCommentaryCollector{
+			store: s.sessions, tools: timeline, sessionID: sessionID, runID: runID,
+		},
 	}
-	return hyagent.SinkFunc(func(ctx context.Context, frame hyagent.Frame) error {
-		data := map[string]string{}
-		switch frame.Kind {
-		case hyagent.FrameText:
-			if frame.TextPhase == hyprovider.TextPhaseCommentary || frame.TextPhase == "" {
-				commentary.append(frame.Text)
-			} else if err := commentary.flush(ctx); err != nil {
-				return err
-			}
-			// Anthropic-style transports do not label assistant text phases. Keep the
-			// stable final-answer projection, but mark it unresolved until a tool or
-			// terminal boundary proves whether this turn was commentary or the final
-			// answer. The desktop can then avoid presenting provisional work as final
-			// prose without moving the streaming node between timeline containers.
-			textPhase := frame.TextPhase
-			if textPhase == "" {
-				textPhase = hyprovider.TextPhaseFinalAnswer
-				data["textPhasePending"] = "true"
-			}
+}
+
+func (p *providerStreamSink) Emit(ctx context.Context, frame hyagent.Frame) error {
+	if p == nil {
+		return nil
+	}
+	s := p.service
+	sessionID, runID := p.commentary.sessionID, p.commentary.runID
+	data := map[string]string{}
+	switch frame.Kind {
+	case hyagent.FrameText:
+		switch frame.TextPhase {
+		case hyprovider.TextPhaseCommentary:
+			p.commentary.append(frame.Text)
 			if !s.emit(ctx, Event{
 				Kind: EventTextDelta, SessionID: sessionID, RunID: runID,
-				State: "streaming", Text: frame.Text, TextPhase: string(textPhase), Data: data,
+				State: "streaming", Text: frame.Text, TextPhase: string(hyprovider.TextPhaseCommentary),
 			}) {
 				return eventDeliveryError(ctx)
 			}
-		case hyagent.FrameThinking:
-			if !s.emit(ctx, Event{Kind: EventThinkingDelta, SessionID: sessionID, RunID: runID, State: "streaming", Text: frame.Thinking, Data: data}) {
+		case "":
+			// Unphased text is ambiguous until a tool boundary proves it was
+			// commentary. Keep it private so terminal output cannot bypass the
+			// output guardrails.
+			p.unphased.WriteString(frame.Text)
+		default:
+			// Explicit final-answer text is held until PublishAccepted.
+		}
+	case hyagent.FrameThinking:
+		if !s.emit(ctx, Event{Kind: EventThinkingDelta, SessionID: sessionID, RunID: runID, State: "streaming", Text: frame.Thinking, Data: data}) {
+			return eventDeliveryError(ctx)
+		}
+	case hyagent.FrameToolCall:
+		if frame.ToolCall != nil {
+			if err := p.flushUnphasedCommentary(ctx); err != nil {
+				return err
+			}
+			fallback := p.commentary.ensureToolAnnouncement()
+			if err := p.commentary.flush(ctx); err != nil {
+				return err
+			}
+			if !s.emitSyntheticToolAnnouncement(ctx, sessionID, runID, fallback) {
 				return eventDeliveryError(ctx)
 			}
-		case hyagent.FrameToolCall:
-			if frame.ToolCall != nil {
-				fallback := commentary.ensureToolAnnouncement()
-				if err := commentary.flush(ctx); err != nil {
-					return err
-				}
-				if !s.emitSyntheticToolAnnouncement(ctx, sessionID, runID, fallback) {
-					return eventDeliveryError(ctx)
-				}
-				if err := timeline.start(ctx, *frame.ToolCall); err != nil {
-					return err
-				}
-				data["name"] = frame.ToolCall.Name
-				data["arguments"] = string(frame.ToolCall.Arguments)
-				s.prefetchAutoReview(ctx, sessionID, runID, frame.ToolCall.ID, frame.ToolCall.Name, frame.ToolCall.Arguments)
-				if !s.emit(ctx, Event{Kind: EventToolStarted, SessionID: sessionID, RunID: runID, ToolCallID: frame.ToolCall.ID, State: s.toolStartState(frame.ToolCall.Name), Data: data}) {
-					return eventDeliveryError(ctx)
-				}
+			if err := p.timeline.start(ctx, *frame.ToolCall); err != nil {
+				return err
 			}
-		case hyagent.FrameToolCallDelta:
-			if frame.ToolCallDelta != nil {
-				delta := frame.ToolCallDelta
-				data["name"] = delta.Name
-				data["argumentsDelta"] = delta.ArgumentsDelta
-				if delta.Index != nil {
-					data["index"] = fmt.Sprint(*delta.Index)
-				}
-				if !s.emit(ctx, Event{
-					Kind: EventToolUpdate, SessionID: sessionID, RunID: runID,
-					ToolCallID: delta.ID, State: "arguments", Text: delta.ArgumentsDelta, Data: data,
-				}) {
-					return eventDeliveryError(ctx)
-				}
-			}
-		case hyagent.FrameToolUpdate:
-			if frame.ToolUpdate != nil {
-				update := frame.ToolUpdate
-				for key, value := range update.Data {
-					data[key] = value
-				}
-				if update.OperationID != "" {
-					data["operationId"] = update.OperationID
-				}
-				if update.Sequence != 0 {
-					data["sequence"] = fmt.Sprint(update.Sequence)
-				}
-				if len(update.Parts) > 0 {
-					parts, err := json.Marshal(update.Parts)
-					if err != nil {
-						return fmt.Errorf("encode tool update parts: %w", err)
-					}
-					data["parts"] = boundedUTF8(string(parts), maxToolRecordPreviewBytes)
-					if len(data["parts"]) != len(parts) {
-						data["projection_truncated"] = "true"
-					}
-				}
-				state := string(update.Kind)
-				if update.Kind == tool.UpdateProgress && update.Message == "running" {
-					state = "running"
-				}
-				if !s.emit(ctx, Event{
-					Kind: EventToolUpdate, SessionID: sessionID, RunID: runID,
-					ToolCallID: update.ToolCallID, State: state, Text: update.Message, Data: data,
-				}) {
-					return eventDeliveryError(ctx)
-				}
-			}
-		case hyagent.FrameToolResult:
-			if frame.ToolResult != nil {
-				callArguments, resolvedName, err := timeline.finish(ctx, *frame.ToolResult)
-				if err != nil {
-					return err
-				}
-				content := boundedUTF8(frame.ToolResult.Content, maxToolRecordPreviewBytes)
-				structured := frame.ToolResult.Structured
-				if len(structured) > maxInlineToolRecordBytes {
-					structured = nil
-				}
-				state := "completed"
-				if frame.ToolResult.IsError {
-					state = "failed"
-				}
-				data["name"] = frame.ToolResult.Name
-				if len(structured) > 0 {
-					data["structured"] = string(structured)
-				}
-				if state == "completed" {
-					if summary, ok := toolview.CompletedFileChanges(resolvedName, string(callArguments), string(structured), content); ok {
-						data["fileChange"] = toolview.EncodeSummary(summary)
-					}
-				}
-				if content != frame.ToolResult.Content || len(structured) != len(frame.ToolResult.Structured) {
-					data["projection_truncated"] = "true"
-				}
-				deliveryCtx := context.WithoutCancel(ctx)
-				if !s.emit(deliveryCtx, Event{Kind: EventToolFinished, SessionID: sessionID, RunID: runID, ToolCallID: frame.ToolResult.ToolCallID, State: state, Text: content, Data: data}) {
-					return eventDeliveryError(deliveryCtx)
-				}
-			}
-		case hyagent.FrameDone:
-			if frame.StopReason == hyprovider.StopReasonToolUse {
-				if err := commentary.flush(ctx); err != nil {
-					return err
-				}
-				commentary.endToolBatch()
-			} else {
-				commentary.discard()
-				commentary.endToolBatch()
-			}
-			if factMetered {
-				return nil
-			}
-			if frame.Usage.InputTokens != 0 || frame.Usage.OutputTokens != 0 || frame.Usage.TotalTokens != 0 {
-				usage := map[string]string{
-					"inputTokens": fmt.Sprint(frame.Usage.InputTokens), "cachedInputTokens": fmt.Sprint(frame.Usage.CachedInputTokens),
-					"uncachedInputTokens": fmt.Sprint(max(0, frame.Usage.InputTokens-frame.Usage.CachedInputTokens)),
-					"outputTokens":        fmt.Sprint(frame.Usage.OutputTokens), "totalTokens": fmt.Sprint(frame.Usage.TotalTokens),
-					"cacheStatus": "reported", "requestKind": "main", "provider": providerID, "model": modelID,
-					"reasoning": reasoning, "transport": transport,
-				}
-				if !s.emit(s.ctx, Event{Kind: EventContextUsage, SessionID: sessionID, RunID: runID, State: "reported", Data: usage}) {
-					return eventDeliveryError(ctx)
-				}
-			} else if !factMetered {
-				if !s.emit(s.ctx, Event{Kind: EventContextUsage, SessionID: sessionID, RunID: runID, State: "reported", Data: map[string]string{}}) {
-					return eventDeliveryError(ctx)
-				}
-			}
-		case hyagent.FrameError:
-			commentary.discard()
-			commentary.endToolBatch()
-			if frame.Err != nil {
-				return frame.Err
+			data["name"] = frame.ToolCall.Name
+			data["arguments"] = string(frame.ToolCall.Arguments)
+			s.prefetchAutoReview(ctx, sessionID, runID, frame.ToolCall.ID, frame.ToolCall.Name, frame.ToolCall.Arguments)
+			if !s.emit(ctx, Event{Kind: EventToolStarted, SessionID: sessionID, RunID: runID, ToolCallID: frame.ToolCall.ID, State: s.toolStartState(frame.ToolCall.Name), Data: data}) {
+				return eventDeliveryError(ctx)
 			}
 		}
-		return nil
-	})
+	case hyagent.FrameToolCallDelta:
+		if frame.ToolCallDelta != nil {
+			delta := frame.ToolCallDelta
+			data["name"] = delta.Name
+			data["argumentsDelta"] = delta.ArgumentsDelta
+			if delta.Index != nil {
+				data["index"] = fmt.Sprint(*delta.Index)
+			}
+			if !s.emit(ctx, Event{
+				Kind: EventToolUpdate, SessionID: sessionID, RunID: runID,
+				ToolCallID: delta.ID, State: "arguments", Text: delta.ArgumentsDelta, Data: data,
+			}) {
+				return eventDeliveryError(ctx)
+			}
+		}
+	case hyagent.FrameToolUpdate:
+		if frame.ToolUpdate != nil {
+			update := frame.ToolUpdate
+			for key, value := range update.Data {
+				data[key] = value
+			}
+			if update.OperationID != "" {
+				data["operationId"] = update.OperationID
+			}
+			if update.Sequence != 0 {
+				data["sequence"] = fmt.Sprint(update.Sequence)
+			}
+			if len(update.Parts) > 0 {
+				parts, err := json.Marshal(update.Parts)
+				if err != nil {
+					return fmt.Errorf("encode tool update parts: %w", err)
+				}
+				data["parts"] = boundedUTF8(string(parts), maxToolRecordPreviewBytes)
+				if len(data["parts"]) != len(parts) {
+					data["projection_truncated"] = "true"
+				}
+			}
+			state := string(update.Kind)
+			if update.Kind == tool.UpdateProgress && update.Message == "running" {
+				state = "running"
+			}
+			if !s.emit(ctx, Event{
+				Kind: EventToolUpdate, SessionID: sessionID, RunID: runID,
+				ToolCallID: update.ToolCallID, State: state, Text: update.Message, Data: data,
+			}) {
+				return eventDeliveryError(ctx)
+			}
+		}
+	case hyagent.FrameToolResult:
+		if frame.ToolResult != nil {
+			callArguments, resolvedName, err := p.timeline.finish(ctx, *frame.ToolResult)
+			if err != nil {
+				return err
+			}
+			content := boundedUTF8(frame.ToolResult.Content, maxToolRecordPreviewBytes)
+			structured := frame.ToolResult.Structured
+			if len(structured) > maxInlineToolRecordBytes {
+				structured = nil
+			}
+			state := "completed"
+			if frame.ToolResult.IsError {
+				state = "failed"
+			}
+			data["name"] = frame.ToolResult.Name
+			if len(structured) > 0 {
+				data["structured"] = string(structured)
+			}
+			if state == "completed" {
+				if summary, ok := toolview.CompletedFileChanges(resolvedName, string(callArguments), string(structured), content); ok {
+					data["fileChange"] = toolview.EncodeSummary(summary)
+				}
+			}
+			if content != frame.ToolResult.Content || len(structured) != len(frame.ToolResult.Structured) {
+				data["projection_truncated"] = "true"
+			}
+			deliveryCtx := context.WithoutCancel(ctx)
+			if !s.emit(deliveryCtx, Event{Kind: EventToolFinished, SessionID: sessionID, RunID: runID, ToolCallID: frame.ToolResult.ToolCallID, State: state, Text: content, Data: data}) {
+				return eventDeliveryError(deliveryCtx)
+			}
+		}
+	case hyagent.FrameDone:
+		if frame.StopReason == hyprovider.StopReasonToolUse {
+			if err := p.flushUnphasedCommentary(ctx); err != nil {
+				return err
+			}
+			if err := p.commentary.flush(ctx); err != nil {
+				return err
+			}
+			p.commentary.endToolBatch()
+		} else {
+			p.commentary.discard()
+			p.commentary.endToolBatch()
+		}
+		if p.factMetered {
+			return nil
+		}
+		if frame.Usage.InputTokens != 0 || frame.Usage.OutputTokens != 0 || frame.Usage.TotalTokens != 0 {
+			usage := map[string]string{
+				"inputTokens": fmt.Sprint(frame.Usage.InputTokens), "cachedInputTokens": fmt.Sprint(frame.Usage.CachedInputTokens),
+				"uncachedInputTokens": fmt.Sprint(max(0, frame.Usage.InputTokens-frame.Usage.CachedInputTokens)),
+				"outputTokens":        fmt.Sprint(frame.Usage.OutputTokens), "totalTokens": fmt.Sprint(frame.Usage.TotalTokens),
+				"cacheStatus": "reported", "requestKind": "main", "provider": p.providerID, "model": p.modelID,
+				"reasoning": p.reasoning, "transport": p.transport,
+			}
+			if !s.emit(s.ctx, Event{Kind: EventContextUsage, SessionID: sessionID, RunID: runID, State: "reported", Data: usage}) {
+				return eventDeliveryError(ctx)
+			}
+		} else {
+			if !s.emit(s.ctx, Event{Kind: EventContextUsage, SessionID: sessionID, RunID: runID, State: "reported", Data: map[string]string{}}) {
+				return eventDeliveryError(ctx)
+			}
+		}
+	case hyagent.FrameError:
+		p.commentary.discard()
+		p.commentary.endToolBatch()
+		if frame.Err != nil {
+			return frame.Err
+		}
+	}
+	return nil
 }
 
 func (s *Service) emitSyntheticToolAnnouncement(ctx context.Context, sessionID, runID, text string) bool {
@@ -415,6 +504,15 @@ func agentFailureData(failure *hyagent.AgentFailure, result hyagent.Result) map[
 	return data
 }
 
+func outputGuardrailRejected(runErr error, failure *hyagent.AgentFailure) bool {
+	if failure != nil && failure.Kind == hyagent.FailureKindOutputBlocked {
+		return true
+	}
+	var tripwire *hyagent.OutputGuardrailTripwireTriggeredError
+	var retryLimit *hyagent.OutputGuardrailRetryLimitExceededError
+	return errors.As(runErr, &tripwire) || errors.As(runErr, &retryLimit)
+}
+
 func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run *agentservice.Run, engine hyagent.Engine) {
 	defer s.wg.Done()
 	defer s.clearRun(run.RunID)
@@ -435,7 +533,8 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 	var runErr error
 	restartingAttempt := false
 	guardRetryPending := false
-	var uiSink hyagent.Sink = hyagent.SinkFunc(func(context.Context, hyagent.Frame) error { return nil })
+	guardCandidateRejected := false
+	var uiSink *providerStreamSink
 	if request.origin != turnOriginAutoLearn {
 		uiSink = s.providerStreamSinkWithFacts(request.SessionID, run.RunID, request.Provider, request.Model, request.Reasoning, s.providerTransport(request.Provider), s.sessions != nil)
 	}
@@ -447,6 +546,7 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 			scope := "attempt"
 			if guardRetryPending && !restartingAttempt {
 				scope = "output_guard"
+				guardCandidateRejected = true
 			}
 			if !s.emit(ctx, Event{
 				Kind: EventProviderRetry, SessionID: request.SessionID, RunID: run.RunID,
@@ -455,9 +555,11 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 				return eventDeliveryError(ctx)
 			}
 			streamed.Reset()
+			uiSink.discardAttempt()
 			reasoningTrace.discardAttempt()
 			restartingAttempt = false
 			guardRetryPending = false
+			guardCandidateRejected = false
 		}
 		switch frame.Kind {
 		case hyagent.FrameText:
@@ -478,11 +580,19 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 			}
 			turnUsedTool = false
 		case hyagent.FrameError:
+			if guardRetryPending {
+				guardCandidateRejected = true
+				streamed.Reset()
+				uiSink.discardAttempt()
+			}
 			reasoningTrace.discardAttempt()
 			turnUsedTool = false
 			restartingAttempt = true
 		}
-		return uiSink.Emit(ctx, frame)
+		if uiSink != nil {
+			return uiSink.Emit(ctx, frame)
+		}
+		return nil
 	})
 	workerCtx := agentservice.DelegatedApprovalContext(ctx)
 	executionOutcome, runErr = executeMainRunUntilAvailable(ctx, func() (agentservice.ExecutionOutcome, error) {
@@ -500,6 +610,7 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 		agentFailure = result.Failure
 	}
 	finalText := sanitizeFinalAnswerText(finalAnswer.resolve(result.Text))
+	guardRejected := guardCandidateRejected || outputGuardrailRejected(runErr, agentFailure)
 	if errors.Is(runErr, hyagent.ErrBudgetExhausted) && strings.Contains(runErr.Error(), "max tokens") {
 		runErr = fmt.Errorf("%w (increase agents.main.max_tokens in config.yaml for unusually large tasks)", runErr)
 	}
@@ -519,6 +630,11 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 		}
 	}
 	if executionOutcome.State == agentservice.ExecutionSuspended {
+		if runErr != nil && !guardRejected && ctx.Err() == nil && uiSink != nil {
+			// An interrupted physical stream is not an accepted final answer,
+			// but its partial output must remain visible for reconciliation.
+			_ = uiSink.PublishFailedPartial(s.ctx, streamed.String())
+		}
 		state := "suspended"
 		text := ""
 		data := map[string]string{"taskId": run.TaskID}
@@ -557,9 +673,12 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 		if terminalFailure == nil {
 			terminalFailure = agentFailure
 		}
-		content := strings.TrimSpace(streamed.String())
-		if content == "" {
-			content = strings.TrimSpace(finalText)
+		content := ""
+		if !guardRejected {
+			content = strings.TrimSpace(streamed.String())
+			if content == "" {
+				content = strings.TrimSpace(finalText)
+			}
 		}
 		failed := session.Block{
 			Kind: "assistant", RunID: run.RunID, Title: "Azem", Content: content,
@@ -585,6 +704,9 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 		cancel()
 		if err != nil {
 			runErr = fmt.Errorf("%v; persist failed turn: %w", terminalFailure, err)
+		}
+		if !guardRejected && uiSink != nil {
+			_ = uiSink.PublishFailedPartial(s.ctx, content)
 		}
 	}
 	if request.origin != turnOriginAutoLearn && runErr == nil && agentFailure == nil && executionOutcome.State == agentservice.ExecutionCompleted && ctx.Err() == nil && s.sessions != nil &&
@@ -649,7 +771,7 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 		s.observeStop(request.SessionID, run.RunID, hooks.StopFailure, "failed", runErr)
 		s.emitTerminal(ctx, Event{
 			Kind: EventRunFailed, SessionID: request.SessionID, RunID: run.RunID, State: "failed",
-			Text: runErr.Error(), Data: providerFailureData(runErr),
+			Text: errcode.Display(runErr), Data: providerFailureData(runErr),
 		})
 		return
 	}
@@ -660,7 +782,7 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 		s.observeStop(request.SessionID, run.RunID, hooks.StopFailure, "failed", agentFailure)
 		s.emitTerminal(ctx, Event{
 			Kind: EventRunFailed, SessionID: request.SessionID, RunID: run.RunID, State: "failed",
-			Text: agentFailure.Error(), Data: agentFailureData(agentFailure, result),
+			Text: errcode.Display(agentFailure), Data: agentFailureData(agentFailure, result),
 		})
 		return
 	}
@@ -668,6 +790,13 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 		SessionID: request.SessionID, RunID: run.RunID, Goal: request.Prompt, Answer: finalText, Todo: request.Todo,
 	}); err != nil {
 		s.emit(ctx, Event{Kind: EventRecapState, SessionID: request.SessionID, RunID: run.RunID, State: "failed", Text: err.Error()})
+	}
+	if uiSink != nil {
+		if err := uiSink.PublishAccepted(s.ctx, finalText); err != nil {
+			s.observeStop(request.SessionID, run.RunID, hooks.StopFailure, "event_backlog", err)
+			s.emitTerminal(s.ctx, Event{Kind: EventRunFailed, SessionID: request.SessionID, RunID: run.RunID, State: "failed", Text: err.Error()})
+			return
+		}
 	}
 	s.emitTerminal(ctx, Event{Kind: EventRunFinished, SessionID: request.SessionID, RunID: run.RunID, State: "completed"})
 	s.maybeScheduleAutoLearn(request, result.ToolCallsUsed)
@@ -1244,7 +1373,7 @@ func (s *Service) finishProviderTeam(ctx context.Context, sessionID, runID, goal
 		s.observeStop(sessionID, runID, hooks.StopFailure, "failed", err)
 		s.emitTerminal(ctx, Event{
 			Kind: EventRunFailed, SessionID: sessionID, RunID: runID, State: "failed",
-			Text: err.Error(), Data: providerFailureData(err),
+			Text: errcode.Display(err), Data: providerFailureData(err),
 		})
 		return
 	}

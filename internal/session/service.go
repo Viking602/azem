@@ -303,9 +303,10 @@ func (s *Service) SearchHistory(ctx context.Context, sessionID, query string, li
 		FROM history_fts f
 		WHERE history_fts MATCH ? AND f.session_id=? AND (
 			(f.source_type='sequence' AND EXISTS(SELECT 1 FROM session_blocks b WHERE b.session_id=f.session_id
+				AND b.sequence=CAST(substr(f.source_id,10) AS INTEGER)
 				AND (b.kind='user' OR (b.kind='assistant' AND COALESCE(json_extract(b.data,'$.state'),'') IN ('','completed')))
 				AND 'sequence:'||b.sequence=f.source_id)) OR
-			(f.source_type='artifact' AND EXISTS(SELECT 1 FROM context_artifacts a WHERE a.session_id=f.session_id
+			(f.source_type='artifact' AND EXISTS(SELECT 1 FROM context_artifacts a WHERE a.session_id=f.session_id AND a.id=substr(f.source_id,10)
 				AND a.kind NOT LIKE ? AND 'artifact:'||a.id=f.source_id)))
 		ORDER BY bm25(history_fts) LIMIT ?`, match, sessionID, InternalArtifactKindPrefix+"%", limit)
 	if err != nil {
@@ -1078,6 +1079,30 @@ func requireOneSession(result sql.Result, id string) error {
 }
 
 func (s *Service) LoadProjection(ctx context.Context, id string) (Projection, error) {
+	return s.loadProjection(ctx, id, loadProjectionOptions{})
+}
+
+// LoadDisplayProjection returns the durable transcript/tool projection used by
+// session navigation without decoding ModelHistory. Desktop resume and list
+// paint paths never send provider history on the wire, so skipping that blob
+// keeps long-conversation switches off the critical path.
+func (s *Service) LoadDisplayProjection(ctx context.Context, id string) (Projection, error) {
+	return s.loadProjection(ctx, id, loadProjectionOptions{SkipModelHistory: true})
+}
+
+// LoadWorkEvidenceProjection omits provider history and assistant prose, and
+// decodes tool evidence only for the runs being verified.
+func (s *Service) LoadWorkEvidenceProjection(ctx context.Context, id string, runIDs []string) (Projection, error) {
+	return s.loadProjection(ctx, id, loadProjectionOptions{SkipModelHistory: true, UserBlocksOnly: true, ToolRunIDs: runIDs})
+}
+
+type loadProjectionOptions struct {
+	SkipModelHistory bool
+	UserBlocksOnly   bool
+	ToolRunIDs       []string
+}
+
+func (s *Service) loadProjection(ctx context.Context, id string, opts loadProjectionOptions) (Projection, error) {
 	value, err := s.LoadSession(ctx, id)
 	if err != nil {
 		return Projection{}, err
@@ -1086,15 +1111,18 @@ func (s *Service) LoadProjection(ctx context.Context, id string) (Projection, er
 	if err != nil {
 		return Projection{}, fmt.Errorf("load projection: %w", err)
 	}
-	history, err := s.decodeModelHistory(ctx, row.ModelHistory)
-	if err != nil {
-		return Projection{}, fmt.Errorf("decode model history: %w", err)
+	var history ModelHistory
+	if !opts.SkipModelHistory {
+		history, err = s.decodeModelHistory(ctx, row.ModelHistory)
+		if err != nil {
+			return Projection{}, fmt.Errorf("decode model history: %w", err)
+		}
 	}
 	usage, err := DecodeUsage(row.Usage)
 	if err != nil {
 		return Projection{}, err
 	}
-	blocks, err := s.loadSessionBlocks(ctx, s.db, id)
+	blocks, err := s.loadSessionBlocksFiltered(ctx, s.db, id, opts.UserBlocksOnly)
 	if err != nil {
 		return Projection{}, err
 	}
@@ -1102,7 +1130,7 @@ func (s *Service) LoadProjection(ctx context.Context, id string) (Projection, er
 	if err != nil {
 		return Projection{}, err
 	}
-	tools, err := s.ListToolRecords(ctx, id)
+	tools, err := s.listToolRecordsForRuns(ctx, id, opts.ToolRunIDs)
 	if err != nil {
 		return Projection{}, err
 	}
@@ -1444,12 +1472,21 @@ func (s *Service) ActivateArchiveCheckpoint(ctx context.Context, sessionID strin
 }
 
 func (s *Service) loadSessionBlocks(ctx context.Context, queryer dbgen.DBTX, sessionID string) ([]Block, error) {
-	rows, err := dbgen.New(queryer).ListSessionBlocks(ctx, sessionID)
+	return s.loadSessionBlocksFiltered(ctx, queryer, sessionID, false)
+}
+
+func (s *Service) loadSessionBlocksFiltered(ctx context.Context, queryer dbgen.DBTX, sessionID string, usersOnly bool) ([]Block, error) {
+	rows, err := queryer.QueryContext(ctx, `SELECT sequence,data,data_sha256 FROM session_blocks WHERE session_id=? AND (?=0 OR kind='user') ORDER BY sequence`, sessionID, usersOnly)
 	if err != nil {
 		return nil, fmt.Errorf("load session blocks: %w", err)
 	}
-	blocks := make([]Block, 0, len(rows))
-	for _, row := range rows {
+	defer rows.Close()
+	blocks := make([]Block, 0)
+	for rows.Next() {
+		var row dbgen.ListSessionBlocksRow
+		if err := rows.Scan(&row.Sequence, &row.Data, &row.DataSha256); err != nil {
+			return nil, err
+		}
 		payload, err := s.decodeBlockJSON(ctx, row.Data, row.DataSha256)
 		if err != nil {
 			return nil, fmt.Errorf("load session block %d: %w", row.Sequence, err)
@@ -1461,7 +1498,7 @@ func (s *Service) loadSessionBlocks(ctx context.Context, queryer dbgen.DBTX, ses
 		block.Sequence = row.Sequence
 		blocks = append(blocks, block)
 	}
-	return blocks, nil
+	return blocks, rows.Err()
 }
 
 func (s *Service) appendSessionBlock(ctx context.Context, tx *sql.Tx, sessionID string, block Block) (int64, bool, error) {

@@ -15,8 +15,10 @@ import (
 
 const CurrentVersion = 1
 
-var mcpServerNamePattern = regexp.MustCompile(`^[a-z0-9_-]+$`)
-var uiLanguagePattern = regexp.MustCompile(`^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})*$`)
+var (
+	mcpServerNamePattern = regexp.MustCompile(`^[a-z0-9_-]+$`)
+	uiLanguagePattern    = regexp.MustCompile(`^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})*$`)
+)
 
 // ValidUILanguage validates a translation-pack identifier, not a fixed language list.
 func ValidUILanguage(value string) bool {

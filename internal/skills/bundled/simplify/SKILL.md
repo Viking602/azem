@@ -10,4 +10,4 @@ Review only the code relevant to the current change:
 3. Correctness: check boundaries, errors, state transitions, concurrency, and caller expectations.
 4. Efficiency: remove avoidable allocation, repeated work, and overly broad operations.
 
-Fix only issues supported by the code or failing behavior. Preserve unrelated user work. Re-run the smallest verification that proves every fix, then report the fixes and evidence.
+Fix only issues supported by the code or failing behavior and covered by existing repair authorization. In a read-only review, report issues without editing. Preserve unrelated user work. Re-run the smallest verification that proves every fix, then report the fixes and evidence.

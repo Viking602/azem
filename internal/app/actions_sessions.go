@@ -16,16 +16,8 @@ var sessionActionHandlers = map[ActionKind]actionHandler{
 		return s.createSession(ctx, action.Target)
 	},
 	ActionResumeSession: func(s *Service, ctx context.Context, action Action) error {
-		if err := s.sessions.SetUIState(ctx, action.Target, "unread", false); err != nil {
-			return err
-		}
-		if err := s.sessions.SetArchived(ctx, action.Target, false); err != nil {
-			return err
-		}
-		if err := s.emitSession(ctx, action.Target); err != nil {
-			return err
-		}
-		return s.emitSessionList(ctx)
+		_, err := s.ResumeSession(ctx, action.Target)
+		return err
 	},
 	ActionRefreshSession: func(s *Service, ctx context.Context, action Action) error {
 		_, err := s.emitSessionProjection(ctx, action.Target, "refreshed", false)

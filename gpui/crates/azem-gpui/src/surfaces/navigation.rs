@@ -401,10 +401,8 @@ pub(crate) fn sidebar(
                                                 .hover(move |style| style.bg(palette.paper))
                                                 .on_click(cx.listener(move |this, _, _, cx| {
                                                     if active {
-                                                        this.runtime.request(
-                                                            Method::Execute,
-                                                            json!({"kind": "new_session"}),
-                                                        );
+                                                        let id = this.runtime.request(Method::CreateSession, json!({}));
+ this.pending_requests.insert(id, PendingRequest::ResumeSession { sequence: None });
                                                         this.state.navigation.surface =
                                                             Surface::Thread;
                                                         cx.notify();
@@ -515,6 +513,7 @@ pub(crate) fn sidebar(
                                             .border_color(palette.border_strong)
                                             .flex()
                                             .flex_col()
+                                            .gap(px(4.))
                                             .children(
                                                 sessions
                                                     .into_iter()
@@ -588,10 +587,32 @@ pub(crate) fn sidebar(
                                                         cx.notify();
                                                     }),
                                                 )
-                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                .on_click({
+                                                    let optimistic_title = title.clone();
+                                                    cx.listener(move |this, _, _, cx| {
                                                     if active {
+                                                        // Optimistic selection keeps the sidebar
+                                                        // responsive while the durable projection
+                                                        // round-trip completes.
+                                                        this.state.navigation.current_session_id =
+                                                            session_id.clone().into();
+                                                        this.state.navigation.current_title =
+                                                            optimistic_title.clone().into();
+                                                        if let Some(session) = this
+                                                            .state
+                                                            .navigation
+                                                            .sessions
+                                                            .iter_mut()
+                                                            .find(|session| {
+                                                                session.id.as_ref() == session_id
+                                                            })
+                                                        {
+                                                            session.unread = false;
+                                                        }
+                                                        this.state.navigation.surface =
+                                                            Surface::Thread;
                                                         let request_id = this.runtime.request(
-                                                            Method::ResumeSession,
+                                                            Method::SelectSession,
                                                             json!({"sessionId": session_id}),
                                                         );
                                                         this.pending_requests.insert(
@@ -600,8 +621,6 @@ pub(crate) fn sidebar(
                                                                 sequence: None,
                                                             },
                                                         );
-                                                        this.state.navigation.surface =
-                                                            Surface::Thread;
                                                         cx.notify();
                                                     } else {
                                                         this.switch_workspace(
@@ -612,7 +631,8 @@ pub(crate) fn sidebar(
                                                             cx,
                                                         );
                                                     }
-                                                }))
+                                                })
+                                                })
                                                 .child(
                                                     div()
                                                         .flex_1()
@@ -969,7 +989,7 @@ pub(crate) fn session_rename_modal(
                         .child(locale.text("sidebar.saveRename")),
                 ),
         );
-    div()
+    let overlay = div()
         .id("session-rename-backdrop")
         .absolute()
         .occlude()
@@ -978,8 +998,8 @@ pub(crate) fn session_rename_modal(
         .flex()
         .items_center()
         .justify_center()
-        .child(dialog)
-        .into_any_element()
+        .child(dialog);
+    popup_transition(overlay, this.popup_motion("rename"))
 }
 
 pub(crate) fn search_surface(
@@ -987,6 +1007,7 @@ pub(crate) fn search_surface(
     input: Entity<TextInput>,
     palette: ThemePalette,
     labels: Labels,
+    motion: crate::PopupMotion,
     cx: &mut Context<AzemWindow>,
 ) -> gpui::AnyElement {
     let locale = Locale::resolve(&state.settings.language);
@@ -1023,7 +1044,7 @@ pub(crate) fn search_surface(
             "terminal",
         ),
     ];
-    div()
+    let overlay = div()
         .id("search-surface")
         .role(Role::Search)
         .aria_label(labels.search)
@@ -1124,9 +1145,15 @@ pub(crate) fn search_surface(
                                             .on_click(cx.listener(move |this, _, window, cx| {
                                                 match action {
                                                     "new" => {
-                                                        this.runtime.request(
-                                                            Method::Execute,
-                                                            json!({"kind": "new_session"}),
+                                                        let id = this.runtime.request(
+                                                            Method::CreateSession,
+                                                            json!({}),
+                                                        );
+                                                        this.pending_requests.insert(
+                                                            id,
+                                                            PendingRequest::ResumeSession {
+                                                                sequence: None,
+                                                            },
                                                         );
                                                         this.state.navigation.surface =
                                                             Surface::Thread;
@@ -1238,7 +1265,7 @@ pub(crate) fn search_surface(
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         if workspace.is_empty() || workspace == current_workspace {
                                             let request_id = this.runtime.request(
-                                                Method::ResumeSession,
+                                                Method::SelectSession,
                                                 json!({"sessionId": session_id}),
                                             );
                                             this.pending_requests.insert(
@@ -1291,6 +1318,6 @@ pub(crate) fn search_surface(
                         .child(locale.text("ui.navigate"))
                         .child(locale.text("ui.escClose")),
                 ),
-        )
-        .into_any_element()
+        );
+    popup_transition(overlay, motion)
 }

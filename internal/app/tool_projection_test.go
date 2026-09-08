@@ -2,6 +2,9 @@ package app
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/Viking602/azem/internal/session"
@@ -70,5 +73,47 @@ func TestReplaceAndDeleteProduceDurableFileObservations(t *testing.T) {
 	)
 	if len(deleted) != 1 || deleted[0].Path != "gone.txt" || deleted[0].Operation != "delete" {
 		t.Fatalf("delete observations = %+v", deleted)
+	}
+}
+
+func TestObservationPathInWorkspaceRelativizesAbsoluteAndDropsEscapes(t *testing.T) {
+	root := t.TempDir()
+	absolute := filepath.Join(root, "gpui", "src", "main.rs")
+	if err := os.MkdirAll(filepath.Dir(absolute), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(absolute, []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	relative, ok := observationPathInWorkspace(root, absolute)
+	if !ok || relative != "gpui/src/main.rs" {
+		t.Fatalf("absolute under workspace = %q ok=%v", relative, ok)
+	}
+	if path, ok := observationPathInWorkspace(root, "gpui/src/main.rs"); !ok || path != "gpui/src/main.rs" {
+		t.Fatalf("relative path = %q ok=%v", path, ok)
+	}
+	if _, ok := observationPathInWorkspace(root, "../outside.go"); ok {
+		t.Fatal("parent escape must be rejected")
+	}
+	if _, ok := observationPathInWorkspace(root, filepath.Join(t.TempDir(), "foreign.go")); ok {
+		t.Fatal("foreign absolute path must be rejected")
+	}
+}
+
+func TestFileObservationsRelativizeAbsolutePathsBeforeEvidence(t *testing.T) {
+	root := t.TempDir()
+	absolute := filepath.Join(root, "note.txt")
+	if err := os.WriteFile(absolute, []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	timeline := &durableToolTimeline{workspace: root}
+	observations := timeline.fileObservations(
+		"coding.read_file",
+		json.RawMessage(`{"path":`+strconv.Quote(absolute)+`}`),
+		nil,
+		true,
+	)
+	if len(observations) != 1 || observations[0].Path != "note.txt" || observations[0].SHA256 == "" || observations[0].ErrorCode != "" {
+		t.Fatalf("observations = %+v", observations)
 	}
 }

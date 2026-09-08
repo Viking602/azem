@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/Viking602/azem/internal/agentruntime"
 	hyagent "github.com/Viking602/venat/agent"
@@ -57,7 +58,6 @@ type providerHost interface {
 
 	// Plan and historical context.
 	ApprovedPlanContext(ctx context.Context, sessionID, planID string) (string, error)
-	LoadTurnHistoricalContext(ctx context.Context, sessionID, query string, checkpointBoundary *int64) string
 
 	// Approvals and interactive input.
 	AwaitApproval(ctx context.Context, sessionID, agentID, agentType string, run *agentservice.Run, call tool.Call, pending agentservice.PendingApproval) (approvalResolution, error)
@@ -143,8 +143,15 @@ func (s *Service) ClaimActiveRun(runID, sessionID string, cancel context.CancelF
 	}
 	s.activeEnd = cancel
 	s.activeCancelIntent = ""
+	s.activeRunProjection = RunProjection{
+		SessionID: sessionID, RunID: runID, State: "running", Activity: RunActivityRecovering,
+		StartedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(), LastActivityAt: time.Now().UTC(),
+		ActiveOperations: []ActiveOperation{}, AllowedActions: []string{"stop"},
+	}
 	if openGuidance {
 		s.guidanceOpen = true
+		s.activeRunProjection.GuidanceOpen = true
+		s.activeRunProjection.AllowedActions = appendMissing(s.activeRunProjection.AllowedActions, "guide")
 	}
 	return nil
 }
@@ -202,10 +209,6 @@ func (s *Service) EnqueuePeerControl(sessionID, runID, from, body, replyTo strin
 
 func (s *Service) ApprovedPlanContext(ctx context.Context, sessionID, planID string) (string, error) {
 	return s.approvedPlanContext(ctx, sessionID, planID)
-}
-
-func (s *Service) LoadTurnHistoricalContext(ctx context.Context, sessionID, query string, checkpointBoundary *int64) string {
-	return s.loadTurnHistoricalContext(ctx, sessionID, query, checkpointBoundary)
 }
 
 func (s *Service) AwaitApproval(ctx context.Context, sessionID, agentID, agentType string, run *agentservice.Run, call tool.Call, pending agentservice.PendingApproval) (approvalResolution, error) {

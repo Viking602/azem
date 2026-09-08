@@ -4,18 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	hyskill "github.com/Viking602/venat/skill"
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Viking602/azem/internal/app"
 	"github.com/Viking602/azem/internal/config"
+	"github.com/Viking602/azem/internal/desktop"
+	"github.com/Viking602/azem/internal/desktopipc"
 	"github.com/Viking602/azem/internal/i18n"
 	"github.com/Viking602/azem/internal/provider/catalog"
 	"github.com/Viking602/azem/internal/session"
@@ -248,11 +248,6 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.transcriptTop = min(currentMaxOffset, max(0, m.transcriptTop+currentMaxOffset-previousMaxOffset))
 		}
 		commands := []tea.Cmd{waitForAppEvent(m.runtime)}
-		if msg.Event.Kind == app.EventProjectionResync && msg.Event.SessionID != "" {
-			commands = append(commands, executeAction(context.Background(), m.runtime, Action{
-				Kind: ActionRefreshSession, Target: msg.Event.SessionID, SessionID: msg.Event.SessionID,
-			}))
-		}
 		if (m.isRunning() || m.hasRunningHooks() || m.hasRunningAgents()) && !m.animationActive {
 			m.animationActive = true
 			commands = append(commands, nextRunFeedbackFrame(m.reducedMotion))
@@ -270,6 +265,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nextRunFeedbackFrame(m.reducedMotion)
 	case startTurnResultMsg:
 		if msg.Err != nil {
+			m.cancelWhenRunStarts = false
 			if errors.Is(msg.Err, context.Canceled) && (m.status == "Cancelling" || m.status == "Cancelled") {
 				m.status = "Cancelled"
 				m.runID = ""
@@ -279,27 +275,72 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "Ready"
 			m.runID = ""
 			m.errorBanner = msg.Err.Error()
-			m.transcript = append(m.transcript, Block{Kind: BlockError, Title: m.tr("error.run_rejected"), Content: msg.Err.Error(), State: "failed"})
+			if msg.Text != "" && m.composer.Value() == "" {
+				m.composer.SetValue(msg.Text)
+				m.pendingImages = append([]session.Attachment(nil), msg.Attachments...)
+			}
 		} else if (m.status == "Starting" || m.status == "Running" || m.status == "Cancelling") && (m.runID == "" || m.runID == msg.RunID) {
 			m.runID = msg.RunID
+		}
+		if m.cancelWhenRunStarts && msg.RunID != "" {
+			m.cancelWhenRunStarts = false
+			m.runID = msg.RunID
+			m.status = "Cancelling"
+			return m, cancelTurn(m.runtime, m.sessionID, msg.RunID, false)
 		}
 		return m, nil
 	case guidanceResultMsg:
 		if msg.Err != nil {
 			m.errorBanner = msg.Err.Error()
-			m.transcript = append(m.transcript, Block{Kind: BlockError, Title: m.tr("error.guidance_rejected"), Content: msg.Err.Error(), State: "failed"})
 			if m.composer.Value() == "" {
 				m.composer.SetValue(msg.Text)
+				m.pendingImages = append([]session.Attachment(nil), msg.Attachments...)
 			}
-		} else {
-			m.transcript = append(m.transcript, Block{Kind: BlockUser, RunID: msg.RunID, Title: m.tr("block.guidance"), Content: msg.Text, State: "guidance"})
 		}
 		return m, nil
 	case cancelResultMsg:
-		if !msg.Cancelled && m.status == "Cancelling" {
-			m.status = "Ready"
-			m.runID = ""
+		if msg.Err != nil {
+			m.errorBanner = msg.Err.Error()
+			if m.status == "Cancelling" {
+				m.status = "Running"
+			}
+		} else if !msg.Cancelled {
+			m.errorBanner = "run cancellation was not accepted"
+			if m.status == "Cancelling" {
+				m.status = "Running"
+			}
 		}
+		return m, nil
+	case sessionSelectedMsg:
+		if msg.Err != nil {
+			m.errorBanner = msg.Err.Error()
+			return m, nil
+		}
+		m.ApplyReconnectSnapshot(msg.Snapshot)
+		_ = m.closeOverlay()
+		return m, nil
+	case promptQueueMutationResultMsg:
+		if msg.Queue.SessionID != "" {
+			if m.promptQueues == nil {
+				m.promptQueues = make(map[string]session.PromptQueueV1)
+			}
+			m.promptQueues[msg.Queue.SessionID] = msg.Queue.Clone()
+		}
+		if msg.Err != nil {
+			m.errorBanner = msg.Err.Error()
+			if msg.Text != "" && m.composer.Value() == "" {
+				m.composer.SetValue(msg.Text)
+				m.pendingImages = append([]session.Attachment(nil), msg.Attachments...)
+				m.queueEditItemID = msg.EditItemID
+			}
+			return m, nil
+		}
+		if m.promptQueues == nil {
+			m.promptQueues = make(map[string]session.PromptQueueV1)
+		}
+		m.promptQueues[msg.Queue.SessionID] = msg.Queue.Clone()
+		m.queueEditItemID = ""
+		m.errorBanner = ""
 		return m, nil
 	case actionResultMsg:
 		if m.actionCancel != nil {
@@ -646,6 +687,16 @@ func (m AppModel) handleMouseClick(mouse tea.Mouse) (tea.Model, tea.Cmd) {
 	case uiClickReasoning:
 		m.openOverlay(OverlayReasoning)
 		return m, nil
+	case uiClickDelivery:
+		if !m.mutationsEnabled() {
+			m.errorBanner = "Connection is not ready"
+			return m, nil
+		}
+		mode := "guide"
+		if m.deliveryMode == "guide" {
+			mode = "queue"
+		}
+		return m.beginAction(Action{Kind: ActionSetQueueMode, Target: mode})
 	case uiClickApprovalMode:
 		return m.cycleApprovalMode()
 	}
@@ -1086,6 +1137,9 @@ func (m AppModel) updateSettingsSearchKeyMsg(msg tea.KeyPressMsg) (tea.Model, te
 }
 
 func (m AppModel) updateOverlayKey(key string) (tea.Model, tea.Cmd) {
+	if m.overlay == OverlayQueue {
+		return m.updateQueueOverlayKey(key)
+	}
 	if m.overlay == OverlayAgentDetail {
 		switch key {
 		case "esc":
@@ -1476,7 +1530,7 @@ func (m AppModel) overlayOptionCount() int {
 	case OverlayCommand:
 		return len(commandPaletteOptions)
 	case OverlayProvider:
-		return 3
+		return len(m.providerIDs(m.overlayPurpose == "login"))
 	case OverlayModel:
 		return len(m.modelPickerEntries())
 	case OverlayModelRoutes:
@@ -1495,6 +1549,8 @@ func (m AppModel) overlayOptionCount() int {
 		return len(m.reasoningLevels())
 	case OverlaySessions:
 		return len(m.sessions)
+	case OverlayQueue:
+		return len(m.currentPromptQueue().Items)
 	case OverlayBranches:
 		return len(m.branches)
 	case OverlayBranchConfirm:
@@ -1541,7 +1597,7 @@ func (m AppModel) activateOverlayOption() (tea.Model, tea.Cmd) {
 	case OverlayCommand:
 		return m.activatePaletteOption()
 	case OverlayProvider:
-		providers := []string{"chatgpt", "grok", "cursor"}
+		providers := m.providerIDs(m.overlayPurpose == "login")
 		if m.overlayCursor >= len(providers) {
 			return m, nil
 		}
@@ -1630,7 +1686,11 @@ func (m AppModel) activateOverlayOption() (tea.Model, tea.Cmd) {
 		}
 	case OverlaySessions:
 		if m.overlayCursor < len(m.sessions) {
-			return m.beginAction(Action{Kind: ActionResumeSession, Target: m.sessions[m.overlayCursor].ID})
+			if !m.mutationsEnabled() {
+				m.errorBanner = "Connection is not ready"
+				return m, nil
+			}
+			return m, selectSession(m.runtime, m.sessions[m.overlayCursor].ID)
 		}
 	case OverlaySkills:
 		if m.overlayCursor < 0 || m.overlayCursor >= len(m.skills) {
@@ -1726,10 +1786,14 @@ func (m AppModel) activateOverlayOption() (tea.Model, tea.Cmd) {
 		if m.overlayCursor < 0 || m.overlayCursor > 1 {
 			return m, nil
 		}
+		if !m.mutationsEnabled() {
+			m.errorBanner = "Connection is not ready; stop is temporarily unavailable."
+			return m, nil
+		}
 		children := m.overlayCursor == 1
 		m.overlay = OverlayNone
 		m.status = "Cancelling"
-		return m, cancelTurn(m.runtime, children)
+		return m, cancelTurn(m.runtime, m.sessionID, m.runID, children)
 	case OverlayAgents:
 		if m.overlayCursor >= 0 && m.overlayCursor < len(m.agents) {
 			return m.beginAction(Action{Kind: ActionInspectAgent, Target: m.agents[m.overlayCursor].ID})
@@ -1874,14 +1938,32 @@ func (m AppModel) activatePaletteOption() (tea.Model, tea.Cmd) {
 }
 
 func (m AppModel) requestTurnCancellation() (tea.Model, tea.Cmd) {
+	if !m.mutationsEnabled() {
+		m.errorBanner = "Connection is not ready; stop is temporarily unavailable."
+		return m, nil
+	}
+	hasChildren := hasActiveChildren(m.runtime)
+	if run, exists := m.currentRunProjection(); exists {
+		if !runAllowsAction(run, "stop") {
+			m.errorBanner = "The active run cannot be stopped in its current state."
+			return m, nil
+		}
+		m.runID = run.RunID
+		hasChildren = run.HasActiveChildren
+	}
+	if m.runID == "" && m.status == "Starting" {
+		m.cancelWhenRunStarts = true
+		m.status = "Cancelling"
+		return m, nil
+	}
 	m.overlay = OverlayNone
-	if hasActiveChildren(m.runtime) {
+	if hasChildren {
 		m.status = "Choose cancellation scope"
 		m.openOverlay(OverlayCancel)
 		return m, nil
 	}
 	m.status = "Cancelling"
-	return m, cancelTurn(m.runtime, false)
+	return m, cancelTurn(m.runtime, m.sessionID, m.runID, false)
 }
 
 func (m AppModel) beginShutdown() (tea.Model, tea.Cmd) {
@@ -1932,6 +2014,8 @@ func (m *AppModel) applyActionResult(action Action) {
 	switch action.Kind {
 	case ActionSetApprovalMode:
 		m.approvalMode = ApprovalMode(action.Target)
+	case ActionSetQueueMode:
+		m.deliveryMode = action.Target
 	case ActionSetLanguage:
 		if err := m.SetLanguage(action.Target); err != nil {
 			m.errorBanner = err.Error()
@@ -2136,20 +2220,46 @@ func (m AppModel) submit() (tea.Model, tea.Cmd) {
 		m.invalidateTranscriptLayout()
 		return m, nil
 	}
-	if m.canGuideActiveRun() {
-		if len(images) > 0 {
-			m.errorBanner = m.tr("error.guidance_images")
+	if !m.mutationsEnabled() {
+		m.errorBanner = "Connection is not ready; the draft is still editable."
+		return m, nil
+	}
+	queue := m.currentPromptQueue()
+	if m.queueEditItemID != "" {
+		itemID := m.queueEditItemID
+		m.composer.Reset()
+		m.commandCursor = 0
+		m.clearPendingImages()
+		m.errorBanner = ""
+		return m, mutatePromptQueue(m.runtime, app.PromptQueueMutation{
+			Operation: app.PromptQueueUpdate, SessionID: m.sessionID, ExpectedRevision: queue.Revision,
+			ItemID: itemID, Item: session.QueuedPromptV1{ID: itemID, Text: input, Attachments: images},
+		}, input, images, itemID)
+	}
+	currentRun, currentRunning := m.currentRunProjection()
+	if !currentRunning && len(m.runs) == 0 && m.isRunning() {
+		currentRun = app.RunProjection{SessionID: m.sessionID, RunID: m.runID, GuidanceOpen: m.canGuideActiveRun(), AllowedActions: []string{"guide"}}
+		currentRunning = true
+	}
+	_, globalRunning := m.globalRunProjection()
+	if currentRunning && m.deliveryMode == "guide" {
+		if !currentRun.GuidanceOpen || !runAllowsAction(currentRun, "guide") {
+			m.errorBanner = "The active run is no longer accepting guidance."
 			return m, nil
 		}
 		m.composer.Reset()
 		m.commandCursor = 0
+		m.clearPendingImages()
 		m.errorBanner = ""
-		return m, guideActiveTurn(m.runtime, m.sessionID, m.runID, input)
+		return m, guideActiveTurn(m.runtime, m.sessionID, currentRun.RunID, input, images)
 	}
-	if m.isRunning() {
-		return m, nil
+	if currentRunning || globalRunning {
+		m.composer.Reset()
+		m.commandCursor = 0
+		m.clearPendingImages()
+		m.errorBanner = ""
+		return m, enqueuePrompt(m.runtime, queue, input, images)
 	}
-	m.transcript = append(m.transcript, Block{Kind: BlockUser, Title: m.tr("block.you"), Content: formatUserContent(input, images), Attachments: images})
 	m.composer.Reset()
 	m.commandCursor = 0
 	m.clearPendingImages()
@@ -2163,20 +2273,16 @@ func (m AppModel) submit() (tea.Model, tea.Cmd) {
 }
 
 type guidanceResultMsg struct {
-	RunID string
-	Text  string
-	Err   error
+	RunID       string
+	Text        string
+	Attachments []session.Attachment
+	Err         error
 }
 
-func guideActiveTurn(runtime Runtime, sessionID, runID, text string) tea.Cmd {
+func guideActiveTurn(runtime Runtime, sessionID, runID, text string, attachments []session.Attachment) tea.Cmd {
 	return func() tea.Msg {
-		guided, ok := runtime.(interface {
-			GuideActiveTurn(string, string, string) error
-		})
-		if !ok {
-			return guidanceResultMsg{RunID: runID, Text: text, Err: fmt.Errorf("active-run guidance is unsupported")}
-		}
-		return guidanceResultMsg{RunID: runID, Text: text, Err: guided.GuideActiveTurn(sessionID, runID, text)}
+		err := runtime.GuideActiveTurnWithAttachments(sessionID, runID, text, attachments)
+		return guidanceResultMsg{RunID: runID, Text: text, Attachments: append([]session.Attachment(nil), attachments...), Err: err}
 	}
 }
 
@@ -2184,11 +2290,23 @@ func (m AppModel) canGuideActiveRun() bool {
 	if m.agentMode != "single" || m.runID == "" {
 		return false
 	}
+	if run, exists := m.currentRunProjection(); exists {
+		return run.GuidanceOpen && runAllowsAction(run, "guide")
+	}
 	return m.status == "Running" || m.status == "Awaiting approval" || m.status == "Reviewing approval"
 }
 
 func (m AppModel) executeCommand(command Command) (tea.Model, tea.Cmd) {
 	switch command.Name {
+	case "delivery":
+		if len(command.Args) != 1 || (command.Args[0] != "queue" && command.Args[0] != "guide") {
+			m.errorBanner = "usage: /delivery queue|guide"
+			return m, nil
+		}
+		return m.beginAction(Action{Kind: ActionSetQueueMode, Target: command.Args[0]})
+	case "queue":
+		m.openOverlay(OverlayQueue)
+		return m, nil
 	case "settings":
 		m.overlayPurpose = "settings"
 		return m.beginAction(Action{Kind: ActionListModelRoutes})
@@ -2293,7 +2411,7 @@ func (m AppModel) executeCommand(command Command) (tea.Model, tea.Cmd) {
 			break
 		}
 		provider := strings.ToLower(command.Args[0])
-		if !config.IsSubscriptionProvider(provider) {
+		if !m.providerAvailable(provider) {
 			m.errorBanner = m.tr("provider.invalid")
 			break
 		}
@@ -2399,7 +2517,7 @@ func (m AppModel) executeCommand(command Command) (tea.Model, tea.Cmd) {
 		}
 		return m, runSessionOperation(m.runtime, m.sessionID, command, m.workspace)
 	case "collab":
-		if len(command.Args) > 0 && command.Args[0] == "stop" {
+		if len(command.Args) > 0 && command.Args[0] == "stop" && (m.collabHost != nil || m.collabGuest != nil) {
 			if m.collabHost != nil {
 				m.collabHost.Stop("stopped by host")
 			}
@@ -2673,32 +2791,18 @@ func (m AppModel) invokeExpandedSkill(name, args string, images []session.Attach
 		m.errorBanner = m.tr("error.skill_single_mode")
 		return m, nil
 	}
-	var entry *SkillCatalogView
+	available := false
 	for index := range m.skills {
 		if m.skills[index].Name == name && !m.skills[index].Disabled {
-			entry = &m.skills[index]
+			available = true
 			break
 		}
 	}
-	if entry == nil {
+	if !available {
 		m.errorBanner = "unknown skill: " + name
 		return m, nil
 	}
-	content, err := os.ReadFile(entry.SourcePath)
-	if err != nil {
-		m.errorBanner = fmt.Sprintf("load skill %s: %v", name, err)
-		return m, nil
-	}
-	parsed, err := hyskill.Parse(entry.SourcePath, content)
-	if err != nil {
-		m.errorBanner = fmt.Sprintf("load skill %s: %v", name, err)
-		return m, nil
-	}
-	prompt := fmt.Sprintf("[IMPORTANT: The user has invoked the %q skill, indicating they want you to follow its instructions. The full skill content is loaded below.]\n\n%s\n\n---\n\n[Skill directory: %s]\nResolve any relative paths in this skill against that directory.", parsed.Name, parsed.Body, parsed.SourceDir)
-	if args != "" {
-		prompt += "\n\nUser: " + args
-	}
-	displayPrompt := "/skill:" + parsed.Name
+	displayPrompt := "/skill:" + name
 	if args != "" {
 		displayPrompt += " " + args
 	}
@@ -2713,10 +2817,25 @@ func (m AppModel) invokeExpandedSkill(name, args string, images []session.Attach
 	m.resetTurnUsage()
 	m.transcriptTop = 0
 	m.beginRunActivity()
-	return m, startTurn(m.runtime, app.TurnRequest{
-		SessionID: m.sessionID, Prompt: prompt, Provider: m.provider, Model: m.model,
+	request := app.TurnRequest{
+		SessionID: m.sessionID, Provider: m.provider, Model: m.model,
 		Reasoning: m.reasoning, AgentMode: m.agentMode, PlanMode: m.planMode, Images: images,
-	})
+	}
+	return m, startExpandedSkill(m.runtime, name, args, request)
+}
+
+func startExpandedSkill(runtime Runtime, name, arguments string, request app.TurnRequest) tea.Cmd {
+	return func() tea.Msg {
+		var expanded desktop.SkillInvocation
+		if err := runtime.Request(context.Background(), desktopipc.MethodExpandSkillInvocation, map[string]string{
+			"name": name, "arguments": arguments,
+		}, &expanded); err != nil {
+			return startTurnResultMsg{Err: err}
+		}
+		request.Prompt = expanded.Prompt
+		runID, err := runtime.StartConfiguredTurn(request)
+		return startTurnResultMsg{RunID: runID, Err: err}
+	}
 }
 
 func (m *AppModel) stopBackgroundFollow() {

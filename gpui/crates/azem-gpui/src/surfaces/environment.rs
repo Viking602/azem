@@ -70,16 +70,301 @@ pub(super) fn environment_snapshot(state: &AppState) -> EnvironmentSnapshot {
 pub(super) fn todo_status_mark(status: &str) -> &'static str {
     match status {
         "completed" => "✓",
+        "cancelled" => "−",
         "in_progress" => "●",
         _ => "○",
     }
+}
+
+pub(super) fn plan_item_animates(status: &str, running: bool, reduced: bool) -> bool {
+    status == "in_progress" && running && !reduced
+}
+
+pub(crate) fn plan_items(todo: &serde_json::Value) -> Vec<serde_json::Value> {
+    todo.get("phases")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|phase| phase.get("items").and_then(serde_json::Value::as_array))
+        .flatten()
+        .cloned()
+        .collect()
+}
+
+fn plan_list(
+    items: &[serde_json::Value],
+    palette: ThemePalette,
+    reduced: bool,
+    running: bool,
+    id: &'static str,
+) -> gpui::AnyElement {
+    div()
+        .id(id)
+        .role(Role::List)
+        .max_h(px(224.))
+        .overflow_y_scroll()
+        .px(px(10.))
+        .pb(px(6.))
+        .flex()
+        .flex_col()
+        .children(items.iter().enumerate().map(|(index, item)| {
+            let status = item
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("pending");
+            let done = matches!(status, "completed" | "cancelled");
+            let color = if done {
+                palette.faint
+            } else {
+                palette.ink_soft
+            };
+            let mark = if plan_item_animates(status, running, reduced) {
+                icon("loader", 12., color)
+                    .with_animation(
+                        (id, index),
+                        Animation::new(Duration::from_millis(800)).repeat(),
+                        |icon, progress| {
+                            icon.with_transformation(Transformation::rotate(percentage(progress)))
+                        },
+                    )
+                    .into_any_element()
+            } else if status == "pending" {
+                div()
+                    .size(px(14.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .size(px(7.))
+                            .rounded_full()
+                            .border_1()
+                            .border_color(palette.faint),
+                    )
+                    .into_any_element()
+            } else if status == "cancelled" {
+                div()
+                    .w(px(14.))
+                    .child(todo_status_mark(status))
+                    .into_any_element()
+            } else {
+                icon(
+                    if status == "completed" {
+                        "check"
+                    } else {
+                        "loader"
+                    },
+                    12.,
+                    color,
+                )
+                .into_any_element()
+            };
+            div()
+                .id((id, index))
+                .role(Role::ListItem)
+                .flex_shrink_0()
+                .py_1()
+                .flex()
+                .items_start()
+                .gap_2()
+                .text_size(px(13.))
+                .line_height(px(20.))
+                .text_color(color)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .mt(px(3.))
+                        .flex_shrink_0()
+                        .text_size(px(12.))
+                        .child(mark)
+                        .child(format!("{}.", index + 1)),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .whitespace_normal()
+                        .when(done, |text| text.line_through())
+                        .child(
+                            item.get("content")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
+                        ),
+                )
+        }))
+        .into_any_element()
+}
+
+pub(super) fn plan_banner_visible(items: &[serde_json::Value], running: bool) -> bool {
+    running
+        && items.iter().any(|item| {
+            !matches!(
+                item.get("status").and_then(serde_json::Value::as_str),
+                Some("completed" | "cancelled")
+            )
+        })
+}
+
+pub(crate) fn composer_plan(
+    this: &AzemWindow,
+    palette: ThemePalette,
+    locale: Locale,
+    cx: &mut Context<AzemWindow>,
+) -> Option<gpui::AnyElement> {
+    let items = plan_items(&this.state.runtime.todo);
+    if !plan_banner_visible(&items, this.state.runtime.running) {
+        return None;
+    }
+    let completed = items
+        .iter()
+        .filter(|item| item.get("status").and_then(serde_json::Value::as_str) == Some("completed"))
+        .count();
+    let key = format!("plan-expanded:{}", this.state.navigation.current_session_id);
+    let compact = !this.process_expansion.borrow().is_expanded(&key);
+    let current_task = items
+        .iter()
+        .find(|item| item["status"] == "in_progress")
+        .or_else(|| items.iter().find(|item| item["status"] == "pending"))
+        .and_then(|item| item.get("content").and_then(serde_json::Value::as_str));
+    let reduced = this
+        .state
+        .settings
+        .appearance
+        .get("reducedMotion")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let running = this.state.runtime.running;
+    let header_icon = if compact
+        && !reduced
+        && running
+        && items.iter().any(|item| {
+            item.get("status").and_then(serde_json::Value::as_str) == Some("in_progress")
+        }) {
+        icon("loader", 14., palette.muted)
+            .with_animation(
+                "plan-header-running",
+                Animation::new(Duration::from_millis(800)).repeat(),
+                |icon, progress| {
+                    icon.with_transformation(Transformation::rotate(percentage(progress)))
+                },
+            )
+            .into_any_element()
+    } else {
+        icon("sliders-horizontal", 14., palette.muted).into_any_element()
+    };
+    let summary = locale.format(
+        "plan.progress",
+        &[
+            ("completed", completed.to_string()),
+            ("total", items.len().to_string()),
+        ],
+    );
+    Some(
+        div()
+            .id("composer-plan")
+            .role(Role::Group)
+            .aria_label(locale.text("plan.title"))
+            .w(relative(11. / 12.))
+            .mx_auto()
+            .bg(Rgba {
+                a: 0.5,
+                ..palette.paper
+            })
+            .border_1()
+            .border_color(palette.border)
+            .border_b_0()
+            .rounded_t(px(12.))
+            .mb(px(-1.))
+            .overflow_hidden()
+            .child(
+                div()
+                    .px(px(10.))
+                    .py(px(6.))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(header_icon)
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .when(!compact, |summary| summary.flex_1())
+                            .min_w_0()
+                            .text_size(px(12.))
+                            .text_color(palette.muted)
+                            .child(summary),
+                    )
+                    .when(compact, |header| {
+                        header.child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(div().text_color(palette.faint).child("·"))
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_size(px(12.))
+                                        .text_color(palette.ink_soft)
+                                        .child(current_task.unwrap_or_default().to_string()),
+                                ),
+                        )
+                    })
+                    .child(
+                        div()
+                            .id("plan-toggle-compact")
+                            .role(Role::Button)
+                            .aria_expanded(!compact)
+                            .aria_label(locale.text(if compact {
+                                "plan.expand"
+                            } else {
+                                "plan.collapse"
+                            }))
+                            .tab_stop(true)
+                            .size(px(24.))
+                            .rounded(px(6.))
+                            .hover(move |style| style.bg(palette.hover))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .child(icon(
+                                if compact {
+                                    "arrows-out-simple"
+                                } else {
+                                    "arrows-in-simple"
+                                },
+                                12.,
+                                palette.muted,
+                            ))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.process_expansion.borrow_mut().toggle(&key);
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .when(!compact, |panel| {
+                panel.child(plan_list(
+                    &items,
+                    palette,
+                    reduced,
+                    running,
+                    "composer-plan-items",
+                ))
+            })
+            .into_any_element(),
+    )
 }
 
 pub(crate) fn environment_panel(
     this: &AzemWindow,
     palette: ThemePalette,
     labels: Labels,
-    expanded: Option<&str>,
     right_inset: f32,
     cx: &mut Context<AzemWindow>,
 ) -> gpui::AnyElement {
@@ -91,35 +376,6 @@ pub(crate) fn environment_panel(
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
     let snapshot = environment_snapshot(state);
-    let mut todo_items = Vec::new();
-    if let Some(phases) = state
-        .runtime
-        .todo
-        .get("phases")
-        .and_then(serde_json::Value::as_array)
-    {
-        for phase in phases {
-            if let Some(items) = phase.get("items").and_then(serde_json::Value::as_array) {
-                todo_items.extend(items.iter().cloned());
-            }
-        }
-    }
-    let completed = todo_items
-        .iter()
-        .filter(|item| {
-            matches!(
-                item.get("status").and_then(serde_json::Value::as_str),
-                Some("completed" | "cancelled")
-            )
-        })
-        .count();
-    let recap_revision = state
-        .runtime
-        .recap
-        .get("revision")
-        .and_then(serde_json::Value::as_i64)
-        .map(|revision| format!("r{revision}"))
-        .unwrap_or_else(|| "—".to_string());
     let locale = Locale::resolve(&state.settings.language);
     let panel = div()
         .id("environment-panel-card")
@@ -132,8 +388,8 @@ pub(crate) fn environment_panel(
         .border_color(palette.border)
         .bg(palette.paper)
         .shadow(vec![
-            BoxShadow::new(px(0.), px(8.), hsla(220. / 360., 0.12, 0.12, 0.10))
-                .blur_radius(px(28.)),
+            BoxShadow::new(px(0.), px(1.), hsla(220. / 360., 0.12, 0.12, 0.05))
+                .blur_radius(px(10.)),
         ])
         .overflow_y_scroll()
         .p(px(10.))
@@ -179,15 +435,6 @@ pub(crate) fn environment_panel(
                 ),
         )
         .child(environment_changes_row(state, labels, palette, cx))
-        .child(environment_nav_row(
-            "environment-local",
-            "folder",
-            locale.text("ui.local").to_string(),
-            "⌄".to_string(),
-            Some(Surface::Files),
-            palette,
-            cx,
-        ))
         .child(branch_picker_control(this, true, palette, locale, cx))
         .child(environment_nav_row(
             "environment-services",
@@ -223,73 +470,19 @@ pub(crate) fn environment_panel(
                 ))
         })
         .child(environment_divider(palette))
-        .child(environment_label(locale.text("ui.conversation"), palette))
-        .when(!todo_items.is_empty(), |panel| {
-            panel
-                .child(environment_expand_row(
-                    "list-todo",
-                    labels.plan.to_string(),
-                    format!("{completed} / {}  ⌄", todo_items.len()),
-                    "plan",
-                    expanded == Some("plan"),
-                    palette,
-                    cx,
-                ))
-                .when(expanded == Some("plan"), |panel| {
-                    panel.child(div().px_2().pb_2().flex().flex_col().children(
-                        todo_items.into_iter().map(|item| {
-                            let status = item
-                                .get("status")
-                                .and_then(serde_json::Value::as_str)
-                                .unwrap_or("pending");
-                            let content = item
-                                .get("content")
-                                .and_then(serde_json::Value::as_str)
-                                .unwrap_or_default()
-                                .to_string();
-                            div()
-                                .min_h(px(28.))
-                                .py_1()
-                                .text_color(match status {
-                                    "completed" => palette.muted,
-                                    "in_progress" => palette.accent,
-                                    _ => palette.ink_soft,
-                                })
-                                .text_xs()
-                                .flex()
-                                .items_start()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .w(px(12.))
-                                        .flex_shrink_0()
-                                        .line_height(px(18.))
-                                        .child(todo_status_mark(status)),
-                                )
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .flex_1()
-                                        .line_height(px(18.))
-                                        .whitespace_normal()
-                                        .child(content),
-                                )
-                        }),
-                    ))
-                })
-        })
-        .child(environment_expand_row(
-            "history",
-            locale.text("ui.recap").to_string(),
-            format!("{recap_revision}  ⌄"),
-            "recap",
-            expanded == Some("recap"),
+        .child(environment_label(locale.text("ui.editor"), palette))
+        .child(environment_nav_row(
+            "environment-local",
+            "sidebar-simple",
+            locale.text("ui.editorView").to_string(),
+            "⌄".to_string(),
+            Some(Surface::Files),
             palette,
             cx,
         ))
-        .when(expanded == Some("recap"), |panel| {
-            panel.child(recap_panel(&state.runtime.recap, palette, locale))
-        })
+        .child(environment_divider(palette))
+        .child(environment_label(locale.text("ui.recap"), palette))
+        .child(recap_panel(&state.runtime.recap, palette, locale))
         .into_any_element();
     let reveal = div()
         .w(px(312.))
@@ -1278,7 +1471,7 @@ fn agent_timeline_entry(
             )
             .into_any_element();
     }
-    timeline_entry(index, blocks, style, agents, expansion, owner, None)
+    timeline::timeline_entry_unfolded(index, blocks, style, agents, expansion, owner, None)
 }
 
 fn environment_nav_row(
@@ -1328,54 +1521,6 @@ fn environment_nav_row(
         .into_any_element()
 }
 
-fn environment_expand_row(
-    icon_name: &'static str,
-    label: String,
-    trailing: String,
-    key: &'static str,
-    selected: bool,
-    palette: ThemePalette,
-    cx: &mut Context<AzemWindow>,
-) -> gpui::AnyElement {
-    div()
-        .id(key)
-        .role(Role::Button)
-        .aria_label(label.clone())
-        .aria_expanded(selected)
-        .tab_stop(true)
-        .h(px(38.))
-        .px_2()
-        .rounded(px(8.))
-        .bg(if selected {
-            palette.paper_muted
-        } else {
-            palette.paper
-        })
-        .text_color(palette.ink)
-        .text_xs()
-        .flex()
-        .items_center()
-        .gap_2()
-        .cursor_pointer()
-        .hover(move |style| style.bg(palette.paper_muted))
-        .on_click(cx.listener(move |this, _, _, cx| {
-            this.environment_expanded = if this.environment_expanded.as_deref() == Some(key) {
-                None
-            } else {
-                Some(key.to_string())
-            };
-            cx.notify();
-        }))
-        .child(
-            div()
-                .w(px(18.))
-                .child(icon(icon_name, 16., palette.ink_soft)),
-        )
-        .child(div().flex_1().overflow_hidden().child(label))
-        .child(div().text_color(palette.muted).text_xs().child(trailing))
-        .into_any_element()
-}
-
 fn environment_divider(palette: ThemePalette) -> gpui::Div {
     div().h(px(1.)).mx_2().my_2().bg(palette.border)
 }
@@ -1416,12 +1561,11 @@ fn recap_panel(
         .id("environment-recap-detail")
         .mx_2()
         .mb_2()
-        .px_2()
         .pb_1()
         .max_h(px(180.))
         .overflow_y_scroll()
         .text_xs()
-        .line_height(px(17.))
+        .line_height(px(19.))
         .text_color(palette.muted)
         .when(empty, |panel| {
             panel
@@ -1452,15 +1596,12 @@ fn recap_section(label: &'static str, content: String, palette: ThemePalette) ->
     div()
         .pt_2()
         .pb_1()
-        .border_t_1()
-        .border_color(palette.border)
         .flex()
         .flex_col()
         .gap_1()
         .child(
             div()
-                .font_family("SF Mono")
-                .text_size(px(9.))
+                .text_size(px(11.))
                 .text_color(palette.faint)
                 .child(label),
         )

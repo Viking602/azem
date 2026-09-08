@@ -82,7 +82,7 @@ func NormalizeToolObservation(record session.ToolRecord, metadata ObservationMet
 		envelope.Sources = append(envelope.Sources, session.SourceRefV1{Kind: "artifact", ID: record.ArtifactID})
 	}
 	for _, observation := range record.Observations {
-		if observation.Path != "" {
+		if observation.Path != "" && session.ValidRelativePath(observation.Path) {
 			envelope.Sources = append(envelope.Sources, session.SourceRefV1{Kind: "file", ID: observation.Path, SHA256: observation.SHA256})
 		}
 	}
@@ -126,7 +126,13 @@ func structuredValidity(raw json.RawMessage) string {
 func normalizeFileObservations(observations []session.FileObservation) []session.FileObservationV1 {
 	result := make([]session.FileObservationV1, 0, len(observations))
 	for _, observation := range observations {
-		file := session.FileObservationV1{Path: observation.Path, State: "unknown"}
+		path := strings.TrimSpace(observation.Path)
+		if !session.ValidRelativePath(path) {
+			// Drop host/model paths that cannot enter the work contract. Leaving
+			// them would fail ObservationEnvelopeV1.Validate and abort the run.
+			continue
+		}
+		file := session.FileObservationV1{Path: path, State: "unknown"}
 		switch observation.Operation {
 		case "read":
 			file.State, file.AfterSHA256 = "observed", observation.SHA256

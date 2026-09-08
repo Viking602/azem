@@ -3,6 +3,7 @@ package observation
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -80,6 +81,8 @@ func TestNormalizeToolObservationMapsFileOperationsWithoutGuessing(t *testing.T)
 		{Path: "new.go", Operation: "created", SHA256: "39536e636aaa9086fa371a887ca7c81cdd1a452d907880f14012237e66002bb3"},
 		{Path: "old.go", Operation: "deleted", SHA256: "9b307fa6b2060fb1ae4d7acc91996ba702242505f8b67fefb1c3b93c8df22488"},
 		{Path: "mystery.go", Operation: "renamed", SHA256: "ffb918915b3220e898974b308a94d02a4d50888b4a1f1b783b66d3c8cf0525bc"},
+		{Path: "/abs/evil.go", Operation: "read", SHA256: "c14cf750087639b12d216f49b9c9e1506e5389b60aa717d0880233877e78c69a"},
+		{Path: "../escape.go", Operation: "edit", SHA256: "c14cf750087639b12d216f49b9c9e1506e5389b60aa717d0880233877e78c69a"},
 	}}
 	envelope := NormalizeToolObservation(record, ObservationMetadata{})
 	if len(envelope.Files) != 4 || envelope.Files[0].State != "observed" || envelope.Files[0].AfterSHA256 != "c14cf750087639b12d216f49b9c9e1506e5389b60aa717d0880233877e78c69a" ||
@@ -87,5 +90,13 @@ func TestNormalizeToolObservationMapsFileOperationsWithoutGuessing(t *testing.T)
 		envelope.Files[2].State != "deleted" || envelope.Files[2].BeforeSHA256 != "9b307fa6b2060fb1ae4d7acc91996ba702242505f8b67fefb1c3b93c8df22488" ||
 		envelope.Files[3].State != "unknown" || envelope.Files[3].BeforeSHA256 != "" || envelope.Files[3].AfterSHA256 != "" {
 		t.Fatalf("file observations = %+v", envelope.Files)
+	}
+	if err := envelope.Validate(); err != nil {
+		t.Fatalf("envelope with filtered unsafe paths: %v", err)
+	}
+	for _, source := range envelope.Sources {
+		if source.Kind == "file" && (strings.HasPrefix(source.ID, "/") || strings.HasPrefix(source.ID, "../")) {
+			t.Fatalf("unsafe file source retained: %+v", source)
+		}
 	}
 }
