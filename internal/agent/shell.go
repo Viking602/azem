@@ -283,7 +283,7 @@ func (d *shellDriver) Definition() tool.Definition {
 	additional := false
 	maxWall := d.maxWallClock()
 	maxSec := maxWallClockSeconds(maxWall)
-	description := fmt.Sprintf("Run a supervised foreground command, or set async:true to defer a finite command as a background job; use hub jobs/wait/cancel for its result. Set wall_clock_seconds to the hard deadline, from 1 to %d seconds. timeout_seconds is maximum output inactivity. stdin is optional UTF-8. POSIX background operators and known detach primitives are rejected; long-running services/watchers/REPLs belong in hub start.", maxSec)
+	description := fmt.Sprintf("Run a supervised foreground command, or set async:true to defer a finite command as a background job; use hub jobs/wait/cancel for its result. Set wall_clock_seconds to the hard deadline, from 1 to %d seconds. timeout_seconds is maximum output inactivity. stdin is optional UTF-8. POSIX background operators and known detach primitives are rejected; shell here-documents are also rejected; use coding.eval for inline code and hub start for long-running services, watchers, or REPLs.", maxSec)
 	if runtime.GOOS == "windows" {
 		description += " Commands use PowerShell on Windows."
 	}
@@ -321,6 +321,36 @@ func rejectDetachedForOS(command, _ string) bool {
 	for _, token := range strings.Fields(normalized) {
 		plain := strings.Trim(token, "();")
 		if plain == "nohup" || plain == "setsid" || plain == "disown" || plain == "daemonize" {
+			return true
+		}
+	}
+	return false
+}
+
+func hasHereDocumentOperator(command string) bool {
+	var quote byte
+	escaped := false
+	for index := 0; index+1 < len(command); index++ {
+		current := command[index]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if current == '\\' && quote != '\'' {
+			escaped = true
+			continue
+		}
+		if quote != 0 {
+			if current == quote {
+				quote = 0
+			}
+			continue
+		}
+		if current == '\'' || current == '"' {
+			quote = current
+			continue
+		}
+		if current == '<' && command[index+1] == '<' {
 			return true
 		}
 	}
@@ -399,6 +429,9 @@ func (d *shellDriver) Execute(ctx context.Context, call tool.Call, sink tool.Upd
 	input.Command = strings.TrimSpace(input.Command)
 	if input.Command == "" {
 		return shellError(call, "command is empty"), nil
+	}
+	if hasHereDocumentOperator(input.Command) {
+		return shellError(call, "shell here-documents are not permitted; use coding.eval for inline code or stdin for ordinary command input"), nil
 	}
 	if rejectDetached(input.Command) {
 		return shellError(call, "detached execution that can escape process supervision is not permitted"), nil

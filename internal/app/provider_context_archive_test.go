@@ -268,6 +268,21 @@ func TestArchiveCompactionRejectsLatestThreeTurnsThatExceedHardLimit(t *testing.
 	}
 }
 
+func TestArchiveCutPointErrorUsesProductNeutralLanguage(t *testing.T) {
+	history := []message.Message{
+		message.NewText(message.RoleSystem, "system rules"),
+		message.NewText(message.RoleUser, "one large task"),
+		message.NewText(message.RoleAssistant, "still working"),
+	}
+	_, err := snapcompactArchiveCutPoint(history, 1, 0)
+	if err == nil {
+		t.Fatal("single-turn history unexpectedly had an archive cut point")
+	}
+	if !strings.Contains(err.Error(), "no safe history cut point") {
+		t.Fatalf("archive error exposed implementation branding: %q", err)
+	}
+}
+
 func TestArchiveFramesRepairFromDurableSourceAfterRestart(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, ":memory:")

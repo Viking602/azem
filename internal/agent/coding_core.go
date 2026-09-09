@@ -277,8 +277,8 @@ func (workspace *localWorkspace) ReadFile(ctx context.Context, request ReadFileR
 		slice = strings.Join(lines[start-1:end], "\n")
 	}
 	maxBytes := request.MaxBytes
-	if maxBytes <= 0 || maxBytes > defaultOMPReadBytes {
-		maxBytes = defaultOMPReadBytes
+	if maxBytes <= 0 || maxBytes > defaultReadBytes {
+		maxBytes = defaultReadBytes
 	}
 	truncated := len(slice) > maxBytes
 	if truncated {

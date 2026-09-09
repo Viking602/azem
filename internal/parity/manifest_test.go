@@ -2,13 +2,13 @@ package parity
 
 import "testing"
 
-func TestManifestLoadsValidatedOMPBaseline(t *testing.T) {
+func TestManifestLoadsValidatedReferenceBaseline(t *testing.T) {
 	manifest, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if manifest.BaselineVersion != "18.0.3" || manifest.BaselineCommit != "160ed439ac0df594347e7d7018b813a7ffdb5e81" {
-		t.Fatalf("unexpected OMP baseline: version=%q commit=%q", manifest.BaselineVersion, manifest.BaselineCommit)
+		t.Fatalf("unexpected reference baseline: version=%q commit=%q", manifest.BaselineVersion, manifest.BaselineCommit)
 	}
 	if open := manifest.OpenCapabilities(); len(open) != 0 {
 		t.Fatalf("completed parity manifest still has %d open capabilities: %#v", len(open), open)

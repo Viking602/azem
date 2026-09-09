@@ -1,5 +1,6 @@
 use std::{
     fs::{self, OpenOptions},
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{Arc, Mutex, RwLock},
@@ -141,9 +142,6 @@ impl RuntimeConnection {
         if let Ok(mut current) = self.snapshot_session.write() {
             *current = session_id.into();
         }
-    }
-    pub fn disconnect(&self) {
-        self.close(true);
     }
 
     pub fn detach(&self) {
@@ -520,10 +518,15 @@ pub(crate) fn restore_desktop_workspace(fallback: PathBuf, state_dir: Option<&Pa
         .into_iter()
         .flatten()
         .filter_map(|entry| {
-            let endpoint_path = entry.ok()?.path().join("endpoint.json");
-            let modified = endpoint_path.metadata().ok()?.modified().ok()?;
-            let workspace = Endpoint::load(endpoint_path).ok()?.workspace;
-            valid_project_workspace(workspace).map(|workspace| (modified, workspace))
+            let directory = entry.ok()?.path();
+            let endpoint = cached_workspace(&directory.join("endpoint.json"), |path| {
+                Endpoint::load(path).ok()?.workspace.into()
+            });
+            let log = cached_workspace(&directory.join("daemon.log"), daemon_log_workspace);
+            endpoint
+                .into_iter()
+                .chain(log)
+                .max_by_key(|(modified, _)| *modified)
         })
         .max_by_key(|(modified, _)| *modified)
         .map(|(_, workspace)| workspace);
@@ -531,6 +534,33 @@ pub(crate) fn restore_desktop_workspace(fallback: PathBuf, state_dir: Option<&Pa
         .or_else(|| valid_project_workspace(fallback.clone()))
         .or_else(|| dirs::home_dir().and_then(valid_project_workspace))
         .unwrap_or(fallback)
+}
+
+fn cached_workspace(
+    path: &Path,
+    decode: impl FnOnce(&Path) -> Option<PathBuf>,
+) -> Option<(std::time::SystemTime, PathBuf)> {
+    let modified = path.metadata().ok()?.modified().ok()?;
+    let workspace = valid_project_workspace(decode(path)?)?;
+    Some((modified, workspace))
+}
+
+fn daemon_log_workspace(path: &Path) -> Option<PathBuf> {
+    const MAX_TAIL_BYTES: u64 = 64 * 1024;
+    let mut file = fs::File::open(path).ok()?;
+    let length = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(length.saturating_sub(MAX_TAIL_BYTES)))
+        .ok()?;
+    let mut bytes = Vec::with_capacity(length.min(MAX_TAIL_BYTES) as usize);
+    file.read_to_end(&mut bytes).ok()?;
+    String::from_utf8_lossy(&bytes)
+        .lines()
+        .rev()
+        .find_map(|line| {
+            let value = line.strip_prefix("azem daemon ready: workspace=")?;
+            let (workspace, _) = value.rsplit_once(" address=")?;
+            Some(PathBuf::from(workspace))
+        })
 }
 
 fn valid_project_workspace(workspace: PathBuf) -> Option<PathBuf> {
@@ -611,10 +641,8 @@ fn detach_command(command: &mut Command) {
 mod tests {
     use std::{
         path::PathBuf,
-        sync::{
-            Arc, Mutex, RwLock,
-            atomic::{AtomicBool, Ordering},
-        },
+        sync::{Arc, Mutex, RwLock},
+        time::Duration,
     };
 
     use azem_ipc::{Envelope, Method};
@@ -625,39 +653,6 @@ mod tests {
         RuntimeCommand, RuntimeConnection, RuntimeMessage, RuntimeOptions, endpoint_path,
         restore_desktop_workspace, should_forward_envelope,
     };
-
-    #[test]
-    fn desktop_disconnect_waits_for_the_daemon_stop_attempt() {
-        let (commands, command_rx) = async_channel::bounded(1);
-        let (message_tx, messages) = async_channel::bounded(1);
-        let (_startup_tx, startup_rx) = std::sync::mpsc::sync_channel(1);
-        let stopped = Arc::new(AtomicBool::new(false));
-        let worker_stopped = stopped.clone();
-        let worker = std::thread::spawn(move || {
-            let RuntimeCommand::Disconnect {
-                stop_daemon,
-                completed,
-            } = command_rx.recv_blocking().unwrap()
-            else {
-                panic!("expected disconnect command");
-            };
-            assert!(stop_daemon);
-            worker_stopped.store(true, Ordering::SeqCst);
-            completed.send(()).unwrap();
-        });
-        let connection = RuntimeConnection {
-            commands,
-            message_tx,
-            messages,
-            snapshot_session: Arc::new(RwLock::new(String::new())),
-            startup: Arc::new(Mutex::new(startup_rx)),
-        };
-
-        connection.disconnect();
-
-        assert!(stopped.load(Ordering::SeqCst));
-        worker.join().unwrap();
-    }
 
     #[test]
     fn workspace_switch_detaches_without_stopping_the_daemon() {
@@ -720,6 +715,55 @@ mod tests {
         assert_eq!(
             restore_desktop_workspace(PathBuf::from("/"), Some(&state_dir)),
             workspace.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn desktop_launch_uses_latest_daemon_log_after_legacy_endpoint_cleanup() {
+        let state_dir = std::env::temp_dir().join(format!("azem-state-{}", Uuid::new_v4()));
+        let hidden = state_dir.join("hidden");
+        let visible = state_dir.join("visible");
+        let hidden_daemon = state_dir.join("gpui-daemons").join("hidden");
+        let visible_daemon = state_dir.join("gpui-daemons").join("visible");
+        std::fs::create_dir_all(&hidden).unwrap();
+        std::fs::create_dir_all(&visible).unwrap();
+        std::fs::create_dir_all(&hidden_daemon).unwrap();
+        std::fs::create_dir_all(&visible_daemon).unwrap();
+        let endpoint_path = hidden_daemon.join("endpoint.json");
+        std::fs::write(
+            &endpoint_path,
+            serde_json::to_vec(&json!({
+                "protocol": 1,
+                "workspaceId": "hidden",
+                "workspace": hidden,
+                "address": hidden_daemon.join("azem.sock"),
+                "tokenFile": hidden_daemon.join("token"),
+                "pid": 42,
+                "startedAt": "2026-08-26T00:00:00Z"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&endpoint_path, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(
+            visible_daemon.join("daemon.log"),
+            format!(
+                "azem daemon ready: workspace={} address={} pid=43\n",
+                visible.display(),
+                visible_daemon.join("azem.sock").display()
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(
+            restore_desktop_workspace(PathBuf::from("/"), Some(&state_dir)),
+            visible.canonicalize().unwrap()
         );
     }
 

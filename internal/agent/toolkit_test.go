@@ -84,7 +84,7 @@ func TestSearchSkipsIgnoredTreesInsteadOfTruncatingBeforeSource(t *testing.T) {
 		t.Fatalf("structured search result=%+v", searchResult)
 	}
 	patch, _ := json.Marshal(map[string]string{
-		"input": ompTestPatch(searchResult.Files[0].Header, "PUT 3.=3:\n+const ReliableSearchNeedle = false"),
+		"input": hashlineTestPatch(searchResult.Files[0].Header, "PUT 3.=3:\n+const ReliableSearchNeedle = false"),
 	})
 	edited, err := editDriver.Execute(context.Background(), tool.Call{ID: "edit", Name: ToolEditHashline, Arguments: patch}, nil)
 	if err != nil || edited.IsError {
@@ -93,6 +93,86 @@ func TestSearchSkipsIgnoredTreesInsteadOfTruncatingBeforeSource(t *testing.T) {
 	data, err := os.ReadFile(target)
 	if err != nil || !strings.Contains(string(data), "ReliableSearchNeedle = false") {
 		t.Fatalf("edited target=%q err=%v", data, err)
+	}
+}
+
+func TestReliableSearchUsesRipgrepRegexPathGlobAndEmptyResult(t *testing.T) {
+	if _, err := exec.LookPath("rg"); err != nil {
+		t.Fatalf("ripgrep is required for workspace search: %v", err)
+	}
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(root, "src", "match.go"),
+		[]byte("package sample\nconst needle42 = true\n"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(root, "src", "ignored.txt"),
+		[]byte("needle99\n"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	service := &Service{allowWrite: true, shellPolicy: "deny"}
+	search := findWorkspaceTool(t, service, root, ToolSearch)
+	call := func(id, arguments string) tool.Result {
+		t.Helper()
+		result, err := search.Execute(
+			context.Background(),
+			tool.Call{ID: id, Name: ToolSearch, Arguments: json.RawMessage(arguments)},
+			nil,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+
+	matched := call(
+		"regexp",
+		`{"query":"needle[0-9]+","regexp":true,"path":"src","glob":"*.go"}`,
+	)
+	if matched.IsError || !strings.Contains(matched.Content, "[src/match.go#") ||
+		strings.Contains(matched.Content, "ignored.txt") {
+		t.Fatalf("ripgrep result = %+v", matched)
+	}
+	empty := call("empty", `{"query":"definitely absent","path":"src"}`)
+	if empty.IsError || empty.Content != "No matches found." {
+		t.Fatalf("empty result = %+v", empty)
+	}
+	var decoded SearchToolResult
+	if err := json.Unmarshal(empty.Structured, &decoded); err != nil ||
+		len(decoded.Files) != 0 || decoded.Truncated {
+		t.Fatalf("empty structured result = %+v, %v", decoded, err)
+	}
+	invalid := call("invalid", `{"query":"[","regexp":true}`)
+	if !invalid.IsError || !strings.Contains(strings.ToLower(invalid.Content), "regex") {
+		t.Fatalf("invalid regexp result = %+v", invalid)
+	}
+}
+
+func TestBundledRipgrepResolvesBesideExecutable(t *testing.T) {
+	root := t.TempDir()
+	executable := filepath.Join(root, "azem-daemon")
+	ripgrep := filepath.Join(root, "rg")
+	if err := os.WriteFile(ripgrep, []byte("bundled"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	resolved, ok := bundledRipgrepPath(executable, "rg")
+	if !ok || resolved != ripgrep {
+		t.Fatalf("bundled ripgrep = %q, %t", resolved, ok)
+	}
+	renderer := filepath.Join(root, "azem-gpui")
+	if err := os.WriteFile(renderer, []byte("renderer"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !packagedRuntimeRequiresBundledRipgrep(executable) {
+		t.Fatal("packaged runtime did not require its sibling ripgrep")
 	}
 }
 
@@ -155,8 +235,8 @@ func testReplaceDriver(t *testing.T, dir string) tool.Driver {
 	if snapshotRead == nil {
 		t.Fatal("read driver unavailable")
 	}
-	readDriver := newOMPReadDriver(dir, snapshotRead, nil, "deny")
-	editDriver := newOMPHashlineDriver(dir, snapshotRead, newHashlineClipboard(), nil)
+	readDriver := newReadDriver(dir, snapshotRead, nil, "deny")
+	editDriver := newHashlineDriver(dir, snapshotRead, newHashlineClipboard(), nil)
 	return newReplaceDriver(readDriver, editDriver)
 }
 

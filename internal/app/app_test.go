@@ -654,6 +654,76 @@ func TestCancelActiveReturnsBeforeUncooperativeExecutionFinishes(t *testing.T) {
 	}
 }
 
+func TestCancelRunWithChildrenCancelsPersistedRun(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	coding, err := agentservice.NewService(store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer coding.Close(ctx)
+	run, err := coding.StartRunWithMetadata(
+		ctx,
+		"persisted desktop run",
+		map[string]string{"session_id": "session-persisted"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := session.NewService(store.DB(), store.Blobs())
+	if _, err := sessions.Ensure(ctx, session.Session{ID: "session-persisted"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sessions.AppendBlock(ctx, "session-persisted", session.Block{
+		Kind: "question", RunID: run.RunID, State: "interrupted",
+		Data: map[string]string{"userInputId": "question-persisted", "questions": "[]"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	host := NewService(ctx, config.Default())
+	host.AttachDurable(sessions, coding)
+
+	if cancelled, err := host.CancelRunWithChildren("other-session", run.RunID, true); err == nil || cancelled {
+		t.Fatalf("cross-session cancel = %t, %v", cancelled, err)
+	}
+	cancelled, err := host.CancelRunWithChildren("session-persisted", run.RunID, true)
+	if err != nil || !cancelled {
+		t.Fatalf("persisted cancel = %t, %v", cancelled, err)
+	}
+	projection, err := coding.Recover(ctx, run.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projection.Run.Status != agentruntime.RunStatusCancelled {
+		t.Fatalf("durable run status = %s", projection.Run.Status)
+	}
+	sessionProjection, err := sessions.LoadProjection(ctx, "session-persisted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessionProjection.Blocks) != 1 || sessionProjection.Blocks[0].State != "cancelled" {
+		t.Fatalf("question state = %+v", sessionProjection.Blocks)
+	}
+	eventCtx, cancelEvent := context.WithTimeout(ctx, time.Second)
+	defer cancelEvent()
+	for {
+		event, err := host.NextEvent(eventCtx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.Kind == EventRunCancelled {
+			if event.SessionID != "session-persisted" || event.RunID != run.RunID {
+				t.Fatalf("terminal event = %+v", event)
+			}
+			break
+		}
+	}
+}
+
 type uncooperativeCancelDriver struct {
 	started chan struct{}
 	release chan struct{}

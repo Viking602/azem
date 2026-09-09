@@ -1,6 +1,69 @@
 # Changelog
 
 ## Unreleased
+- Fixed a native restart regression where closing the GPUI renderer stopped its
+  workspace daemon. Relaunch now reuses the daemon, and explicit daemon
+  shutdown retains non-secret workspace metadata for the next cold launch.
+  Older installations whose endpoint was already removed recover the last
+  workspace from the bounded daemon-log tail, so removed projects stay hidden
+  after switching to the next visible project and restarting.
+
+- Unified native GPUI live work into one 「正在处理」 row. The row shows only
+  the latest active tool and rolls the previous label upward over 220 ms when
+  activity changes; reduced-motion mode switches instantly. Tool groups start
+  collapsed, expanded groups show reasoning as prose without a duplicate
+  「正在思考」 row, parallel subagents use one stable click disclosure instead
+  of nested tool and hover-driven rows, terminal state is resolved from durable
+  agent blocks before live snapshots, and a parent paused on a durable question
+  reports 「等待输入」 instead of 「运行中」. Structured tool arguments replace
+  raw JSON, and the active Plan item uses a filled status mark. A single
+  container-level pulse replaces the previous per-character animation to
+  reduce transcript layout and paint work while scrolling.
+
+- Fixed a single run showing multiple live 「正在处理」 rows by settling stale
+  streaming thinking when later text or tools arrive. Tool rows no longer
+  repeat a textual running prefix: live work uses a spinner, completed work a
+  check, and failures an alert. Rows with details are now keyboard-focusable
+  disclosures; failed calls show their recorded reason, successful calls show
+  their result, and edit calls render their structured compact diff. Tool
+  disclosures stay visually flat without a full-row hover capsule around
+  selectable text.
+
+- Limited copy, feedback, and fork controls to the last completed
+  `final_answer` of a run. Command and test results now render as one fenced
+  code block; late tool-start metadata repairs unnamed progress rows, bare
+  `running` transport messages stay hidden, and `coding.go_test` rows use a
+  localized test action plus their package argument.
+
+- Removed the standalone completed-thinking lightbulb and its one-off elapsed
+  label. Live thinking still uses the ordinary processing status; settled
+  thinking now renders as plain 「思考」 while tool/run summaries retain timing.
+
+- Replaced workspace-wide Go file scanning in `coding.search` with one bounded
+  ripgrep `--json` process. Literal, regexp, path, glob, ignore, hidden-file,
+  1 MiB file, and global 200-line limits are explicit; only matched files enter
+  the Hashline snapshot path. Zero matches return an expandable localized
+  result. GPUI distributions bundle and sign ripgrep beside the daemon, so
+  packaged search does not depend on the user's `PATH` or system installation.
+
+- Kept expanded tool steps readable by placing all reasoning prose before tool
+  rows and reducing multiline command bodies to a single-line executable
+  preview. Shell here-document scripts now fail before execution and direct
+  inline code to the 30-second-default `eval` kernels. Desktop Stop now carries
+  the exact session/run identity, cancels persisted pending or suspended runs,
+  clears their controls, and reports `stopping` or an explicit error instead of
+  silently ignoring the request.
+
+- Fixed long single-turn Subagents failing context maintenance after many tool
+  calls. Older large tool results in that one turn are now artifact-backed from
+  oldest to newest while the original user instruction, tool pairing, message
+  order, and latest eight atomic groups remain intact.
+
+- Removed upstream implementation branding from runtime-facing copy. Context
+  archive failures, Hashline guidance, web-search descriptions, executable
+  prompts, and runtime asset errors now use Azem-owned, product-neutral terms;
+  the frozen parity manifest remains internal maintenance evidence.
+
 - Kept GPUI as a single-window application. Selecting a project or conversation
   in another workspace now reconnects the existing renderer to that
   workspace's daemon instead of spawning another Azem UI; the previous daemon

@@ -50,7 +50,7 @@ func (driver *webSearchDriver) Definition() tool.Definition {
 	additional := false
 	return tool.Definition{
 		Name:        ToolWebSearch,
-		Description: "Search current web information through the configured OMP provider fallback chain. Prefer primary sources and corroborate important claims. Query supports site:/-site:, after:/before: dates, inurl:, intitle:, filetype:, quoted phrases, exclusions, and OR; unsupported constraints are filtered leniently and relaxed rather than returning zero results.",
+		Description: "Search current web information through the configured provider fallback chain. Prefer primary sources and corroborate important claims. Query supports site:/-site:, after:/before: dates, inurl:, intitle:, filetype:, quoted phrases, exclusions, and OR; unsupported constraints are filtered leniently and relaxed rather than returning zero results.",
 		InputSchema: tool.Schema{
 			Type: "object", Required: []string{"query"}, AdditionalProperties: &additional,
 			Properties: map[string]tool.Schema{

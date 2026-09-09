@@ -35,18 +35,18 @@ import (
 )
 
 const (
-	defaultOMPReadBytes = 1 << 20
-	maxOMPReadBytes     = 16 << 20
+	defaultReadBytes = 1 << 20
+	maxReadBytes     = 16 << 20
 )
 
-type ompReadDriver struct {
+type readDriver struct {
 	root          string
 	delegate      tool.Driver
 	resources     *resource.Router
 	networkPolicy string
 }
 
-type ompReadInput struct {
+type readInput struct {
 	Path      string `json:"path"`
 	Selector  string `json:"selector,omitempty"`
 	StartLine int    `json:"startLine,omitempty"`
@@ -56,7 +56,7 @@ type ompReadInput struct {
 	MaxBytes  int    `json:"maxBytes,omitempty"`
 }
 
-type ompReadResult struct {
+type readResult struct {
 	Path      string            `json:"path"`
 	Kind      string            `json:"kind"`
 	MediaType string            `json:"mediaType,omitempty"`
@@ -67,11 +67,11 @@ type ompReadResult struct {
 	Metadata  map[string]string `json:"metadata,omitempty"`
 }
 
-func newOMPReadDriver(root string, delegate tool.Driver, resources *resource.Router, networkPolicy string) tool.Driver {
-	return &ompReadDriver{root: root, delegate: delegate, resources: resources, networkPolicy: networkPolicy}
+func newReadDriver(root string, delegate tool.Driver, resources *resource.Router, networkPolicy string) tool.Driver {
+	return &readDriver{root: root, delegate: delegate, resources: resources, networkPolicy: networkPolicy}
 }
 
-func (driver *ompReadDriver) Definition() tool.Definition {
+func (driver *readDriver) Definition() tool.Definition {
 	additional := false
 	return tool.Definition{
 		Name:        ToolReadFile,
@@ -91,8 +91,8 @@ func (driver *ompReadDriver) Definition() tool.Definition {
 	}
 }
 
-func (driver *ompReadDriver) Execute(ctx context.Context, call tool.Call, _ tool.UpdateSink) (tool.Result, error) {
-	var input ompReadInput
+func (driver *readDriver) Execute(ctx context.Context, call tool.Call, _ tool.UpdateSink) (tool.Result, error) {
+	var input readInput
 	if err := json.Unmarshal(call.Arguments, &input); err != nil {
 		return readError(call, fmt.Errorf("decode read arguments: %w", err)), nil
 	}
@@ -132,7 +132,7 @@ func (driver *ompReadDriver) Execute(ctx context.Context, call tool.Call, _ tool
 	return result, nil
 }
 
-func (driver *ompReadDriver) readURI(ctx context.Context, call tool.Call, input ompReadInput) (tool.Result, error) {
+func (driver *readDriver) readURI(ctx context.Context, call tool.Call, input readInput) (tool.Result, error) {
 	if driver.resources == nil {
 		return tool.Result{}, errors.New("internal resources are unavailable")
 	}
@@ -146,7 +146,7 @@ func (driver *ompReadDriver) readURI(ctx context.Context, call tool.Call, input 
 	return readBytesResult(call, input.Path, input.Selector, "resource", result.MediaType, result.Data, input.MaxBytes, result.Metadata), nil
 }
 
-func (driver *ompReadDriver) readURL(ctx context.Context, call tool.Call, input ompReadInput) (tool.Result, error) {
+func (driver *readDriver) readURL(ctx context.Context, call tool.Call, input readInput) (tool.Result, error) {
 	if driver.networkPolicy != "allow" {
 		return tool.Result{}, errors.New("URL reads require workspace network policy allow")
 	}
@@ -176,7 +176,7 @@ func (driver *ompReadDriver) readURL(ctx context.Context, call tool.Call, input 
 	}), nil
 }
 
-func (driver *ompReadDriver) readLocal(ctx context.Context, call tool.Call, input ompReadInput) (tool.Result, error) {
+func (driver *readDriver) readLocal(ctx context.Context, call tool.Call, input readInput) (tool.Result, error) {
 	absolute, relative, info, err := secureReadPath(driver.root, input.Path)
 	if err != nil {
 		return tool.Result{}, err
@@ -232,7 +232,7 @@ func (driver *ompReadDriver) readLocal(ctx context.Context, call tool.Call, inpu
 			return tool.Result{}, errors.New("image exceeds read limit")
 		}
 		content := fmt.Sprintf("Image %s (%s, %d bytes)", relative, mediaType, len(payload))
-		structured, _ := json.Marshal(ompReadResult{Path: relative, Kind: "image", MediaType: mediaType, Content: content, Bytes: len(payload)})
+		structured, _ := json.Marshal(readResult{Path: relative, Kind: "image", MediaType: mediaType, Content: content, Bytes: len(payload)})
 		result := tool.Result{ToolCallID: call.ID, Name: call.Name, Content: content, Structured: structured}
 		result.Parts = []message.ContentPart{{Kind: message.ContentImage, Data: payload, MediaType: mediaType, Filename: filepath.Base(relative)}}
 		return result, nil
@@ -258,7 +258,7 @@ func (driver *ompReadDriver) readLocal(ctx context.Context, call tool.Call, inpu
 		return tool.Result{}, err
 	} else if ok {
 		// Record the full file in the delegate snapshot store before returning the summary.
-		if _, err := driver.delegateText(ctx, call, ompReadInput{Path: relative, StartLine: 1, EndLine: 1, MaxBytes: input.MaxBytes}, relative); err != nil {
+		if _, err := driver.delegateText(ctx, call, readInput{Path: relative, StartLine: 1, EndLine: 1, MaxBytes: input.MaxBytes}, relative); err != nil {
 			return tool.Result{}, err
 		}
 		return readTextResult(call, relative, input.Selector, "structure", summary, false, map[string]string{"hint": "pass selector or line range for source"}), nil
@@ -266,7 +266,7 @@ func (driver *ompReadDriver) readLocal(ctx context.Context, call tool.Call, inpu
 	return driver.delegateText(ctx, call, input, relative)
 }
 
-func (driver *ompReadDriver) delegateText(ctx context.Context, call tool.Call, input ompReadInput, relative string) (tool.Result, error) {
+func (driver *readDriver) delegateText(ctx context.Context, call tool.Call, input readInput, relative string) (tool.Result, error) {
 	arguments, _ := json.Marshal(map[string]any{
 		"path": relative, "startLine": input.StartLine, "endLine": input.EndLine, "maxBytes": input.MaxBytes,
 	})
@@ -291,7 +291,7 @@ func (driver *ompReadDriver) delegateText(ctx context.Context, call tool.Call, i
 	return result, nil
 }
 
-func (driver *ompReadDriver) readArchive(ctx context.Context, call tool.Call, input ompReadInput, archivePath, member string) (tool.Result, error) {
+func (driver *readDriver) readArchive(ctx context.Context, call tool.Call, input readInput, archivePath, member string) (tool.Result, error) {
 	absolute, relative, info, err := secureReadPath(driver.root, archivePath)
 	if err != nil {
 		return tool.Result{}, err
@@ -306,7 +306,7 @@ func (driver *ompReadDriver) readArchive(ctx context.Context, call tool.Call, in
 	return readBytesResult(call, relative+":"+member, input.Selector, "archive", mime.TypeByExtension(filepath.Ext(member)), payload, input.MaxBytes, map[string]string{"archive": relative, "member": member}), nil
 }
 
-func (driver *ompReadDriver) readSQLite(ctx context.Context, call tool.Call, input ompReadInput, databasePath, selector string) (tool.Result, error) {
+func (driver *readDriver) readSQLite(ctx context.Context, call tool.Call, input readInput, databasePath, selector string) (tool.Result, error) {
 	absolute, relative, _, err := secureReadPath(driver.root, databasePath)
 	if err != nil {
 		return tool.Result{}, err
@@ -361,9 +361,9 @@ func (driver *ompReadDriver) readSQLite(ctx context.Context, call tool.Call, inp
 
 func boundedReadBytes(value int) int {
 	if value <= 0 {
-		return defaultOMPReadBytes
+		return defaultReadBytes
 	}
-	return min(value, maxOMPReadBytes)
+	return min(value, maxReadBytes)
 }
 
 func readBytesResult(call tool.Call, path, selector, kind, mediaType string, payload []byte, limit int, metadata map[string]string) tool.Result {
@@ -375,12 +375,12 @@ func readBytesResult(call tool.Call, path, selector, kind, mediaType string, pay
 		return readTextResult(call, path, selector, kind, string(payload), truncated, metadata)
 	}
 	content := fmt.Sprintf("Binary %s (%s, %d bytes)", path, mediaType, len(payload))
-	structured, _ := json.Marshal(ompReadResult{Path: path, Kind: kind, MediaType: mediaType, Content: content, Bytes: len(payload), Truncated: truncated, Metadata: metadata})
+	structured, _ := json.Marshal(readResult{Path: path, Kind: kind, MediaType: mediaType, Content: content, Bytes: len(payload), Truncated: truncated, Metadata: metadata})
 	return tool.Result{ToolCallID: call.ID, Name: call.Name, Content: content, Structured: structured}
 }
 
 func readTextResult(call tool.Call, path, selector, kind, content string, truncated bool, metadata map[string]string) tool.Result {
-	structured, _ := json.Marshal(ompReadResult{Path: path, Kind: kind, Selector: selector, Content: content, Bytes: len(content), Truncated: truncated, Metadata: metadata})
+	structured, _ := json.Marshal(readResult{Path: path, Kind: kind, Selector: selector, Content: content, Bytes: len(content), Truncated: truncated, Metadata: metadata})
 	return tool.Result{ToolCallID: call.ID, Name: call.Name, Content: content, Structured: structured}
 }
 
@@ -409,7 +409,7 @@ func splitReadSelector(path, explicit string) (string, string) {
 	return path, explicit
 }
 
-func applyTextSelector(text string, input ompReadInput) string {
+func applyTextSelector(text string, input readInput) string {
 	if input.Selector == "raw" || input.Selector == "" && input.StartLine == 0 && input.EndLine == 0 {
 		return text
 	}

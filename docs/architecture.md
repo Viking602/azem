@@ -83,6 +83,27 @@ Dependencies flow from entry points and presentation into orchestration, then
 into focused runtime and storage packages. Cycles are forbidden by
 `.sentrux/rules.toml`.
 
+The native renderer keeps the binary entry point thin and groups code by
+responsibility:
+
+- `gpui/crates/azem-gpui/src/main.rs` owns shared window state, layout helpers,
+  and application startup. `window_runtime.rs`, `window_actions.rs`,
+  `window_controls.rs`, `window_model_picker.rs`, `window_settings.rs`,
+  `window_composer.rs`, `window_terminal.rs`, and `window_render.rs` contain
+  focused `AzemWindow` implementation blocks.
+- `gpui/crates/azem-gpui/src/surfaces.rs` owns shared presentation primitives
+  and the narrow exports used by the window. Domain surfaces live under
+  `surfaces/`; Settings categories live under `surfaces/settings/`; process
+  trail rendering lives under `surfaces/timeline/`.
+- `gpui/crates/azem-gpui/src/state.rs` remains the projection model and reducer.
+  Large regression suites live beside their modules in `state/tests.rs`,
+  `surfaces/tests.rs`, and `composer_tests.rs` instead of inflating production
+  modules.
+
+Keep new rendering behavior in its owning surface or window responsibility.
+Do not grow `main.rs` or `surfaces.rs` back into cross-domain implementation
+files.
+
 ## Turn and event flow
 
 ```text
@@ -318,13 +339,17 @@ an error result. Successful `coding.replace` and `coding.delete_file` calls
 produce the same durable file observations and completed-change projections as
 the corresponding hashline edit and write paths.
 
-`coding.search` enumerates Git-tracked and unignored untracked files with an
-argv-only `git ls-files -co --exclude-standard -z` boundary. Its result limit
-caps matched lines, not files scanned, so dependency/build trees cannot
-truncate source discovery. A matched path is reread through the shared
-`coding.read_file` driver before projection; the returned `¶PATH#TAG` therefore
-names the exact snapshot available to a following Hashline edit. Non-Git
-workspaces use a bounded walker with common dependency/build trees excluded.
+`coding.search` invokes the bundled ripgrep executable once through an
+argv-only `--json` boundary. Literal search uses `--fixed-strings`; regexp and
+glob inputs use ripgrep syntax. The process respects ignore files, includes
+non-ignored hidden files, skips `.git` and files larger than 1 MiB, and is
+cancelled as soon as the global 200-line result cap is reached. Azem sorts the
+bounded matched paths and rereads only those files through the shared
+`coding.read_file` driver; every returned `¶PATH#TAG` names the exact snapshot
+available to a following Hashline edit. There is no workspace walker or
+Go-regexp fallback. Missing bundled ripgrep and invalid expressions fail
+explicitly. Exact internal resource URIs remain in-process because they are not
+filesystem paths.
 For a completed delete, path absence is the captured postcondition rather than
 a read failure. Continuity marks continued absence `verified_unchanged` and a
 recreated path `stale`.

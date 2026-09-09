@@ -61,7 +61,12 @@ func (dispatcher *Dispatcher) Dispatch(method Method, payload json.RawMessage) (
 		if err != nil {
 			return nil, err
 		}
-		return map[string]bool{"cancelled": dispatcher.bridge.CancelActive(params.IncludeChildren)}, nil
+		cancelled, err := dispatcher.bridge.CancelActive(
+			params.SessionID,
+			params.RunID,
+			params.IncludeChildren,
+		)
+		return map[string]bool{"cancelled": cancelled}, err
 	case MethodExecute:
 		params, err := decodeParams[desktop.ActionRequest](payload)
 		if err != nil {
@@ -292,7 +297,9 @@ type messageParams struct {
 	Attachments []desktop.Attachment `json:"attachments"`
 }
 type cancelParams struct {
-	IncludeChildren bool `json:"includeChildren"`
+	SessionID       string `json:"sessionId"`
+	RunID           string `json:"runId"`
+	IncludeChildren bool   `json:"includeChildren"`
 }
 type importAttachmentParams struct {
 	SessionID string `json:"sessionId"`

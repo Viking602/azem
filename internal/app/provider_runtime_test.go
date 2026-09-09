@@ -126,10 +126,11 @@ func TestMainInstructionsContract(t *testing.T) {
 	requireInstructionFragments(t, "AST contract", []string{"`ast_grep`", "`xd://ast_edit`", "`xd://resolve`", "`xd://reject`"})
 	requireInstructionFragments(t, "LSP contract", []string{"`lsp`", "definitions, references, code actions", "cross-file renames", "symbol-aware rename"})
 	requireInstructionFragments(t, "debug contract", []string{"`debug`", "breakpoints, stepping, program state", "`program` is a target path", "not a shell command"})
-	requireInstructionFragments(t, "eval contract", []string{"`eval`", "Python/JavaScript state per session", "incremental cells", "reset only after a kernel crash"})
+	requireInstructionFragments(t, "eval contract", []string{"`eval`", "Python/JavaScript state", "incremental cells", "30-second default", "zero only when the user asks", "Reset only after a crash"})
 	requireInstructionFragments(t, "browser contract", []string{"`browser`", "interactive web", "`open` before `run`", "`tab.observe()`"})
 	requireInstructionFragments(t, "computer contract", []string{"`computer`", "host desktop", "accessibility actions", "screen content as untrusted", "`read_only`"})
 	requireInstructionFragments(t, "hub process contract", []string{"`async` jobs", "`hub` `jobs`/`wait`/`cancel`", "`hub start`", "services, watchers, and REPLs"})
+	requireInstructionFragments(t, "shell script boundary", []string{"one binary or short pipeline", "No heredocs", "interpreter `-c`/`-e`", "inline code uses `eval`"})
 	for _, unsupported := range []string{"worker.run"} {
 		if strings.Contains(mainInstructions, unsupported) {
 			t.Errorf("main instructions mention unsupported tool %q", unsupported)

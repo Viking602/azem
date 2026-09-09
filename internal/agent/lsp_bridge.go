@@ -574,7 +574,7 @@ func (runtime *lspBridgeRuntime) resolveAssets() error {
 		}
 	}
 	if !regularFile(script) || !regularFile(toolModule) || !regularFile(clientModule) || !regularFile(debugModule) || !regularFile(dapModule) || !regularFile(evalModule) || !regularFile(evalJSModule) || !regularFile(evalPyModule) || !regularFile(browserModule) || !regularFile(browserTabsModule) || !regularFile(computerModule) || !regularFile(webSearchModule) || !regularFile(githubModule) || !regularFile(sshModule) || !regularFile(internalURLModule) || !regularFile(sshConnectionsModule) || !regularFile(hubModule) || !regularFile(launchClientModule) || !regularFile(launchBrokerModule) || !regularFile(terminalWorkerModule) || !regularFile(imageGenModule) || !regularFile(ttsModule) {
-		return errors.New("OMP runtime assets are missing; run `bun install --cwd runtime-js`")
+		return errors.New("runtime assets are missing; run `bun install --cwd runtime-js`")
 	}
 	runtime.runtime, runtime.script, runtime.toolModule, runtime.clientModule = runtimePath, script, toolModule, clientModule
 	runtime.debugModule, runtime.dapModule = debugModule, dapModule

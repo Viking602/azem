@@ -144,18 +144,21 @@ files and `session_workspaces` ownership unchanged.
 A desktop behavior or build change is complete only after the packaged GPUI
 binary starts. On macOS:
 
-1. Run `make gpui`; the target signs and verifies
-   `dist/Azem-GPUI.app`, including its bundled `azem-daemon`.
-2. Launch `open dist/Azem-GPUI.app` or
+1. Run `make gpui`; the target bundles, signs, and verifies
+   `dist/Azem-GPUI.app`, including `azem-daemon` and its sibling `rg`.
+2. Run
+   `env -i PATH=/nonexistent dist/Azem-GPUI.app/Contents/MacOS/rg --version`
+   to prove packaged search has no system-`PATH` dependency.
+3. Launch `open dist/Azem-GPUI.app` or
    `dist/Azem-GPUI.app/Contents/MacOS/Azem --workspace "$PWD"`.
-3. Confirm the window reaches `Azem GPUI window ready`, the daemon endpoint is
+4. Confirm the window reaches `Azem GPUI window ready`, the daemon endpoint is
    created under `~/.azem/gpui-daemons/<workspace-hash>/`, and the current
    project/session snapshot renders.
-4. Start a turn, close the window, and reconnect. The daemon PID and active run
+5. Start a turn, close the window, and reconnect. The daemon PID and active run
    must remain; transcript and terminal state must restore.
-5. Exercise conversation, approval/Todo/agent, file/change, PR/security,
+6. Exercise conversation, approval/Todo/agent, file/change, PR/security,
    settings/extension/usage, attachment, and terminal navigation as applicable.
-6. Run `azem daemon status --workspace "$PWD"`, then stop only after the run is
+7. Run `azem daemon status --workspace "$PWD"`, then stop only after the run is
    terminal. `azem daemon stop` must refuse an active run without
    `--include-active`.
 

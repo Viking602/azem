@@ -28,10 +28,10 @@ const (
 )
 
 var (
-	ompSectionHeader = regexp.MustCompile(`^\[([^#\r\n]+)#([0-9A-F]{4})\]$`)
-	ompPutBody       = regexp.MustCompile(`^PUT (.+):$`)
-	ompPutRegister   = regexp.MustCompile(`^PUT (.+?)(?: @([A-Za-z0-9_-]+))?$`)
-	ompCut           = regexp.MustCompile(`^CUT (.+?)(?: @([A-Za-z0-9_-]+))?$`)
+	hashlineSectionHeader = regexp.MustCompile(`^\[([^#\r\n]+)#([0-9A-F]{4})\]$`)
+	hashlinePutBody       = regexp.MustCompile(`^PUT (.+):$`)
+	hashlinePutRegister   = regexp.MustCompile(`^PUT (.+?)(?: @([A-Za-z0-9_-]+))?$`)
+	hashlineCut           = regexp.MustCompile(`^CUT (.+?)(?: @([A-Za-z0-9_-]+))?$`)
 )
 
 type hashlineClipboard struct {
@@ -84,42 +84,42 @@ func hashlineRegisterBytes(values map[string][]string) int {
 	return total
 }
 
-type ompHashlineDriver struct {
+type hashlineDriver struct {
 	root         string
 	snapshotRead tool.Driver
 	clipboard    *hashlineClipboard
 	broker       *fileMutationBrokerRef
 }
 
-type ompHashlineInput struct {
+type hashlineInput struct {
 	Input string `json:"input"`
 }
 
-type ompPatch struct {
-	sections []ompPatchSection
+type hashlinePatch struct {
+	sections []hashlinePatchSection
 }
 
-type ompPatchSection struct {
+type hashlinePatchSection struct {
 	path string
 	tag  string
-	ops  []ompPatchOp
+	ops  []hashlinePatchOp
 }
 
-type ompPatchOp struct {
+type hashlinePatchOp struct {
 	kind     string
-	locator  ompLocator
+	locator  hashlineLocator
 	body     []string
 	register string
 	dest     string
 	sequence int
 }
 
-type ompLocator struct {
+type hashlineLocator struct {
 	kind       string
 	start, end int
 }
 
-type ompEditAction struct {
+type hashlineEditAction struct {
 	start, end int
 	gap        int
 	body       []string
@@ -127,7 +127,7 @@ type ompEditAction struct {
 	replace    bool
 }
 
-type ompPreparedFile struct {
+type hashlinePreparedFile struct {
 	source        string
 	destination   string
 	tag           string
@@ -135,7 +135,7 @@ type ompPreparedFile struct {
 	original      string
 	final         string
 	originalLines []string
-	actions       []ompEditAction
+	actions       []hashlineEditAction
 	mode          os.FileMode
 	remove        bool
 	move          bool
@@ -148,14 +148,14 @@ type originalFileState struct {
 	mode os.FileMode
 }
 
-func newOMPHashlineDriver(root string, snapshotRead tool.Driver, clipboard *hashlineClipboard, broker *fileMutationBrokerRef) tool.Driver {
+func newHashlineDriver(root string, snapshotRead tool.Driver, clipboard *hashlineClipboard, broker *fileMutationBrokerRef) tool.Driver {
 	if clipboard == nil {
 		clipboard = newHashlineClipboard()
 	}
-	return &ompHashlineDriver{root: root, snapshotRead: snapshotRead, clipboard: clipboard, broker: broker}
+	return &hashlineDriver{root: root, snapshotRead: snapshotRead, clipboard: clipboard, broker: broker}
 }
 
-func (driver *ompHashlineDriver) Definition() tool.Definition {
+func (driver *hashlineDriver) Definition() tool.Definition {
 	additional := true
 	return tool.Definition{
 		Name:        ToolEditHashline,
@@ -170,14 +170,14 @@ func (driver *ompHashlineDriver) Definition() tool.Definition {
 	}
 }
 
-func (driver *ompHashlineDriver) Execute(ctx context.Context, call tool.Call, sink tool.UpdateSink) (tool.Result, error) {
+func (driver *hashlineDriver) Execute(ctx context.Context, call tool.Call, sink tool.UpdateSink) (tool.Result, error) {
 	driver.clipboard.editMu.Lock()
 	defer driver.clipboard.editMu.Unlock()
-	var input ompHashlineInput
+	var input hashlineInput
 	if err := json.Unmarshal(call.Arguments, &input); err != nil {
 		return hashlineError(call, fmt.Errorf("decode arguments: %w", err)), nil
 	}
-	patch, err := parseOMPPatch(input.Input)
+	patch, err := parseHashlinePatch(input.Input)
 	if err != nil {
 		return hashlineError(call, err), nil
 	}
@@ -206,36 +206,36 @@ func (driver *ompHashlineDriver) Execute(ctx context.Context, call tool.Call, si
 	return tool.Result{ToolCallID: call.ID, Name: call.Name, Content: result.Content, Structured: structured}, nil
 }
 
-func parseOMPPatch(input string) (ompPatch, error) {
+func parseHashlinePatch(input string) (hashlinePatch, error) {
 	input = strings.ReplaceAll(strings.ReplaceAll(input, "\r\n", "\n"), "\r", "\n")
 	lines := strings.Split(input, "\n")
 	if len(lines) < 3 || lines[0] != "*** Begin Patch" {
-		return ompPatch{}, errors.New("patch must begin with *** Begin Patch")
+		return hashlinePatch{}, errors.New("patch must begin with *** Begin Patch")
 	}
 	end := len(lines) - 1
 	if lines[end] == "" {
 		end--
 	}
 	if end <= 0 || lines[end] != "*** End Patch" {
-		return ompPatch{}, errors.New("patch must end with *** End Patch")
+		return hashlinePatch{}, errors.New("patch must end with *** End Patch")
 	}
-	var patch ompPatch
+	var patch hashlinePatch
 	sequence := 0
 	for index := 1; index < end; {
-		header := ompSectionHeader.FindStringSubmatch(lines[index])
+		header := hashlineSectionHeader.FindStringSubmatch(lines[index])
 		if header == nil {
-			return ompPatch{}, fmt.Errorf("line %d: expected [PATH#TAG] section header", index+1)
+			return hashlinePatch{}, fmt.Errorf("line %d: expected [PATH#TAG] section header", index+1)
 		}
-		section := ompPatchSection{path: header[1], tag: header[2]}
+		section := hashlinePatchSection{path: header[1], tag: header[2]}
 		index++
-		for index < end && ompSectionHeader.FindStringSubmatch(lines[index]) == nil {
+		for index < end && hashlineSectionHeader.FindStringSubmatch(lines[index]) == nil {
 			line := lines[index]
 			if line == "" {
-				return ompPatch{}, fmt.Errorf("line %d: blank lines are not valid between hunks", index+1)
+				return hashlinePatch{}, fmt.Errorf("line %d: blank lines are not valid between hunks", index+1)
 			}
-			operation, consumesBody, err := parseOMPPatchOp(line, sequence)
+			operation, consumesBody, err := parseHashlinePatchOp(line, sequence)
 			if err != nil {
-				return ompPatch{}, fmt.Errorf("line %d: %w", index+1, err)
+				return hashlinePatch{}, fmt.Errorf("line %d: %w", index+1, err)
 			}
 			sequence++
 			index++
@@ -245,93 +245,93 @@ func parseOMPPatch(input string) (ompPatch, error) {
 					index++
 				}
 				if len(operation.body) == 0 {
-					return ompPatch{}, fmt.Errorf("line %d: PUT body requires at least one + row", index+1)
+					return hashlinePatch{}, fmt.Errorf("line %d: PUT body requires at least one + row", index+1)
 				}
 			}
 			section.ops = append(section.ops, operation)
 		}
 		if len(section.ops) == 0 {
-			return ompPatch{}, fmt.Errorf("section %s has no hunks", section.path)
+			return hashlinePatch{}, fmt.Errorf("section %s has no hunks", section.path)
 		}
 		patch.sections = append(patch.sections, section)
 	}
 	if len(patch.sections) == 0 {
-		return ompPatch{}, errors.New("patch has no file sections")
+		return hashlinePatch{}, errors.New("patch has no file sections")
 	}
 	return patch, nil
 }
 
-func parseOMPPatchOp(line string, sequence int) (ompPatchOp, bool, error) {
-	if match := ompPutBody.FindStringSubmatch(line); match != nil {
-		locator, err := parseOMPLocator(match[1], true)
+func parseHashlinePatchOp(line string, sequence int) (hashlinePatchOp, bool, error) {
+	if match := hashlinePutBody.FindStringSubmatch(line); match != nil {
+		locator, err := parseHashlineLocator(match[1], true)
 		if err != nil {
-			return ompPatchOp{}, false, err
+			return hashlinePatchOp{}, false, err
 		}
-		return ompPatchOp{kind: "put", locator: locator, sequence: sequence}, true, nil
+		return hashlinePatchOp{kind: "put", locator: locator, sequence: sequence}, true, nil
 	}
-	if match := ompPutRegister.FindStringSubmatch(line); match != nil {
-		locator, err := parseOMPLocator(match[1], true)
+	if match := hashlinePutRegister.FindStringSubmatch(line); match != nil {
+		locator, err := parseHashlineLocator(match[1], true)
 		if err != nil {
-			return ompPatchOp{}, false, err
+			return hashlinePatchOp{}, false, err
 		}
 		if (locator.kind == "range" || locator.kind == "block") && match[2] == "" {
-			return ompPatchOp{}, false, errors.New("range/block register PUT requires @name")
+			return hashlinePatchOp{}, false, errors.New("range/block register PUT requires @name")
 		}
-		return ompPatchOp{kind: "paste", locator: locator, register: match[2], sequence: sequence}, false, nil
+		return hashlinePatchOp{kind: "paste", locator: locator, register: match[2], sequence: sequence}, false, nil
 	}
-	if match := ompCut.FindStringSubmatch(line); match != nil {
-		locator, err := parseOMPLocator(match[1], false)
+	if match := hashlineCut.FindStringSubmatch(line); match != nil {
+		locator, err := parseHashlineLocator(match[1], false)
 		if err != nil || locator.kind != "range" && locator.kind != "block" {
-			return ompPatchOp{}, false, errors.New("CUT requires N.=M or N*")
+			return hashlinePatchOp{}, false, errors.New("CUT requires N.=M or N*")
 		}
-		return ompPatchOp{kind: "cut", locator: locator, register: match[2], sequence: sequence}, false, nil
+		return hashlinePatchOp{kind: "cut", locator: locator, register: match[2], sequence: sequence}, false, nil
 	}
 	if line == "REM" {
-		return ompPatchOp{kind: "remove", sequence: sequence}, false, nil
+		return hashlinePatchOp{kind: "remove", sequence: sequence}, false, nil
 	}
 	if strings.HasPrefix(line, "MV ") {
 		destination, err := parseMoveDestination(strings.TrimSpace(strings.TrimPrefix(line, "MV ")))
 		if err != nil {
-			return ompPatchOp{}, false, err
+			return hashlinePatchOp{}, false, err
 		}
-		return ompPatchOp{kind: "move", dest: destination, sequence: sequence}, false, nil
+		return hashlinePatchOp{kind: "move", dest: destination, sequence: sequence}, false, nil
 	}
-	return ompPatchOp{}, false, errors.New("unrecognized hunk")
+	return hashlinePatchOp{}, false, errors.New("unrecognized hunk")
 }
 
-func parseOMPLocator(value string, allowGap bool) (ompLocator, error) {
+func parseHashlineLocator(value string, allowGap bool) (hashlineLocator, error) {
 	value = strings.TrimSpace(value)
 	if value == ">$" && allowGap {
-		return ompLocator{kind: "tail"}, nil
+		return hashlineLocator{kind: "tail"}, nil
 	}
 	if strings.HasPrefix(value, ">") && strings.HasSuffix(value, "*") && allowGap {
 		line, err := positiveLine(strings.TrimSuffix(strings.TrimPrefix(value, ">"), "*"))
-		return ompLocator{kind: "after_block", start: line}, err
+		return hashlineLocator{kind: "after_block", start: line}, err
 	}
 	if strings.HasPrefix(value, "<") && allowGap {
 		line, err := positiveLine(strings.TrimPrefix(value, "<"))
-		return ompLocator{kind: "before", start: line}, err
+		return hashlineLocator{kind: "before", start: line}, err
 	}
 	if strings.HasPrefix(value, ">") && allowGap {
 		line, err := positiveLine(strings.TrimPrefix(value, ">"))
-		return ompLocator{kind: "after", start: line}, err
+		return hashlineLocator{kind: "after", start: line}, err
 	}
 	if strings.HasSuffix(value, "*") {
 		line, err := positiveLine(strings.TrimSuffix(value, "*"))
-		return ompLocator{kind: "block", start: line}, err
+		return hashlineLocator{kind: "block", start: line}, err
 	}
 	if left, right, found := strings.Cut(value, ".="); found {
 		start, err := positiveLine(left)
 		if err != nil {
-			return ompLocator{}, err
+			return hashlineLocator{}, err
 		}
 		end, err := positiveLine(right)
 		if err != nil || end < start {
-			return ompLocator{}, errors.New("range end must be at or after its start")
+			return hashlineLocator{}, errors.New("range end must be at or after its start")
 		}
-		return ompLocator{kind: "range", start: start, end: end}, nil
+		return hashlineLocator{kind: "range", start: start, end: end}, nil
 	}
-	return ompLocator{}, fmt.Errorf("invalid locator %q", value)
+	return hashlineLocator{}, fmt.Errorf("invalid locator %q", value)
 }
 
 func positiveLine(value string) (int, error) {
@@ -362,8 +362,8 @@ func parseMoveDestination(value string) (string, error) {
 	return value, nil
 }
 
-func (driver *ompHashlineDriver) preparePatch(ctx context.Context, root *os.Root, patch ompPatch, scope string) ([]*ompPreparedFile, map[string][]string, error) {
-	byPath := make(map[string]*ompPreparedFile)
+func (driver *hashlineDriver) preparePatch(ctx context.Context, root *os.Root, patch hashlinePatch, scope string) ([]*hashlinePreparedFile, map[string][]string, error) {
+	byPath := make(map[string]*hashlinePreparedFile)
 	var order []string
 	pendingRegisters := make(map[string][]string)
 	var anonymous []string
@@ -386,7 +386,7 @@ func (driver *ompHashlineDriver) preparePatch(ctx context.Context, root *os.Root
 			if actual := computeHashlineTag(normalized); actual != section.tag {
 				return nil, nil, fmt.Errorf("[%s#%s] is stale; current tag is %s", relative, section.tag, actual)
 			}
-			file = &ompPreparedFile{source: relative, destination: relative, tag: section.tag, rawOriginal: append([]byte(nil), raw...), original: normalized, originalLines: strings.Split(normalized, "\n"), mode: info.Mode().Perm()}
+			file = &hashlinePreparedFile{source: relative, destination: relative, tag: section.tag, rawOriginal: append([]byte(nil), raw...), original: normalized, originalLines: strings.Split(normalized, "\n"), mode: info.Mode().Perm()}
 			byPath[relative] = file
 			order = append(order, relative)
 		} else if file.tag != section.tag {
@@ -411,7 +411,7 @@ func (driver *ompHashlineDriver) preparePatch(ctx context.Context, root *os.Root
 				} else {
 					pendingRegisters[operation.register] = captured
 				}
-				file.actions = append(file.actions, ompEditAction{start: start, end: end, replace: true, sequence: operation.sequence})
+				file.actions = append(file.actions, hashlineEditAction{start: start, end: end, replace: true, sequence: operation.sequence})
 			case "paste":
 				var value []string
 				var ok bool
@@ -449,7 +449,7 @@ func (driver *ompHashlineDriver) preparePatch(ctx context.Context, root *os.Root
 			}
 		}
 	}
-	prepared := make([]*ompPreparedFile, 0, len(order))
+	prepared := make([]*hashlinePreparedFile, 0, len(order))
 	mutated := false
 	for _, path := range order {
 		file := byPath[path]
@@ -481,32 +481,32 @@ func (driver *ompHashlineDriver) preparePatch(ctx context.Context, root *os.Root
 	return prepared, pendingRegisters, nil
 }
 
-func resolveHashlineAction(path, text string, lines []string, locator ompLocator, body []string, sequence int) (ompEditAction, error) {
+func resolveHashlineAction(path, text string, lines []string, locator hashlineLocator, body []string, sequence int) (hashlineEditAction, error) {
 	switch locator.kind {
 	case "range", "block":
 		start, end, err := resolveHashlineRange(path, text, lines, locator)
-		return ompEditAction{start: start, end: end, body: append([]string(nil), body...), replace: true, sequence: sequence}, err
+		return hashlineEditAction{start: start, end: end, body: append([]string(nil), body...), replace: true, sequence: sequence}, err
 	case "before":
 		if locator.start > len(lines) {
-			return ompEditAction{}, fmt.Errorf("line %d is outside %s", locator.start, path)
+			return hashlineEditAction{}, fmt.Errorf("line %d is outside %s", locator.start, path)
 		}
-		return ompEditAction{gap: locator.start - 1, body: append([]string(nil), body...), sequence: sequence}, nil
+		return hashlineEditAction{gap: locator.start - 1, body: append([]string(nil), body...), sequence: sequence}, nil
 	case "after":
 		if locator.start > len(lines) {
-			return ompEditAction{}, fmt.Errorf("line %d is outside %s", locator.start, path)
+			return hashlineEditAction{}, fmt.Errorf("line %d is outside %s", locator.start, path)
 		}
-		return ompEditAction{gap: locator.start, body: append([]string(nil), body...), sequence: sequence}, nil
+		return hashlineEditAction{gap: locator.start, body: append([]string(nil), body...), sequence: sequence}, nil
 	case "tail":
-		return ompEditAction{gap: len(lines), body: append([]string(nil), body...), sequence: sequence}, nil
+		return hashlineEditAction{gap: len(lines), body: append([]string(nil), body...), sequence: sequence}, nil
 	case "after_block":
 		_, end, err := resolveHashlineBlock(path, text, locator.start)
-		return ompEditAction{gap: end, body: append([]string(nil), body...), sequence: sequence}, err
+		return hashlineEditAction{gap: end, body: append([]string(nil), body...), sequence: sequence}, err
 	default:
-		return ompEditAction{}, errors.New("unsupported locator")
+		return hashlineEditAction{}, errors.New("unsupported locator")
 	}
 }
 
-func resolveHashlineRange(path, text string, lines []string, locator ompLocator) (int, int, error) {
+func resolveHashlineRange(path, text string, lines []string, locator hashlineLocator) (int, int, error) {
 	if locator.kind == "range" {
 		if locator.start > len(lines) || locator.end > len(lines) {
 			return 0, 0, fmt.Errorf("range %d–%d is outside %s", locator.start, locator.end, path)
@@ -519,10 +519,10 @@ func resolveHashlineRange(path, text string, lines []string, locator ompLocator)
 	return 0, 0, errors.New("locator is not a range or block")
 }
 
-func applyHashlineActions(lines []string, actions []ompEditAction) ([]string, error) {
-	replacements := make(map[int]ompEditAction)
-	insertions := make(map[int][]ompEditAction)
-	var ranges []ompEditAction
+func applyHashlineActions(lines []string, actions []hashlineEditAction) ([]string, error) {
+	replacements := make(map[int]hashlineEditAction)
+	insertions := make(map[int][]hashlineEditAction)
+	var ranges []hashlineEditAction
 	for _, action := range actions {
 		if !action.replace {
 			continue
@@ -570,7 +570,7 @@ func applyHashlineActions(lines []string, actions []ompEditAction) ([]string, er
 	return result, nil
 }
 
-func validateHashlineDestinations(root *os.Root, prepared []*ompPreparedFile) error {
+func validateHashlineDestinations(root *os.Root, prepared []*hashlinePreparedFile) error {
 	sources := make(map[string]bool, len(prepared))
 	outputs := make(map[string]string)
 	for _, file := range prepared {
@@ -595,7 +595,7 @@ func validateHashlineDestinations(root *os.Root, prepared []*ompPreparedFile) er
 	return nil
 }
 
-func (driver *ompHashlineDriver) commitPatch(ctx context.Context, root *os.Root, prepared []*ompPreparedFile) error {
+func (driver *hashlineDriver) commitPatch(ctx context.Context, root *os.Root, prepared []*hashlinePreparedFile) error {
 	err := driver.commitPatchLocal(ctx, root, prepared)
 	if err == nil || !permissionMutationError(err) {
 		return err
@@ -607,9 +607,9 @@ func (driver *ompHashlineDriver) commitPatch(ctx context.Context, root *os.Root,
 	return driver.commitPatchBroker(ctx, root, prepared, broker, err)
 }
 
-func (driver *ompHashlineDriver) commitPatchLocal(ctx context.Context, root *os.Root, prepared []*ompPreparedFile) error {
+func (driver *hashlineDriver) commitPatchLocal(ctx context.Context, root *os.Root, prepared []*hashlinePreparedFile) error {
 	originals := make(map[string]originalFileState, len(prepared))
-	outputs := make(map[string]*ompPreparedFile)
+	outputs := make(map[string]*hashlinePreparedFile)
 	for _, file := range prepared {
 		current, err := root.ReadFile(filepath.FromSlash(file.source))
 		if err != nil || string(current) != string(file.rawOriginal) {
@@ -683,9 +683,9 @@ func (driver *ompHashlineDriver) commitPatchLocal(ctx context.Context, root *os.
 	return nil
 }
 
-func (driver *ompHashlineDriver) commitPatchBroker(ctx context.Context, root *os.Root, prepared []*ompPreparedFile, broker FileMutationBroker, originalCause error) error {
+func (driver *hashlineDriver) commitPatchBroker(ctx context.Context, root *os.Root, prepared []*hashlinePreparedFile, broker FileMutationBroker, originalCause error) error {
 	originals := make(map[string]originalFileState, len(prepared))
-	outputs := make(map[string]*ompPreparedFile)
+	outputs := make(map[string]*hashlinePreparedFile)
 	for _, file := range prepared {
 		current, err := root.ReadFile(filepath.FromSlash(file.source))
 		if err != nil || string(current) != string(file.rawOriginal) {
@@ -832,7 +832,7 @@ func combineRollbackError(commit, rollback error) error {
 	return fmt.Errorf("commit failed: %v; rollback failed: %w", commit, rollback)
 }
 
-func (driver *ompHashlineDriver) buildHashlineResult(ctx context.Context, prepared []*ompPreparedFile) EditHashlineResult {
+func (driver *hashlineDriver) buildHashlineResult(ctx context.Context, prepared []*hashlinePreparedFile) EditHashlineResult {
 	sections := make([]EditSectionResult, 0, len(prepared))
 	var content strings.Builder
 	for index, file := range prepared {
@@ -883,7 +883,7 @@ func (driver *ompHashlineDriver) buildHashlineResult(ctx context.Context, prepar
 	return result
 }
 
-func (driver *ompHashlineDriver) recordHashlineSnapshot(ctx context.Context, path, content string) (string, string) {
+func (driver *hashlineDriver) recordHashlineSnapshot(ctx context.Context, path, content string) (string, string) {
 	tag := computeHashlineTag(content)
 	if driver.snapshotRead != nil {
 		arguments, _ := json.Marshal(map[string]any{"path": path, "startLine": 1, "endLine": 1})

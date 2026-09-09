@@ -177,7 +177,9 @@ func (runtime *Runtime) Close() error {
 		if runtime.boot.Service != nil {
 			runtime.closeErr = errors.Join(runtime.closeErr, runtime.boot.Service.Shutdown(shutdownCtx))
 		}
-		_ = os.Remove(runtime.endpointPath)
+		// Keep non-secret endpoint metadata so a cold renderer can restore the
+		// last workspace. The token is removed below, so stale metadata cannot
+		// authenticate or make a stopped daemon appear live.
 		_ = os.Remove(runtime.tokenPath)
 	})
 	return runtime.closeErr

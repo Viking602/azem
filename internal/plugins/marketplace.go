@@ -625,7 +625,7 @@ func adaptMarketplacePlugin(sourceRoot string, plugin MarketplacePlugin, version
 		if info, err := os.Stat(sourceManifest); err != nil || !info.Mode().IsRegular() {
 			sourceManifest = filepath.Join(sourceRoot, ".claude-plugin", "plugin.json")
 			if info, err := os.Stat(sourceManifest); err != nil || !info.Mode().IsRegular() {
-				return "", nil, errors.New("marketplace plugin requires .omp-plugin, .claude-plugin, or .codex-plugin/plugin.json")
+				return "", nil, errors.New("marketplace plugin requires a supported plugin manifest")
 			}
 		}
 	}
