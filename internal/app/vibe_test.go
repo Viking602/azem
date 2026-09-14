@@ -574,6 +574,23 @@ func TestVibeSaveRecordDoesNotClobberNewerReservation(t *testing.T) {
 	}
 }
 
+func TestVibeSaveRecordDoesNotReviveDeadSession(t *testing.T) {
+	runtime := &subagentRuntime{vibe: map[vibeSessionKey]vibeRecord{}}
+	driver := &vibeDriver{runtime: runtime, parent: subagentParentRuntime{SessionID: "session"}}
+	gen, err := driver.reserveName("WorkerA", "fast")
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, _ := driver.record("WorkerA")
+	driver.markDead("WorkerA", gen)
+	live.State, live.RunID = "running", "run-a"
+	driver.saveRecord(live)
+	got, _ := driver.record("WorkerA")
+	if got.State != "dead" {
+		t.Fatalf("same-generation save revived %#v", got)
+	}
+}
+
 func TestVibeReserveDeadNameWhileStopping(t *testing.T) {
 	runtime := &subagentRuntime{
 		vibe: map[vibeSessionKey]vibeRecord{},

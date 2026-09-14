@@ -310,6 +310,7 @@ func (driver *vibeDriver) kill(ctx context.Context, call tool.Call) tool.Result 
 	}
 	cancelled := false
 	generation := record.generation
+	driver.markDead(input.Session, generation)
 	if runID := driver.activeRunID(input.Session); runID != "" {
 		outcome := driver.runtime.Cancel(driver.parent.SessionID, runID)
 		cancelled = outcome.Outcome != "not_found"
@@ -322,7 +323,6 @@ func (driver *vibeDriver) kill(ctx context.Context, call tool.Call) tool.Result 
 		}
 	}
 	driver.runtime.mu.Unlock()
-	driver.markDead(input.Session, generation)
 	if err := driver.persistRegistry(ctx); err != nil {
 		return vibeError(call, err)
 	}
@@ -400,6 +400,9 @@ func (driver *vibeDriver) saveRecord(record vibeRecord) {
 		}
 		if record.generation == 0 {
 			record.generation = current.generation
+		}
+		if current.State == "dead" && record.generation == current.generation {
+			return
 		}
 	}
 	if driver.runtime.vibe == nil {
