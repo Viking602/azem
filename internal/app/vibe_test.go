@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -12,8 +13,10 @@ import (
 	"time"
 
 	agentservice "github.com/Viking602/azem/internal/agent"
-
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/azem/internal/config"
+	"github.com/Viking602/azem/internal/session"
+	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 	"github.com/Viking602/venat/tool"
 )
 
@@ -273,7 +276,7 @@ func TestWorkflowSettingPersistsAndRejectsInvalidChanges(t *testing.T) {
 	cfg.Agents.Fusion = config.ModelRouteConfig{Provider: "grok", Model: "grok-test", Reasoning: "high"}
 	s := NewService(ctx, cfg)
 	s.configPath = filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(s.configPath, []byte("version: 1\n# preserve existing route settings\nagents:\n  fusion:\n    provider: grok\n    model: grok-test\n    reasoning: high\n"), 0600); err != nil {
+	if err := os.WriteFile(s.configPath, []byte("version: 1\n# preserve existing route settings\nagents:\n  fusion:\n    provider: grok\n    model: grok-test\n    reasoning: high\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	s.activeRun, s.activeSession = "existing-run", "existing-session"
@@ -320,4 +323,230 @@ func TestWorkflowInstructionsAreExclusiveAndStable(t *testing.T) {
 	if request.AgentMode != "vibe" || !request.VibeMode {
 		t.Fatal("legacy Vibe request was not normalized")
 	}
+}
+
+func TestVibeSpawnPersistFailureAllowsReuse(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	runtime, provider, coding, _ := newGatedForegroundHarness(t, ctx, 0)
+	defer runtime.Shutdown(ctx)
+	defer coding.Close(ctx)
+	defer func() {
+		for {
+			select {
+			case <-provider.started:
+				provider.release <- struct{}{}
+			default:
+				return
+			}
+		}
+	}()
+	closed, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := session.NewService(closed.DB(), closed.Blobs())
+	if err := closed.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	host := NewService(ctx, config.Default())
+	host.sessions = sessions
+	parent := subagentParentRuntime{
+		SessionID: "session", ParentRunID: "director", ProviderID: "test", AccountID: "test-account", ModelID: "model", Reasoning: "high",
+		Driver: provider, Coding: coding, WorkspaceRoot: t.TempDir(), DirectorReadOnly: true,
+	}
+	drivers, err := newVibeDrivers(runtime, parent, config.VibeConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spawn := vibeTool(t, drivers, vibeSpawnTool).(*vibeDriver)
+	spawn.parent.Host = host
+	first := executeVibe(t, ctx, spawn, `{"cli":"fast","name":"WorkerA","prompt":"inspect persist failure"}`)
+	if !first.IsError {
+		t.Fatalf("persist failure = %#v", first)
+	}
+	if record, exists := spawn.record("WorkerA"); exists && record.State != "dead" {
+		t.Fatalf("failed spawn left live record %#v", record)
+	}
+	select {
+	case <-provider.started:
+	default:
+	}
+	spawn.parent.Host = nil
+	second := executeVibe(t, ctx, spawn, `{"cli":"fast","name":"WorkerA","prompt":"inspect persist recovery"}`)
+	if second.IsError {
+		t.Fatalf("reuse after persist failure = %#v", second)
+	}
+	select {
+	case <-provider.started:
+		provider.release <- struct{}{}
+	case <-ctx.Done():
+		t.Fatal("reused Vibe worker did not start")
+	}
+}
+
+func TestVibeRestoreSkipsMissingWorkerRuns(t *testing.T) {
+	ctx := context.Background()
+	providerStore, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = providerStore.Close(ctx) })
+	sessions := session.NewService(providerStore.DB(), providerStore.Blobs())
+	if _, err := sessions.Ensure(ctx, session.Session{ID: "session", Title: "Vibe"}); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(vibeRegistryState{Version: 1, Records: []vibeRecord{
+		{Name: "Gone", RunID: "purged", CLI: "fast", State: "idle"},
+		{Name: "Alive", RunID: "alive", CLI: "good", State: "idle"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sessions.PutArtifact(ctx, "session", "director", vibeRegistryArtifactKind, payload, ""); err != nil {
+		t.Fatal(err)
+	}
+	host := NewService(ctx, config.Default())
+	host.sessions = sessions
+	runtime := &subagentRuntime{
+		ctx: ctx,
+		store: mapVibeRunStore{runs: map[string]agentservice.SubagentRun{
+			"alive": {ID: "alive", SessionID: "session"},
+		}},
+		vibe: make(map[vibeSessionKey]vibeRecord),
+	}
+	parent := subagentParentRuntime{SessionID: "session", Host: host}
+	drivers, err := newVibeDrivers(runtime, parent, config.VibeConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	driver := vibeTool(t, drivers, vibeListTool).(*vibeDriver)
+	if _, exists := driver.record("Gone"); exists {
+		t.Fatal("purged worker restored")
+	}
+	alive, exists := driver.record("Alive")
+	if !exists || alive.RunID != "alive" {
+		t.Fatalf("live worker = %#v exists=%v", alive, exists)
+	}
+}
+
+func TestVibeRestoreKeepsFatalStoreErrors(t *testing.T) {
+	ctx := context.Background()
+	providerStore, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = providerStore.Close(ctx) })
+	sessions := session.NewService(providerStore.DB(), providerStore.Blobs())
+	if _, err := sessions.Ensure(ctx, session.Session{ID: "session", Title: "Vibe"}); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(vibeRegistryState{Version: 1, Records: []vibeRecord{
+		{Name: "Worker", RunID: "broken", CLI: "fast", State: "idle"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sessions.PutArtifact(ctx, "session", "director", vibeRegistryArtifactKind, payload, ""); err != nil {
+		t.Fatal(err)
+	}
+	host := NewService(ctx, config.Default())
+	host.sessions = sessions
+	runtime := &subagentRuntime{ctx: ctx, store: mapVibeRunStore{fatal: fmt.Errorf("disk failed")}, vibe: make(map[vibeSessionKey]vibeRecord)}
+	if _, err := newVibeDrivers(runtime, subagentParentRuntime{SessionID: "session", Host: host}, config.VibeConfig{}); err == nil || !strings.Contains(err.Error(), "disk failed") {
+		t.Fatalf("fatal restore error = %v", err)
+	}
+}
+
+func TestVibeParallelSpawnRejectsDuplicateNames(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	runtime, provider, coding, _ := newGatedForegroundHarness(t, ctx, 0)
+	defer runtime.Shutdown(ctx)
+	defer coding.Close(ctx)
+	defer func() {
+		for {
+			select {
+			case <-provider.started:
+				provider.release <- struct{}{}
+			default:
+				return
+			}
+		}
+	}()
+	parent := subagentParentRuntime{
+		SessionID: "session", ParentRunID: "director", ProviderID: "test", AccountID: "test-account", ModelID: "model", Reasoning: "high",
+		Driver: provider, Coding: coding, WorkspaceRoot: t.TempDir(), DirectorReadOnly: true,
+	}
+	drivers, err := newVibeDrivers(runtime, parent, config.VibeConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spawn := vibeTool(t, drivers, vibeSpawnTool)
+	start := make(chan struct{})
+	results := make(chan tool.Result, 2)
+	for i := range 2 {
+		go func(id string) {
+			<-start
+			result, executeErr := spawn.Execute(ctx, tool.Call{ID: id, Name: vibeSpawnTool, Arguments: json.RawMessage(`{"cli":"fast","name":"Shared","prompt":"inspect race"}`)}, nil)
+			if executeErr != nil {
+				t.Errorf("execute: %v", executeErr)
+				results <- tool.Result{IsError: true, Content: executeErr.Error()}
+				return
+			}
+			results <- result
+		}(fmt.Sprintf("spawn-%d", i))
+	}
+	close(start)
+	first, second := <-results, <-results
+	var success, duplicates int
+	for _, result := range []tool.Result{first, second} {
+		if result.IsError {
+			if !strings.Contains(result.Content, "already exists") {
+				t.Fatalf("unexpected parallel spawn error %#v", result)
+			}
+			duplicates++
+			continue
+		}
+		success++
+	}
+	if success != 1 || duplicates != 1 {
+		t.Fatalf("parallel spawn success=%d duplicates=%d first=%#v second=%#v", success, duplicates, first, second)
+	}
+}
+
+type mapVibeRunStore struct {
+	runs  map[string]agentservice.SubagentRun
+	fatal error
+}
+
+func (s mapVibeRunStore) Create(context.Context, agentservice.SubagentRun) error {
+	return nil
+}
+
+func (s mapVibeRunStore) Save(context.Context, agentservice.SubagentRun) error {
+	return nil
+}
+
+func (s mapVibeRunStore) Get(_ context.Context, id string) (agentservice.SubagentRun, error) {
+	if s.fatal != nil {
+		return agentservice.SubagentRun{}, s.fatal
+	}
+	run, ok := s.runs[id]
+	if !ok {
+		return agentservice.SubagentRun{}, agentruntime.ErrNotFound
+	}
+	return run, nil
+}
+
+func (s mapVibeRunStore) List(context.Context, string) ([]agentservice.SubagentRun, error) {
+	return nil, nil
+}
+
+func (s mapVibeRunStore) SetCompletionDelivered(context.Context, string, bool) error {
+	return nil
+}
+
+func (s mapVibeRunStore) InterruptIncomplete(context.Context, time.Time) (int64, error) {
+	return 0, nil
 }

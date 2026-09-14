@@ -23,6 +23,9 @@
 - Split native core workflows into Vibe scheduling and Fusion collaboration, persist
   the choice in Settings, remove the composer Fusion switch, and return the first
   completed worker from Vibe waits.
+- Keep Vibe worker names reusable after a registry persist failure, skip purged
+  worker runs during restore so Vibe tools still load, and reserve names before
+  parallel spawn so two workers cannot share one session name.
 - Remove the React/Wails desktop, its webview adapter, frontend dependencies,
   TypeScript contract output, and build targets. GPUI and TUI retain the shared daemon.
 - Remove the bundled JavaScript runtime (`runtime-js/`) and every tool and bridge

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	agentservice "github.com/Viking602/azem/internal/agent"
+	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/session"
 	"github.com/Viking602/venat/message"
@@ -159,12 +160,9 @@ func (driver *vibeDriver) spawn(ctx context.Context, call tool.Call) tool.Result
 	if !validSubagentBatchName(input.Name) {
 		return vibeError(call, fmt.Errorf("name must contain 1-48 letters, numbers, underscores, or hyphens"))
 	}
-	driver.runtime.mu.Lock()
-	if record, exists := driver.runtime.vibe[vibeSessionKey{driver.parent.SessionID, strings.ToLower(input.Name)}]; exists && record.State != "dead" {
-		driver.runtime.mu.Unlock()
-		return vibeError(call, fmt.Errorf("vibe session %q already exists; use vibe_send", input.Name))
+	if err := driver.reserveName(input.Name, input.CLI); err != nil {
+		return vibeError(call, err)
 	}
-	driver.runtime.mu.Unlock()
 	route := driver.routes.Fast
 	if input.CLI == "good" {
 		route = driver.routes.Good
@@ -176,17 +174,13 @@ func (driver *vibeDriver) spawn(ctx context.Context, call tool.Call) tool.Result
 	}
 	run, err := driver.runtime.spawn(spawnInput, driver.parent, nil)
 	if err != nil {
+		driver.forgetRecord(input.Name)
 		return vibeError(call, err)
 	}
 	record := vibeRecord{Name: input.Name, CLI: input.CLI, RunID: run.ID, State: "running", Model: firstNonempty(route.Model, driver.parent.ModelID)}
-	driver.runtime.mu.Lock()
-	if driver.runtime.vibe == nil {
-		driver.runtime.vibe = make(map[vibeSessionKey]vibeRecord)
-	}
-	driver.runtime.vibe[vibeSessionKey{driver.parent.SessionID, strings.ToLower(input.Name)}] = record
-	driver.runtime.mu.Unlock()
+	driver.saveRecord(record)
 	if err := driver.persistRegistry(ctx); err != nil {
-		driver.runtime.Cancel(driver.parent.SessionID, run.ID)
+		driver.abandonSpawn(input.Name, run.ID)
 		return vibeError(call, err)
 	}
 	return vibeResult(call, fmt.Sprintf("Spawned %s session `%s`. Its turn runs in the background; keep directing other sessions or call vibe_wait when blocked.", input.CLI, input.Name), map[string]any{"op": "spawn", "spawned": record, "screens": driver.screens(nil)})
@@ -397,6 +391,56 @@ func (driver *vibeDriver) saveRecord(record vibeRecord) {
 	driver.runtime.mu.Unlock()
 }
 
+func (driver *vibeDriver) reserveName(name, cli string) error {
+	key := vibeSessionKey{driver.parent.SessionID, strings.ToLower(name)}
+	driver.runtime.mu.Lock()
+	defer driver.runtime.mu.Unlock()
+	if record, exists := driver.runtime.vibe[key]; exists && record.State != "dead" {
+		return fmt.Errorf("vibe session %q already exists; use vibe_send", name)
+	}
+	if driver.runtime.vibe == nil {
+		driver.runtime.vibe = make(map[vibeSessionKey]vibeRecord)
+	}
+	driver.runtime.vibe[key] = vibeRecord{Name: name, CLI: cli, State: "starting"}
+	return nil
+}
+
+func (driver *vibeDriver) forgetRecord(name string) {
+	driver.runtime.mu.Lock()
+	delete(driver.runtime.vibe, vibeSessionKey{driver.parent.SessionID, strings.ToLower(name)})
+	driver.runtime.mu.Unlock()
+}
+
+func (driver *vibeDriver) dropParked(name string) {
+	driver.runtime.mu.Lock()
+	defer driver.runtime.mu.Unlock()
+	for id, parked := range driver.runtime.parked {
+		if parked.run.SessionID == driver.parent.SessionID && strings.EqualFold(parked.name, name) {
+			delete(driver.runtime.parked, id)
+		}
+	}
+}
+
+func (driver *vibeDriver) abandonSpawn(name, runID string) {
+	var done chan struct{}
+	if runID != "" {
+		driver.runtime.Cancel(driver.parent.SessionID, runID)
+		driver.runtime.mu.Lock()
+		if active := driver.runtime.active[runID]; active != nil && active.run.SessionID == driver.parent.SessionID {
+			done = active.done
+		}
+		driver.runtime.mu.Unlock()
+	}
+	if done != nil {
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+		}
+	}
+	driver.dropParked(name)
+	driver.forgetRecord(name)
+}
+
 func (driver *vibeDriver) activeRunID(name string) string {
 	driver.runtime.mu.Lock()
 	defer driver.runtime.mu.Unlock()
@@ -421,9 +465,18 @@ func restoreVibeRegistry(runtime *subagentRuntime, parent subagentParentRuntime)
 	if state.Version != 1 {
 		return fmt.Errorf("Vibe registry version %d is unsupported", state.Version)
 	}
+	if runtime.store == nil {
+		return nil
+	}
 	driver := &vibeDriver{runtime: runtime, parent: parent}
 	for _, record := range state.Records {
+		if strings.TrimSpace(record.RunID) == "" {
+			continue
+		}
 		run, err := runtime.store.Get(runtime.ctx, record.RunID)
+		if errors.Is(err, agentruntime.ErrNotFound) {
+			continue
+		}
 		if err != nil {
 			return fmt.Errorf("load Vibe worker owner: %w", err)
 		}
