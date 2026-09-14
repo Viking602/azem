@@ -525,6 +525,60 @@ func TestVibeScreensKeepStartingReservation(t *testing.T) {
 	}
 }
 
+func TestVibeCommitSpawnRejectsStolenReservation(t *testing.T) {
+	runtime := &subagentRuntime{vibe: map[vibeSessionKey]vibeRecord{}}
+	driver := &vibeDriver{runtime: runtime, parent: subagentParentRuntime{SessionID: "session"}}
+	gen1, err := driver.reserveName("WorkerA", "fast")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, _ := driver.record("WorkerA")
+	record.State = "dead"
+	driver.saveRecord(record)
+	gen2, err := driver.reserveName("WorkerA", "fast")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gen1 == gen2 {
+		t.Fatal("reservation generation was reused")
+	}
+	if driver.commitSpawn("WorkerA", vibeRecord{Name: "WorkerA", RunID: "old", State: "running"}, gen1) {
+		t.Fatal("killed spawn stole the new reservation")
+	}
+	if !driver.commitSpawn("WorkerA", vibeRecord{Name: "WorkerA", RunID: "new", State: "running"}, gen2) {
+		t.Fatal("new reservation was not committed")
+	}
+	got, _ := driver.record("WorkerA")
+	if got.RunID != "new" {
+		t.Fatalf("committed %#v", got)
+	}
+}
+
+func TestVibeAbandonTimeoutDoesNotReviveKilledWorker(t *testing.T) {
+	previous := vibeAbandonWait
+	vibeAbandonWait = time.Millisecond
+	t.Cleanup(func() { vibeAbandonWait = previous })
+	runtime := &subagentRuntime{
+		store: mapVibeRunStore{},
+		vibe:  map[vibeSessionKey]vibeRecord{},
+		active: map[string]*activeSubagent{
+			"run-a": {
+				name:   "WorkerA",
+				run:    agentservice.SubagentRun{ID: "run-a", SessionID: "session", State: agentservice.SubagentRunning},
+				done:   make(chan struct{}),
+				cancel: func() {},
+				slot:   true,
+			},
+		},
+	}
+	driver := &vibeDriver{runtime: runtime, parent: subagentParentRuntime{SessionID: "session"}}
+	driver.saveRecord(vibeRecord{Name: "WorkerA", CLI: "fast", State: "dead", generation: 1})
+	driver.abandonSpawn("WorkerA", "run-a", 1)
+	if got, exists := driver.record("WorkerA"); exists && got.State == "running" {
+		t.Fatalf("killed worker resurrected %#v", got)
+	}
+}
+
 func TestVibeKillDuringSpawnAbandonsWorker(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()

@@ -254,6 +254,7 @@ type subagentRuntime struct {
 	peerMailboxes    map[string][]hubPeerMessage
 	peerChanged      chan struct{}
 	vibe             map[vibeSessionKey]vibeRecord
+	vibeSeq          uint64
 	peerNext         uint64
 	idleCheckEvery   time.Duration
 	wg               sync.WaitGroup

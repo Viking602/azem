@@ -26,6 +26,8 @@ const (
 	vibeListTool             = "vibe_list"
 )
 
+var vibeAbandonWait = 5 * time.Second
+
 type vibeSessionKey struct {
 	sessionID, name string
 }
@@ -40,6 +42,7 @@ type vibeRecord struct {
 	Model      string `json:"model,omitempty"`
 	LastOutput string `json:"lastOutput,omitempty"`
 	LastError  string `json:"lastError,omitempty"`
+	generation uint64
 }
 type vibeRegistryState struct {
 	Version int          `json:"version"`
@@ -160,7 +163,8 @@ func (driver *vibeDriver) spawn(ctx context.Context, call tool.Call) tool.Result
 	if !validSubagentBatchName(input.Name) {
 		return vibeError(call, fmt.Errorf("name must contain 1-48 letters, numbers, underscores, or hyphens"))
 	}
-	if err := driver.reserveName(input.Name, input.CLI); err != nil {
+	generation, err := driver.reserveName(input.Name, input.CLI)
+	if err != nil {
 		return vibeError(call, err)
 	}
 	route := driver.routes.Fast
@@ -174,16 +178,16 @@ func (driver *vibeDriver) spawn(ctx context.Context, call tool.Call) tool.Result
 	}
 	run, err := driver.runtime.spawn(spawnInput, driver.parent, nil)
 	if err != nil {
-		driver.forgetRecord(input.Name)
+		driver.forgetRecord(input.Name, generation)
 		return vibeError(call, err)
 	}
-	record := vibeRecord{Name: input.Name, CLI: input.CLI, RunID: run.ID, State: "running", Model: firstNonempty(route.Model, driver.parent.ModelID)}
-	if !driver.commitSpawn(input.Name, record) {
-		driver.abandonSpawn(input.Name, run.ID)
+	record := vibeRecord{Name: input.Name, CLI: input.CLI, RunID: run.ID, State: "running", Model: firstNonempty(route.Model, driver.parent.ModelID), generation: generation}
+	if !driver.commitSpawn(input.Name, record, generation) {
+		driver.abandonSpawn(input.Name, run.ID, generation)
 		return vibeError(call, fmt.Errorf("vibe session %q was killed", input.Name))
 	}
 	if err := driver.persistRegistry(ctx); err != nil {
-		driver.abandonSpawn(input.Name, run.ID)
+		driver.abandonSpawn(input.Name, run.ID, generation)
 		return vibeError(call, err)
 	}
 	return vibeResult(call, fmt.Sprintf("Spawned %s session `%s`. Its turn runs in the background; keep directing other sessions or call vibe_wait when blocked.", input.CLI, input.Name), map[string]any{"op": "spawn", "spawned": record, "screens": driver.screens(nil)})
@@ -394,49 +398,59 @@ func (driver *vibeDriver) saveRecord(record vibeRecord) {
 	driver.runtime.mu.Unlock()
 }
 
-func (driver *vibeDriver) reserveName(name, cli string) error {
+func (driver *vibeDriver) reserveName(name, cli string) (uint64, error) {
 	key := vibeSessionKey{driver.parent.SessionID, strings.ToLower(name)}
 	driver.runtime.mu.Lock()
 	defer driver.runtime.mu.Unlock()
 	if record, exists := driver.runtime.vibe[key]; exists && record.State != "dead" {
-		return fmt.Errorf("vibe session %q already exists; use vibe_send", name)
+		return 0, fmt.Errorf("vibe session %q already exists; use vibe_send", name)
+	}
+	if driver.activeRunIDLocked(name) != "" {
+		return 0, fmt.Errorf("vibe session %q already exists; use vibe_send", name)
 	}
 	if driver.runtime.vibe == nil {
 		driver.runtime.vibe = make(map[vibeSessionKey]vibeRecord)
 	}
-	driver.runtime.vibe[key] = vibeRecord{Name: name, CLI: cli, State: "starting"}
-	return nil
+	driver.runtime.vibeSeq++
+	generation := driver.runtime.vibeSeq
+	driver.runtime.vibe[key] = vibeRecord{Name: name, CLI: cli, State: "starting", generation: generation}
+	return generation, nil
 }
 
-func (driver *vibeDriver) commitSpawn(name string, record vibeRecord) bool {
+func (driver *vibeDriver) commitSpawn(name string, record vibeRecord, generation uint64) bool {
 	key := vibeSessionKey{driver.parent.SessionID, strings.ToLower(name)}
 	driver.runtime.mu.Lock()
 	defer driver.runtime.mu.Unlock()
 	current, exists := driver.runtime.vibe[key]
-	if !exists || current.State == "dead" {
+	if !exists || current.State == "dead" || current.generation != generation {
 		return false
 	}
+	record.generation = generation
 	driver.runtime.vibe[key] = record
 	return true
 }
 
-func (driver *vibeDriver) forgetRecord(name string) {
+func (driver *vibeDriver) forgetRecord(name string, generation uint64) {
+	key := vibeSessionKey{driver.parent.SessionID, strings.ToLower(name)}
 	driver.runtime.mu.Lock()
-	delete(driver.runtime.vibe, vibeSessionKey{driver.parent.SessionID, strings.ToLower(name)})
-	driver.runtime.mu.Unlock()
+	defer driver.runtime.mu.Unlock()
+	current, exists := driver.runtime.vibe[key]
+	if exists && current.generation == generation {
+		delete(driver.runtime.vibe, key)
+	}
 }
 
-func (driver *vibeDriver) dropParked(name string) {
+func (driver *vibeDriver) dropParkedRun(name, runID string) {
 	driver.runtime.mu.Lock()
 	defer driver.runtime.mu.Unlock()
 	for id, parked := range driver.runtime.parked {
-		if parked.run.SessionID == driver.parent.SessionID && strings.EqualFold(parked.name, name) {
+		if parked.run.SessionID == driver.parent.SessionID && strings.EqualFold(parked.name, name) && (runID == "" || parked.run.ID == runID) {
 			delete(driver.runtime.parked, id)
 		}
 	}
 }
 
-func (driver *vibeDriver) abandonSpawn(name, runID string) {
+func (driver *vibeDriver) abandonSpawn(name, runID string, generation uint64) {
 	var done chan struct{}
 	if runID != "" {
 		driver.runtime.Cancel(driver.parent.SessionID, runID)
@@ -449,20 +463,23 @@ func (driver *vibeDriver) abandonSpawn(name, runID string) {
 	if done != nil {
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
-			if driver.activeRunID(name) != "" {
-				record, exists := driver.record(name)
-				if !exists {
-					record = vibeRecord{Name: name}
-				}
+		case <-time.After(vibeAbandonWait):
+			driver.runtime.mu.Lock()
+			key := vibeSessionKey{driver.parent.SessionID, strings.ToLower(name)}
+			record, exists := driver.runtime.vibe[key]
+			keep := exists && record.State != "dead" && record.generation == generation && driver.activeRunIDLocked(name) == runID
+			if keep {
 				record.RunID, record.State = runID, "running"
-				driver.saveRecord(record)
+				driver.runtime.vibe[key] = record
+			}
+			driver.runtime.mu.Unlock()
+			if keep {
 				return
 			}
 		}
 	}
-	driver.dropParked(name)
-	driver.forgetRecord(name)
+	driver.dropParkedRun(name, runID)
+	driver.forgetRecord(name, generation)
 }
 
 func (driver *vibeDriver) activeRunID(name string) string {
