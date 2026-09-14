@@ -554,6 +554,48 @@ func TestVibeCommitSpawnRejectsStolenReservation(t *testing.T) {
 	}
 }
 
+func TestVibeSaveRecordDoesNotClobberNewerReservation(t *testing.T) {
+	runtime := &subagentRuntime{vibe: map[vibeSessionKey]vibeRecord{}}
+	driver := &vibeDriver{runtime: runtime, parent: subagentParentRuntime{SessionID: "session"}}
+	gen1, err := driver.reserveName("WorkerA", "fast")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale, _ := driver.record("WorkerA")
+	stale.State = "dead"
+	driver.markDead("WorkerA", gen1)
+	if _, err := driver.reserveName("WorkerA", "fast"); err != nil {
+		t.Fatal(err)
+	}
+	driver.saveRecord(stale)
+	got, _ := driver.record("WorkerA")
+	if got.State == "dead" || got.generation == gen1 {
+		t.Fatalf("kill snapshot clobbered newer reservation %#v", got)
+	}
+}
+
+func TestVibeReserveDeadNameWhileStopping(t *testing.T) {
+	runtime := &subagentRuntime{
+		vibe: map[vibeSessionKey]vibeRecord{},
+		active: map[string]*activeSubagent{
+			"run-a": {
+				name: "WorkerA",
+				run:  agentservice.SubagentRun{ID: "run-a", SessionID: "session", State: agentservice.SubagentRunning},
+				slot: true,
+			},
+		},
+	}
+	driver := &vibeDriver{runtime: runtime, parent: subagentParentRuntime{SessionID: "session"}}
+	driver.saveRecord(vibeRecord{Name: "WorkerA", CLI: "fast", State: "dead", generation: 1})
+	if _, err := driver.reserveName("WorkerA", "fast"); err == nil || !strings.Contains(err.Error(), "still stopping") {
+		t.Fatalf("dead active name = %v", err)
+	}
+	runtime.active = nil
+	if _, err := driver.reserveName("WorkerA", "fast"); err != nil {
+		t.Fatalf("dead inactive name = %v", err)
+	}
+}
+
 func TestVibeAbandonTimeoutDoesNotReviveKilledWorker(t *testing.T) {
 	previous := vibeAbandonWait
 	vibeAbandonWait = time.Millisecond

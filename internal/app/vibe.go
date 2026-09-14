@@ -309,9 +309,11 @@ func (driver *vibeDriver) kill(ctx context.Context, call tool.Call) tool.Result 
 		return vibeError(call, fmt.Errorf("vibe session %q was not found", input.Session))
 	}
 	cancelled := false
+	generation := record.generation
 	if runID := driver.activeRunID(input.Session); runID != "" {
 		outcome := driver.runtime.Cancel(driver.parent.SessionID, runID)
 		cancelled = outcome.Outcome != "not_found"
+		driver.waitRunDone(runID)
 	}
 	driver.runtime.mu.Lock()
 	for id, parked := range driver.runtime.parked {
@@ -320,8 +322,7 @@ func (driver *vibeDriver) kill(ctx context.Context, call tool.Call) tool.Result 
 		}
 	}
 	driver.runtime.mu.Unlock()
-	record.State = "dead"
-	driver.saveRecord(record)
+	driver.markDead(input.Session, generation)
 	if err := driver.persistRegistry(ctx); err != nil {
 		return vibeError(call, err)
 	}
@@ -390,12 +391,33 @@ func (driver *vibeDriver) saveRecord(record vibeRecord) {
 	if record.Name == "" {
 		return
 	}
+	key := vibeSessionKey{driver.parent.SessionID, strings.ToLower(record.Name)}
 	driver.runtime.mu.Lock()
+	defer driver.runtime.mu.Unlock()
+	if current, exists := driver.runtime.vibe[key]; exists {
+		if record.generation != 0 && current.generation != 0 && record.generation != current.generation {
+			return
+		}
+		if record.generation == 0 {
+			record.generation = current.generation
+		}
+	}
 	if driver.runtime.vibe == nil {
 		driver.runtime.vibe = make(map[vibeSessionKey]vibeRecord)
 	}
-	driver.runtime.vibe[vibeSessionKey{driver.parent.SessionID, strings.ToLower(record.Name)}] = record
-	driver.runtime.mu.Unlock()
+	driver.runtime.vibe[key] = record
+}
+
+func (driver *vibeDriver) markDead(name string, generation uint64) {
+	key := vibeSessionKey{driver.parent.SessionID, strings.ToLower(name)}
+	driver.runtime.mu.Lock()
+	defer driver.runtime.mu.Unlock()
+	current, exists := driver.runtime.vibe[key]
+	if !exists || current.generation != generation {
+		return
+	}
+	current.State = "dead"
+	driver.runtime.vibe[key] = current
 }
 
 func (driver *vibeDriver) reserveName(name, cli string) (uint64, error) {
@@ -406,6 +428,9 @@ func (driver *vibeDriver) reserveName(name, cli string) (uint64, error) {
 		return 0, fmt.Errorf("vibe session %q already exists; use vibe_send", name)
 	}
 	if driver.activeRunIDLocked(name) != "" {
+		if record, exists := driver.runtime.vibe[key]; exists && record.State == "dead" {
+			return 0, fmt.Errorf("vibe session %q is still stopping", name)
+		}
 		return 0, fmt.Errorf("vibe session %q already exists; use vibe_send", name)
 	}
 	if driver.runtime.vibe == nil {
@@ -450,33 +475,41 @@ func (driver *vibeDriver) dropParkedRun(name, runID string) {
 	}
 }
 
-func (driver *vibeDriver) abandonSpawn(name, runID string, generation uint64) {
+func (driver *vibeDriver) waitRunDone(runID string) {
+	if runID == "" {
+		return
+	}
+	driver.runtime.mu.Lock()
 	var done chan struct{}
+	if active := driver.runtime.active[runID]; active != nil {
+		done = active.done
+	}
+	driver.runtime.mu.Unlock()
+	if done == nil {
+		return
+	}
+	select {
+	case <-done:
+	case <-time.After(vibeAbandonWait):
+	}
+}
+
+func (driver *vibeDriver) abandonSpawn(name, runID string, generation uint64) {
 	if runID != "" {
 		driver.runtime.Cancel(driver.parent.SessionID, runID)
-		driver.runtime.mu.Lock()
-		if active := driver.runtime.active[runID]; active != nil && active.run.SessionID == driver.parent.SessionID {
-			done = active.done
-		}
-		driver.runtime.mu.Unlock()
+		driver.waitRunDone(runID)
 	}
-	if done != nil {
-		select {
-		case <-done:
-		case <-time.After(vibeAbandonWait):
-			driver.runtime.mu.Lock()
-			key := vibeSessionKey{driver.parent.SessionID, strings.ToLower(name)}
-			record, exists := driver.runtime.vibe[key]
-			keep := exists && record.State != "dead" && record.generation == generation && driver.activeRunIDLocked(name) == runID
-			if keep {
-				record.RunID, record.State = runID, "running"
-				driver.runtime.vibe[key] = record
-			}
-			driver.runtime.mu.Unlock()
-			if keep {
-				return
-			}
-		}
+	driver.runtime.mu.Lock()
+	key := vibeSessionKey{driver.parent.SessionID, strings.ToLower(name)}
+	record, exists := driver.runtime.vibe[key]
+	keep := exists && record.State != "dead" && record.generation == generation && driver.activeRunIDLocked(name) == runID
+	if keep {
+		record.RunID, record.State = runID, "running"
+		driver.runtime.vibe[key] = record
+	}
+	driver.runtime.mu.Unlock()
+	if keep {
+		return
 	}
 	driver.dropParkedRun(name, runID)
 	driver.forgetRecord(name, generation)
