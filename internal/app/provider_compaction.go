@@ -119,7 +119,7 @@ func (r *ProviderRuntime) cachedManualCompactionModel(ctx context.Context, provi
 		}
 		if found {
 			if model, matched := cachedCompactionCatalogModel(cached.Models, modelID); matched {
-				return model, nil
+				return r.modelWithContextSettings(providerID, model), nil
 			}
 		}
 	}
@@ -348,7 +348,7 @@ func (r *ProviderRuntime) PrepareManualCompaction(ctx context.Context, projectio
 		instructions: mainInstructions, instructionFingerprint: mainInstructionFingerprint,
 		history: projection.Blocks, modelHistory: projection.ModelHistory, checkpointBoundary: projection.ModelHistory.CoveredThroughSequence,
 		canonicalHighWater: canonicalProjectionHighWater(projection.Blocks),
-		staticIdentity:     mainInstructionFingerprint, todo: todo, toolRecords: projection.ToolRecords,
+		staticIdentity:     mainInstructionFingerprint, todo: todo, toolRecords: rootToolRecords(projection),
 		largeToolTokens: r.cfg.Agents.Context.LargeToolResultTokens, keepRecentTokens: manualBudget.KeepRecent,
 	}
 	configureArchiveStorage(&manager, r.host, projection.Session.ID, "manual-compaction")

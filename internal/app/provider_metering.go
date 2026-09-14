@@ -3,10 +3,12 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
+	providerretry "github.com/Viking602/azem/internal/provider"
 	"github.com/Viking602/azem/internal/provider/responses"
 	"github.com/Viking602/azem/internal/session"
 	hyprovider "github.com/Viking602/venat/provider"
@@ -30,7 +32,7 @@ func (d *meteredProviderDriver) Stream(ctx context.Context, request hyprovider.R
 	if err != nil {
 		return nil, err
 	}
-	projection, err := d.store.LoadProjection(ctx, d.sessionID)
+	projection, err := d.store.LoadProviderMeteringState(ctx, d.sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -173,7 +175,7 @@ func cacheModelForProvider(provider, tagged string) string {
 	switch provider {
 	case "grok", "cursor":
 		return responses.CacheModelAutomatic
-	case "chatgpt":
+	case "chatgpt", "devin":
 		return responses.CacheModelWriteTokens
 	default:
 		return ""
@@ -185,10 +187,16 @@ type meteredProviderStream struct {
 	state *meteredRequestState
 }
 
+func (s *meteredProviderStream) Close() error {
+	// A host interruption may close before Recv sees a provider terminal. Keep
+	// its usage unknown; finish leaves an already recorded terminal unchanged.
+	return errors.Join(s.Stream.Close(), s.state.finish("unknown", hyprovider.Usage{}))
+}
+
 func (s *meteredProviderStream) Recv() (hyprovider.Event, error) {
 	e, err := s.Stream.Recv()
 	if err != nil {
-		if finishErr := s.state.finish("unknown", hyprovider.Usage{}); finishErr != nil {
+		if finishErr := s.state.finish(providerFailureStatus(err), hyprovider.Usage{}); finishErr != nil {
 			return e, finishErr
 		}
 		return e, err
@@ -220,9 +228,16 @@ func (s *meteredProviderStream) Recv() (hyprovider.Event, error) {
 		}
 	}
 	if e.Kind == hyprovider.EventError {
-		if err := s.state.finish("unknown", hyprovider.Usage{}); err != nil {
+		if err := s.state.finish(providerFailureStatus(e.Err), hyprovider.Usage{}); err != nil {
 			return hyprovider.Event{}, fmt.Errorf("persist provider request fact: %w", err)
 		}
 	}
 	return e, nil
+}
+
+func providerFailureStatus(err error) string {
+	if providerretry.IsResponseFailure(err) {
+		return "failed"
+	}
+	return "unknown"
 }

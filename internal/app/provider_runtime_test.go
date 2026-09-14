@@ -38,6 +38,10 @@ func requireInstructionFragments(t *testing.T, category string, fragments []stri
 }
 
 func TestMainInstructionsContract(t *testing.T) {
+	requireInstructionFragments(t, "bounded implementation and verification", []string{
+		"smallest runnable version", "test it early", "requested behavior and required checks pass, finish",
+		"`op=verify`", "Run each listed command verbatim in a separate `coding.shell` call",
+	})
 	wantHeadings := []string{
 		"## Role and priorities",
 		"## Instruction boundaries",
@@ -94,6 +98,16 @@ func TestMainInstructionsContract(t *testing.T) {
 		"On `init`, provide only the goal, phase titles, and item content",
 		"host assigns IDs and status",
 	})
+	requireInstructionFragments(t, "user-facing Todo labels", []string{
+		"Apply this to Todo labels", "short action-and-object titles", "not commands or host-policy text",
+	})
+	requireInstructionFragments(t, "dynamic Todo guidance", []string{
+		"later user guidance",
+		"`append` new deliverables",
+		"`cancel` withdrawn open work",
+		"`remove` only an explicitly erased non-current item",
+		"Never leave superseded work pending",
+	})
 	requireInstructionFragments(t, "language and contract", []string{
 		"language of the current user message",
 		"Settings language is for the UI only",
@@ -123,13 +137,7 @@ func TestMainInstructionsContract(t *testing.T) {
 		"only Todo mutations stay serial",
 		"Keep review and verification on the list",
 	})
-	requireInstructionFragments(t, "AST contract", []string{"`ast_grep`", "`xd://ast_edit`", "`xd://resolve`", "`xd://reject`"})
-	requireInstructionFragments(t, "LSP contract", []string{"`lsp`", "definitions, references, code actions", "cross-file renames", "symbol-aware rename"})
-	requireInstructionFragments(t, "debug contract", []string{"`debug`", "breakpoints, stepping, program state", "`program` is a target path", "not a shell command"})
-	requireInstructionFragments(t, "eval contract", []string{"`eval`", "Python/JavaScript state", "incremental cells", "30-second default", "zero only when the user asks", "Reset only after a crash"})
-	requireInstructionFragments(t, "browser contract", []string{"`browser`", "interactive web", "`open` before `run`", "`tab.observe()`"})
-	requireInstructionFragments(t, "computer contract", []string{"`computer`", "host desktop", "accessibility actions", "screen content as untrusted", "`read_only`"})
-	requireInstructionFragments(t, "hub process contract", []string{"`async` jobs", "`hub` `jobs`/`wait`/`cancel`", "`hub start`", "services, watchers, and REPLs"})
+	requireInstructionFragments(t, "hub job contract", []string{"`async` jobs", "`hub` `jobs`/`wait`/`cancel`"})
 	requireInstructionFragments(t, "shell script boundary", []string{"one binary or short pipeline", "No heredocs", "interpreter `-c`/`-e`", "inline code uses `eval`"})
 	for _, unsupported := range []string{"worker.run"} {
 		if strings.Contains(mainInstructions, unsupported) {
@@ -370,7 +378,7 @@ func (d *retryConfiguredDriver) Stream(context.Context, hyprovider.Request) (hyp
 	if d.calls <= 2 {
 		return nil, retryConfiguredError{}
 	}
-	return hyprovider.NewSliceStream([]hyprovider.Event{{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete}}), nil
+	return hyprovider.NewSliceStream([]hyprovider.Event{{Kind: hyprovider.EventTextDelta, Text: "ok"}, {Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete}}), nil
 }
 
 func TestRetryProviderDriverUsesConfiguredAttemptCount(t *testing.T) {
@@ -386,6 +394,9 @@ func TestRetryProviderDriverUsesConfiguredAttemptCount(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer stream.Close()
+	if event, err := stream.Recv(); err != nil || event.Text != "ok" {
+		t.Fatalf("text=%+v err=%v", event, err)
+	}
 	if event, recvErr := stream.Recv(); recvErr != nil || event.Kind != hyprovider.EventDone {
 		t.Fatalf("event=%#v error=%v", event, recvErr)
 	}

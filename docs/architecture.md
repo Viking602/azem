@@ -1,6 +1,6 @@
 # Architecture
 
-Last verified: 2026-08-30
+Last verified: 2026-09-03
 
 Azem is a local-first coding agent with a terminal UI and one native desktop
 client over one Go runtime. Bubble Tea and GPUI share
@@ -12,8 +12,8 @@ that runtime; they do not own another execution engine.
 
 ```mermaid
 flowchart LR
-    TUI["Bubble Tea TUI"] --> APP["internal/app Service"]
-    GPUI["Native GPUI client"] --> IPC["Authenticated local IPC"] --> DAEMON["Workspace daemon"] --> BRIDGE["Closed desktop operations"] --> APP
+    TUI["Bubble Tea TUI"] --> IPC["Authenticated local IPC"]
+    GPUI["Native GPUI client"] --> IPC --> DAEMON["Workspace daemon"] --> BRIDGE["Closed desktop operations"] --> APP["internal/app Service"]
     APP --> PROVIDERS["ChatGPT / Grok subscription drivers"]
     APP --> LLMUX["llmux provider adapter"]
     APP --> AGENT["Venat-backed agent runtime"]
@@ -26,10 +26,11 @@ flowchart LR
 
 ## Startup and composition
 
-`cmd/azem/main.go` starts the Bubble Tea application.
-`cmd/azem-daemon/main.go` starts the desktop composition root without a
-renderer; `gpui/crates/azem-gpui` connects to it through
-`internal/desktopipc`. Both runtime paths call `internal/app/bootstrap.go`.
+`cmd/azem/main.go` and
+`gpui/crates/azem-gpui` are clients. `cmd/azem-daemon/main.go` starts the
+renderer-free composition root for one canonical workspace; every interactive
+client reaches it through `internal/desktopipc`. Only protocol/headless
+execution may construct an application runtime without that workspace daemon.
 
 Bootstrap preserves one recovery and execution ownership chain:
 
@@ -43,27 +44,29 @@ Bootstrap preserves one recovery and execution ownership chain:
 4. `buildCore` loads Skills/tools/providers and constructs sessions,
    application orchestration, the SQLite durable backend, and provider routing.
    `wireService` attaches hooks, MCP, memory, Subagents, automation, and
-   recovery to one `app.Service`.
+   recovery to one `app.Service`. Security scan store, executor, and finalizer
+   construction lives in `bootstrap_security.go`; `wireService` attaches it
+   after background services and before recovery.
 5. `start` classifies/replays v1 execution bindings, restores Team/Subagent
    application state, publishes recovery projection, downgrades the fence, and
    starts supporting services.
 
 If construction fails, bootstrap closes every component it already opened.
 Do not bypass this composition root with package globals or another execution
-runtime. The GPUI daemon is the composition root moved behind IPC, not a second
-implementation of agents, providers, approvals, or persistence.
+runtime. The workspace daemon is the composition root moved behind IPC, not a
+second implementation of agents, providers, approvals, or persistence.
 
 ## Package boundaries
 
 | Package | Responsibility | Must not own |
 |---|---|---|
-| `cmd/azem` | CLI flags, signals, TUI startup and shutdown | Agent or persistence behavior |
-| `cmd/azem-daemon` / `internal/daemon` | One workspace-scoped desktop runtime, endpoint publication, and explicit shutdown | UI rendering or alternate application semantics |
+| `cmd/azem` | CLI flags, signals, protocol/headless entry points, and TUI client startup | Agent or persistence behavior |
+| `cmd/azem-daemon` / `internal/daemon` | One workspace-scoped runtime, endpoint publication, launch locking, and explicit shutdown | UI rendering or alternate application semantics |
 | `gpui/crates/azem-gpui` | Native window lifecycle, granular projection state, virtualized rendering, and user input | Provider execution or authoritative durable state |
 | `gpui/crates/azem-ipc` / `internal/desktopipc` | Versioned authenticated framing, bounded replay, binary streams, and closed Bridge dispatch | New product actions or transport-specific business logic |
-| `internal/desktop` | Closed Bridge operation set and event forwarding | Agent shell execution or a generic `sh -c` API |
-| `internal/desktop/termhost` | Human-only PTY sessions for the desktop window | Venat tools, approvals, or model-driven stdin |
-| `internal/tui` | Bubble Tea state, rendering, input routing | Duplicate runtime services |
+| `internal/desktop` | Closed Bridge operation set and typed reconnect projections | Agent shell execution or a generic `sh -c` API |
+| `internal/desktop/termhost` | Human-only PTY sessions owned by the workspace daemon | Venat tools, approvals, or model-driven stdin |
+| `internal/tui` | Bubble Tea projection state, rendering, and input routing | Duplicate runtime services |
 | `internal/app` | Composition, provider engine construction, policy, approvals, Team/Subagent/automation orchestration, events, and recovery | Provider wire parsing, durable backend mechanics, or raw SQL |
 | `internal/agentruntime` | Azem-owned run/task/approval/resource-claim domain and tool policy descriptors | Venat compatibility aliases or UI projection |
 | `internal/agent` | Governed tools, v1 execution bindings/manifests, one durable runtime owner, Team scheduling | UI rendering or provider transport parsing |
@@ -107,7 +110,8 @@ files.
 ## Turn and event flow
 
 ```text
-TUI command or desktop TurnRequest
+TUI or desktop TurnRequest over authenticated IPC
+  -> workspace daemon serializes the named mutation
   -> app.Service validates session, mode, Skills, and active-run state
   -> ProviderRuntime resolves provider/account/model and creates the Azem run plus pending v1 binding
   -> app builds a direct agent.Engine with context, tools, retry, approval hook, and output guardrails
@@ -115,9 +119,9 @@ TUI command or desktop TurnRequest
   -> known text-only main model + images invokes agents.vision and substitutes private textual evidence
   -> Azem policy governs file, shell, MCP, native Cursor, and external actions
   -> Venat durable fences the execution lease/checkpoint and settles each model/tool attempt
-  -> Azem persists idempotent session blocks, tool records, usage, and terminal projection
+  -> Azem persists idempotent session blocks, tool records, usage, queue state, and terminal projection
   -> eventBroker emits ordered runtime events
-  -> TUI receives directly; GPUI receives desktop events through IPC
+  -> desktopipc fans the stream to TUI and GPUI clients
   -> renderer reducers update timeline, approvals, Todos, subagents, terminals, and settings
   -> subagent evidence status remains derived from durable disposition/verification records
 
@@ -134,11 +138,16 @@ model before `ProviderRuntime.resolveDriverForAccount` continues through the
 existing account, catalog, and provider checks.
 
 The desktop operation layer exposes named methods and a bounded runtime
-projection. GPUI uses that set through an authenticated, versioned local IPC
-dispatcher; the transport adds no new
-actions. Control frames are length-bounded JSON, attachments and terminal
-output are bounded binary frames, and reconnect uses a durable snapshot plus a
-byte-bounded sequence replay. Add a Bridge method only when a desktop feature
+projection. TUI and GPUI use that set through one authenticated,
+versioned local IPC dispatcher; the transport adds no new actions. Control
+frames are length-bounded JSON, attachments and terminal output are bounded
+binary frames, and reconnect applies one typed durable snapshot before replay
+from its wire cursor. The snapshot contains canonical transcript/tool state,
+active runs and operations, bounded live blocks, pending controls, recovery,
+terminals, and revisioned prompt queues. Same-workspace session selection is
+client-local and returns one display projection without decoding
+`ModelHistory`; list and context-profile follow-up work stays off the navigation
+critical path. Add a Bridge method only when a desktop feature
 needs a real application operation; never expose an arbitrary command runner or
 general filesystem API. The workspace browser and workspace change review are
 deliberate read-only exceptions with relative-path, resolved-symlink,
@@ -193,7 +202,8 @@ dependent work or accepting the final result.
 
 ## Desktop project ownership
 
-The GUI is project-catalog driven, not process-working-directory driven:
+Both desktop clients are project-catalog driven, not process-working-directory
+driven:
 
 ```text
 desktop_projects
@@ -203,11 +213,11 @@ desktop_projects
   -> active project runtime (branch, PR, tools)
 ```
 
-The single desktop window connects to one workspace-scoped runtime at a time
-because tools, Skills, hooks, Git state, and PR operations require an
-unambiguous root. The sidebar may show every persisted project; opening a
-session owned by another project reconnects the existing renderer to that
-workspace and session while the previous daemon keeps background work alive.
+The GPUI window connects to one workspace-scoped runtime at a time because
+tools, Skills, hooks, Git state, and PR operations require an unambiguous root.
+Opening a session owned by another project reconnects the existing renderer to
+that workspace and session while the previous daemon keeps background work
+alive.
 Project history lives in SQLite and must not be serialized as one
 `workspace.root` setting.
 
@@ -340,9 +350,10 @@ produce the same durable file observations and completed-change projections as
 the corresponding hashline edit and write paths.
 
 `coding.search` invokes the bundled ripgrep executable once through an
-argv-only `--json` boundary. Literal search uses `--fixed-strings`; regexp and
-glob inputs use ripgrep syntax. The process respects ignore files, includes
-non-ignored hidden files, skips `.git` and files larger than 1 MiB, and is
+argv-only `--json` boundary. Queries are case-sensitive ripgrep regex by
+default, matching the agent grep contract; `literal:true` adds
+`--fixed-strings`, and glob constraints use ripgrep syntax. The process respects
+ignore files, includes non-ignored hidden files, skips `.git` and files larger than 1 MiB, and is
 cancelled as soon as the global 200-line result cap is reached. Azem sorts the
 bounded matched paths and rereads only those files through the shared
 `coding.read_file` driver; every returned `¶PATH#TAG` names the exact snapshot
@@ -409,10 +420,6 @@ sealing, and terminal state. See [Security scanning](security-scanning.md).
   commands, agents, providers, tools, themes, and App requirements into the
   existing runtime boundaries. Runtime capability paths never point at Codex
   storage.
-- **Custom extensions:** `internal/customtools` owns the bounded Bun subprocess
-  protocol. Registration is atomic per module. Permission-only file
-  write/delete fallbacks receive a symlink-resolved workspace destination and
-  cannot expand Azem's filesystem boundary.
 - **Skills:** add user, project, configured, or bundled Skill directories;
   activation must flow through the existing `activeSkills` request field.
 - **Hooks:** discover supported hook sources through `internal/hooks`; preserve
@@ -422,18 +429,13 @@ sealing, and terminal state. See [Security scanning](security-scanning.md).
 - **Desktop:** add the smallest typed Bridge method and project its result
   through the existing store/event path.
 
-## Frozen OMP behavior surface
+## Behavior ownership
 
-`internal/parity/manifest.json` pins OMP v18.0.3 at commit
-`160ed439ac0df594347e7d7018b813a7ffdb5e81`. The manifest is executable release
-state: all 71 in-scope capabilities must remain `complete` or `stronger` with a
-current source path.
+Azem implements its user-facing capabilities through product-owned runtime
+boundaries:
 
-The additional boundaries are deliberately boring:
-
-- `internal/agent` owns the portable coding tools and bridges only those OMP
-  runtimes that require Bun, language servers, DAP, browser, desktop, or media
-  processes.
+- `internal/agent` owns the portable coding tools, governed shell and
+  background-job runtimes, and tool policies.
 - `internal/app` owns Goal, Advisor, Vibe, TTSR, prewalk, loop guards,
   checkpoint/rewind, subagent Hub, and the one provider/event pipeline.
 - `internal/session`, `sessionimport`, `sessionexport`, `sessionshare`, and
@@ -443,9 +445,6 @@ The additional boundaries are deliberately boring:
 - `internal/operator`, `maintenance`, `usageview`, `benchmark`,
   `authbroker`, `authgateway`, and `githubwebhook` compose operator commands;
   none owns a second agent loop or provider implementation.
-
-Public-library API compatibility and OMP visual identity are excluded from the
-frozen comparison. User-visible coding-agent and operator behavior is not.
 
 ## Architecture checks
 

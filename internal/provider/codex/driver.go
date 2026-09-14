@@ -30,6 +30,24 @@ type Driver struct {
 	serviceTier     string
 }
 
+type turnAffinityKey struct{}
+
+type turnAffinityDriver struct {
+	hyprovider.Driver
+	routes sync.Map
+}
+
+// WithTurnAffinity owns server routing state for exactly one logical turn.
+// The runtime creates a new wrapper for each main/Team/Sidekick execution;
+// a reused transport driver must never retain the previous turn's token.
+func WithTurnAffinity(driver hyprovider.Driver) hyprovider.Driver {
+	return &turnAffinityDriver{Driver: driver}
+}
+
+func (d *turnAffinityDriver) Stream(ctx context.Context, request hyprovider.Request) (hyprovider.Stream, error) {
+	return d.Driver.Stream(context.WithValue(ctx, turnAffinityKey{}, &d.routes), request)
+}
+
 func New(authentication *auth.Service, accountID string, endpoint string, models []string, reasoningEffort string) (*Driver, error) {
 	if authentication == nil {
 		return nil, fmt.Errorf("codex driver auth service is nil")
@@ -65,10 +83,12 @@ func (d *Driver) Stream(ctx context.Context, request hyprovider.Request) (hyprov
 	if err != nil {
 		return nil, err
 	}
-	return d.openStream(ctx, payload, reverseNames, cacheKey, nil)
+	return d.openStream(ctx, payload, reverseNames, request.Model, cacheKey, nil)
 }
 
-func (d *Driver) openStream(ctx context.Context, payload []byte, reverseNames map[string]string, cacheKey string, reporter responses.UsageReporter) (hyprovider.Stream, error) {
+func (d *Driver) openStream(ctx context.Context, payload []byte, reverseNames map[string]string, model, cacheKey string, reporter responses.UsageReporter) (hyprovider.Stream, error) {
+	routes, _ := ctx.Value(turnAffinityKey{}).(*sync.Map)
+	identity := [4]string{d.accountID, d.endpoint, model, cacheKey}
 	streamContext, cancel := context.WithCancel(ctx)
 	response, err := d.auth.DoStreamWithRefresh(
 		streamContext,
@@ -83,7 +103,14 @@ func (d *Driver) openStream(ctx context.Context, payload []byte, reverseNames ma
 			request.SetHeader("OpenAI-Beta", "responses=experimental")
 			request.SetHeader("originator", "codex_cli_rs")
 			request.SetHeader("User-Agent", "azem/1")
+			if routes != nil {
+				if state, ok := routes.Load(identity); ok {
+					request.SetHeader("x-codex-turn-state", state.(string))
+				}
+			}
 			if cacheKey != "" {
+				request.SetHeader("session-id", cacheKey)
+				request.SetHeader("thread-id", cacheKey)
 				request.SetHeader("conversation_id", cacheKey)
 				request.SetHeader("session_id", cacheKey)
 			}
@@ -92,6 +119,12 @@ func (d *Driver) openStream(ctx context.Context, payload []byte, reverseNames ma
 	if err != nil {
 		cancel()
 		return nil, err
+	}
+	if routes != nil && response.StatusCode()/100 == 2 {
+		if state := response.Header().Get("x-codex-turn-state"); state != "" && len(state) <= 8192 {
+			// Keep the first server-issued token unchanged, including on retry.
+			routes.LoadOrStore(identity, state)
+		}
 	}
 	stream, err := responses.Open(response, streamContext, cancel, reporter)
 	if err != nil {

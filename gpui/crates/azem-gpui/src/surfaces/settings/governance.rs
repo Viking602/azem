@@ -45,56 +45,50 @@ pub(super) fn settings_governance_body(
     .collect::<Vec<_>>();
     div()
         .w_full()
-        .rounded(px(12.))
-        .border_1()
-        .border_color(palette.border)
-        .bg(palette.paper)
-        .overflow_hidden()
-        .child(settings_control_row(
+        .flex()
+        .flex_col()
+        .gap_6()
+        .child(settings_group(
             locale.text("ui.defaultApprovalMode"),
-            locale.text("ui.controlsToolExecutionBoundaries"),
-            300.,
-            approval_controls,
+            "",
+            settings_rows(
+                vec![
+                    settings_control_row(
+                        locale.text("ui.defaultApprovalMode"),
+                        locale.text("ui.controlsToolExecutionBoundaries"),
+                        300.,
+                        approval_controls,
+                        palette,
+                    )
+                    .into_any_element(),
+                    settings_children_row(
+                        locale.text("ui.approvalValidation"),
+                        locale.text("ui.onlyCompleteJsonIsAcceptedInvalidContentNeverExecutes"),
+                        div()
+                            .text_sm()
+                            .text_color(palette.positive)
+                            .child(locale.text("ui.failClosed"))
+                            .into_any_element(),
+                        palette,
+                    )
+                    .into_any_element(),
+                ],
+                palette,
+            ),
             palette,
         ))
-        .child(settings_control_row(
+        .child(settings_group(
             locale.text("ui.newMessagesWhileRunning"),
-            locale.text("ui.whenFollowUpInputArrives"),
-            200.,
-            delivery_controls,
+            "",
+            div().child(settings_control_row(
+                locale.text("ui.newMessagesWhileRunning"),
+                locale.text("ui.whenFollowUpInputArrives"),
+                200.,
+                delivery_controls,
+                palette,
+            )),
             palette,
         ))
-        .child(
-            div()
-                .min_h(px(64.))
-                .px_4()
-                .border_t_1()
-                .border_color(palette.border)
-                .flex()
-                .items_center()
-                .child(
-                    div()
-                        .flex_1()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .child(locale.text("ui.approvalValidation")),
-                        )
-                        .child(div().text_xs().text_color(palette.muted).child(
-                            locale.text("ui.onlyCompleteJsonIsAcceptedInvalidContentNeverExecutes"),
-                        )),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(palette.positive)
-                        .child(locale.text("ui.failClosed")),
-                ),
-        )
         .into_any_element()
 }
 
@@ -105,39 +99,20 @@ fn settings_control_row(
     controls: Vec<gpui::AnyElement>,
     palette: ThemePalette,
 ) -> gpui::Div {
-    div()
-        .min_h(px(68.))
-        .px_4()
-        .py(px(11.))
-        .border_t_1()
-        .border_color(palette.border)
-        .flex()
-        .items_center()
-        .gap_5()
-        .child(
-            div()
-                .min_w_0()
-                .flex_1()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .child(title),
-                )
-                .child(div().text_sm().text_color(palette.muted).child(description)),
-        )
-        .child(
-            div()
-                .w(px(control_width))
-                .p(px(2.))
-                .rounded(px(9.))
-                .border_1()
-                .border_color(palette.border_strong)
-                .bg(palette.paper)
-                .flex()
-                .children(controls),
-        )
+    settings_children_row(
+        title,
+        description,
+        div()
+            .w(px(control_width))
+            .max_w_full()
+            .p(px(2.))
+            .rounded(px(9.))
+            .border_1()
+            .border_color(palette.border)
+            .bg(palette.paper)
+            .flex()
+            .children(controls)
+            .into_any_element(),
+        palette,
+    )
 }

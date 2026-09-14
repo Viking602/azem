@@ -3,68 +3,12 @@ package agent
 import (
 	"context"
 	"encoding/json"
-	"os/exec"
 	"strings"
 	"testing"
 
 	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/venat/tool"
 )
-
-func TestHubSupervisesLongRunningProcessLifecycle(t *testing.T) {
-	python, err := exec.LookPath("python3")
-	if err != nil {
-		t.Skip("python3 is unavailable")
-	}
-	ctx := WithInvocation(context.Background(), Invocation{SessionID: "hub-process", AgentID: "Main"})
-	root := t.TempDir()
-	bridge := newLSPBridgeRuntime()
-	t.Cleanup(func() { _ = bridge.Close(context.Background()) })
-	driver := newHubDriver(root, bridge)
-	name := "echo-service"
-	t.Cleanup(func() {
-		_ = callHub(context.Background(), driver, map[string]any{"op": "stop", "name": name, "timeout": 2})
-	})
-	program := "import sys\nprint('READY', flush=True)\nfor line in sys.stdin:\n line=line.strip()\n print('ECHO:'+line, flush=True)\n if line=='quit': break\n"
-	started := executeHub(t, ctx, driver, map[string]any{
-		"op": "start", "name": name, "application": python, "args": []string{"-u", "-c", program}, "pty": true,
-		"ready": map[string]any{"log": "READY", "timeout": 20}, "restart": "no",
-	})
-	if !strings.Contains(strings.ToLower(started.Content), "ready") {
-		t.Fatalf("start = %s", started.Content)
-	}
-	listed := executeHub(t, ctx, driver, map[string]any{"op": "ps"})
-	if !strings.Contains(listed.Content, name) {
-		t.Fatalf("ps = %s", listed.Content)
-	}
-	secondBridge := newLSPBridgeRuntime()
-	t.Cleanup(func() { _ = secondBridge.Close(context.Background()) })
-	secondHub := newHubDriver(root, secondBridge)
-	shared := executeHub(t, ctx, secondHub, map[string]any{"op": "ps"})
-	if !strings.Contains(shared.Content, name) {
-		t.Fatalf("second client did not see shared process: %s", shared.Content)
-	}
-	executeHub(t, ctx, driver, map[string]any{"op": "send", "name": name, "text": "hello", "enter": true})
-	waited := executeHub(t, ctx, driver, map[string]any{"op": "wait", "name": name, "pattern": "ECHO:hello", "timeout": 20})
-	if !strings.Contains(waited.Content, "ECHO:hello") {
-		t.Fatalf("wait = %s", waited.Content)
-	}
-	logs := executeHub(t, ctx, driver, map[string]any{"op": "logs", "name": name, "lines": 20})
-	if !strings.Contains(logs.Content, "READY") || !strings.Contains(logs.Content, "ECHO:hello") {
-		t.Fatalf("logs = %s", logs.Content)
-	}
-	described := executeHub(t, ctx, driver, map[string]any{"op": "describe", "name": name})
-	if !strings.Contains(described.Content, name) {
-		t.Fatalf("describe = %s", described.Content)
-	}
-	executeHub(t, ctx, driver, map[string]any{"op": "stop", "name": name, "timeout": 5})
-	restarted := executeHub(t, ctx, driver, map[string]any{"op": "restart", "name": name})
-	if !strings.Contains(restarted.Content, "Restarted") {
-		t.Fatalf("restart = %s", restarted.Content)
-	}
-	executeHub(t, ctx, driver, map[string]any{"op": "wait", "name": name, "for": "ready", "timeout": 20})
-	executeHub(t, ctx, driver, map[string]any{"op": "stop", "name": name, "timeout": 5})
-}
 
 func TestHubTracksWaitsAndCancelsBackgroundShellJobs(t *testing.T) {
 	base, cancel := context.WithCancel(context.Background())
@@ -73,7 +17,7 @@ func TestHubTracksWaitsAndCancelsBackgroundShellJobs(t *testing.T) {
 	t.Cleanup(func() { _ = jobs.shutdown(context.Background()) })
 	shellRuntime := newShellRuntime(base, defaultShellOptions())
 	shell := newRuntimeShellDriver(t.TempDir(), "allow", "deny", shellRuntime, jobs)
-	hub := newHubDriver(t.TempDir(), newLSPBridgeRuntime(), jobs)
+	hub := newHubDriver(t.TempDir(), jobs)
 	ctx := WithInvocation(context.Background(), Invocation{AgentID: "Main"})
 
 	arguments, _ := json.Marshal(shellInput{Command: "sleep 0.1; printf 'job-done\\n'", Async: true, WallClockSeconds: 5})
@@ -101,21 +45,17 @@ func TestHubTracksWaitsAndCancelsBackgroundShellJobs(t *testing.T) {
 	}
 }
 
-func TestHubUsesDynamicApprovalAndValidatesArgv(t *testing.T) {
-	driver := newHubDriver(t.TempDir(), newLSPBridgeRuntime())
-	readArgs := json.RawMessage(`{"op":"logs","name":"service"}`)
-	read := driver.PolicyForCall(tool.Call{Name: ToolHub, Arguments: readArgs})
+func TestHubReportsMissingNativeProcessHost(t *testing.T) {
+	driver := newHubDriver(t.TempDir())
+	for _, op := range []string{"start", "ps", "logs", "stop", "restart", "describe"} {
+		result := callHub(context.Background(), driver, map[string]any{"op": op})
+		if !result.IsError || !strings.Contains(result.Content, "native process host is unavailable") {
+			t.Fatalf("op %q = %#v", op, result)
+		}
+	}
+	read := driver.PolicyForCall(tool.Call{Name: ToolHub, Arguments: json.RawMessage(`{"op":"jobs"}`)})
 	if read.Effect != agentruntime.ToolEffectReadOnly || read.RequiresApproval {
-		t.Fatalf("logs governance = %#v", read)
-	}
-	startArgs := json.RawMessage(`{"op":"start","name":"service","application":"python3"}`)
-	start := driver.PolicyForCall(tool.Call{Name: ToolHub, Arguments: startArgs})
-	if start.Effect != agentruntime.ToolEffectExternalSideEffect || !start.RequiresApproval || !start.RequiresActionTask {
-		t.Fatalf("start governance = %#v", start)
-	}
-	invalid := callHub(context.Background(), driver, map[string]any{"op": "start", "name": "bad name", "application": "python3"})
-	if !invalid.IsError || !strings.Contains(invalid.Content, "process name") {
-		t.Fatalf("invalid start = %#v", invalid)
+		t.Fatalf("jobs governance = %#v", read)
 	}
 }
 
@@ -133,7 +73,7 @@ func TestHubRoutesPeerMessagingWithoutProcessApproval(t *testing.T) {
 	broker := &fakeHubPeerBroker{}
 	ref := &hubPeerBrokerRef{}
 	ref.set(broker)
-	driver := newHubDriver(t.TempDir(), newLSPBridgeRuntime())
+	driver := newHubDriver(t.TempDir())
 	driver.peers = ref
 	ctx := WithInvocation(context.Background(), Invocation{AgentID: "Main", TeamRunID: "parent"})
 
@@ -156,13 +96,16 @@ func TestHubRoutesPeerMessagingWithoutProcessApproval(t *testing.T) {
 	}
 }
 
+func TestHubPeerOpsRequireBroker(t *testing.T) {
+	driver := newHubDriver(t.TempDir())
+	result := callHub(context.Background(), driver, map[string]any{"op": "list"})
+	if !result.IsError || !strings.Contains(result.Content, "peer operations are unavailable") {
+		t.Fatalf("list without broker = %#v", result)
+	}
+}
+
 func executeHub(t *testing.T, ctx context.Context, driver tool.Driver, input map[string]any) tool.Result {
 	t.Helper()
-	if concrete, ok := driver.(*hubDriver); ok {
-		if err := concrete.bridge.resolveAssets(); err != nil {
-			t.Skip(err)
-		}
-	}
 	result := callHub(ctx, driver, input)
 	if result.IsError {
 		t.Fatalf("hub call failed: %s", result.Content)

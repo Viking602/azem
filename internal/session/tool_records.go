@@ -251,7 +251,23 @@ func (s *Service) FinishToolRecord(ctx context.Context, sessionID string, record
 }
 
 func (s *Service) ListToolRecords(ctx context.Context, sessionID string) ([]ToolRecord, error) {
-	rows, err := dbgen.New(s.db).ListSessionToolRecords(ctx, sessionID)
+	return s.listToolRecordsForRuns(ctx, sessionID, nil)
+}
+
+func (s *Service) listToolRecordsForRuns(ctx context.Context, sessionID string, runIDs []string) ([]ToolRecord, error) {
+	queries := dbgen.New(s.db)
+	var rows []dbgen.ListSessionToolRecordsRow
+	var err error
+	if runIDs == nil {
+		rows, err = queries.ListSessionToolRecords(ctx, sessionID)
+	} else {
+		var selected []dbgen.ListSessionToolRecordsForRunsRow
+		selected, err = queries.ListSessionToolRecordsForRuns(ctx, dbgen.ListSessionToolRecordsForRunsParams{SessionID: sessionID, RunIds: runIDs})
+		rows = make([]dbgen.ListSessionToolRecordsRow, len(selected))
+		for i, row := range selected {
+			rows[i] = dbgen.ListSessionToolRecordsRow(row)
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("list tool records: %w", err)
 	}

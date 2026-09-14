@@ -47,6 +47,7 @@ type runtimeEvidenceSnapshot struct {
 type runtimeCheckState struct {
 	status   string
 	missing  []string
+	failed   []string
 	evidence []session.SourceRefV1
 }
 
@@ -234,7 +235,7 @@ func surfaceVerificationOutput(reason string) hyagent.OutputGuardrailResult {
 }
 
 func deriveRuntimeEvidence(ctx context.Context, sessions *session.Service, workspace, sessionID, runID string, relatedRunIDs []string) (runtimeEvidenceSnapshot, error) {
-	projection, err := sessions.LoadProjection(ctx, sessionID)
+	projection, err := sessions.LoadWorkEvidenceProjection(ctx, sessionID, relatedRunIDs)
 	if err != nil {
 		return runtimeEvidenceSnapshot{}, fmt.Errorf("load work evidence projection: %w", err)
 	}
@@ -445,7 +446,7 @@ func runtimeRevisionFiles(workspace string, records []session.ToolRecord) ([]ses
 	mutating := false
 	var latestMutationAt time.Time
 	for _, record := range records {
-		if record.State != session.ToolCompleted {
+		if record.State != session.ToolCompleted || isDirectoryRead(record.Name, record.Structured) {
 			continue
 		}
 		recordMutated := toolRecordMutated(record)
@@ -461,7 +462,7 @@ func runtimeRevisionFiles(workspace string, records []session.ToolRecord) ([]ses
 				continue
 			}
 			entry := owned[path]
-			if observation.Operation == "read" || observation.Operation == "format" && !recordMutated {
+			if !fileObservationMutated(observation, recordMutated) {
 				entry.observed = true
 			} else {
 				entry.touched = true
@@ -479,16 +480,14 @@ func runtimeRevisionFiles(workspace string, records []session.ToolRecord) ([]ses
 	}
 	sort.Strings(paths)
 	remaining := int64(maxWorkspaceTotalBytes)
+	mediaRemaining := int64(32 << 20)
 	files := make([]session.WorkRevisionFileV1, 0, len(paths))
 	captureErrors := make([]string, 0)
 	for _, path := range paths {
-		payload, err := readWorkspaceEvidence(workspace, path, &remaining)
-		digest := ""
-		if err == nil {
-			digest = sha256Hex(payload)
-		} else if os.IsNotExist(err) {
+		digest, err := hashWorkspaceEvidence(workspace, path, &remaining, &mediaRemaining)
+		if os.IsNotExist(err) {
 			digest = sha256Hex([]byte("deleted\x00" + path))
-		} else {
+		} else if err != nil {
 			captureErrors = append(captureErrors, "Capture current bytes for "+path)
 			continue
 		}
@@ -497,10 +496,28 @@ func runtimeRevisionFiles(workspace string, records []session.ToolRecord) ([]ses
 	return files, mutating, latestMutationAt, captureErrors
 }
 
+func fileObservationMutated(observation session.FileObservation, recordMutated bool) bool {
+	switch observation.Operation {
+	case "read":
+		return false
+	case "format":
+		return recordMutated
+	default:
+		return true
+	}
+}
+
 func toolRecordMutated(record session.ToolRecord) bool {
 	switch record.Name {
 	case "coding.edit_hashline", "coding.replace", "coding.write_file", "coding.delete_file":
 		return true
+	case "generate_image", "tts":
+		return true
+	case "ast_edit":
+		var result struct {
+			Sections []json.RawMessage `json:"sections"`
+		}
+		return json.Unmarshal(record.Structured, &result) == nil && len(result.Sections) > 0
 	case "coding.gofmt":
 		var result struct {
 			Changed *bool `json:"changed"`
@@ -567,7 +584,7 @@ func evaluateRuntimeChecks(snapshot runtimeEvidenceSnapshot) runtimeCheckState {
 		}
 		var record *session.ToolRecord
 		if check.Kind == "command" {
-			record = matchingCommandRecord(check, snapshot.records, snapshot.latestMutationAt)
+			record = matchingCommandRecordForFiles(check, snapshot.revision.Files, snapshot.records, snapshot.latestMutationAt)
 			if record == nil {
 				if formatterRecords, formatterCheck := matchingGofmtRecords(check, snapshot.revision.Files, snapshot.records); formatterCheck {
 					if len(formatterRecords) == 0 {
@@ -585,7 +602,7 @@ func evaluateRuntimeChecks(snapshot runtimeEvidenceSnapshot) runtimeCheckState {
 			}
 		} else if check.Kind == "artifact" && strings.HasPrefix(check.ArtifactRef, "file:") {
 			path := strings.TrimPrefix(check.ArtifactRef, "file:")
-			record = matchingReadbackRecord(path, snapshot.revision.Files, snapshot.records, snapshot.latestMutationAt)
+			record = matchingReadbackRecord(path, snapshot.revision.Files, snapshot.records)
 		}
 		if record == nil {
 			state.status = ""
@@ -595,6 +612,7 @@ func evaluateRuntimeChecks(snapshot runtimeEvidenceSnapshot) runtimeCheckState {
 		state.evidence = appendUniqueSource(state.evidence, session.SourceRefV1{Kind: "tool_record", ID: record.RunID + ":" + record.ToolCallID})
 		if record.State != session.ToolCompleted || commandOutputMustBeEmpty(check) && strings.TrimSpace(structuredToolOutput(*record)) != "" {
 			state.status = "fail"
+			state.failed = append(state.failed, checkInstruction(check))
 		}
 	}
 	if len(state.missing) > 0 && state.status != "fail" {
@@ -604,18 +622,126 @@ func evaluateRuntimeChecks(snapshot runtimeEvidenceSnapshot) runtimeCheckState {
 }
 
 func matchingCommandRecord(check session.VerificationCheckV1, records []session.ToolRecord, after time.Time) *session.ToolRecord {
-	expected := shellCommandForCheck(check)
+	return matchingCommandRecordForFiles(check, nil, records, after)
+}
+
+func matchingCommandRecordForFiles(check session.VerificationCheckV1, files []session.WorkRevisionFileV1, records []session.ToolRecord, after time.Time) *session.ToolRecord {
 	var matched *session.ToolRecord
 	for index := range records {
 		record := &records[index]
 		if record.StartedAt.Before(after) || record.State == session.ToolRunning {
 			continue
 		}
-		if toolCommand(*record) == expected {
+		if commandMatchesCheck(check, files, toolCommand(*record)) {
 			matched = record
 		}
 	}
 	return matched
+}
+
+func commandMatchesCheck(check session.VerificationCheckV1, files []session.WorkRevisionFileV1, actual string) bool {
+	actual = unwrapShellCommand(actual)
+	if actual == shellCommandForCheck(check) {
+		return true
+	}
+	body := actual
+	if check.CWD != "" {
+		inDirectory := false
+		for _, prefix := range []string{"cd " + shellQuote(check.CWD) + " && ", "cd " + check.CWD + " && "} {
+			if strings.HasPrefix(body, prefix) {
+				body = strings.TrimSpace(strings.TrimPrefix(body, prefix))
+				inDirectory = true
+				break
+			}
+		}
+		if !inDirectory {
+			return false
+		}
+	}
+	expected := shellCommand(check.Environment, "", check.Command)
+	if body == expected {
+		return true
+	}
+	if !isFrontendTestCheck(check) {
+		return false
+	}
+	return frontendTestCommandCoversFiles(check, body, files)
+}
+
+func unwrapShellCommand(command string) string {
+	command = strings.TrimSpace(command)
+	if len(command) >= 2 && strings.HasPrefix(command, "(") && strings.HasSuffix(command, ")") {
+		command = strings.TrimSpace(command[1 : len(command)-1])
+	}
+	// Only unwrap one literal eval argument; expansions, concatenated shell
+	// words and extra statements must still match the selected check exactly.
+	if literal, ok := strings.CutPrefix(command, "eval '"); ok && strings.HasSuffix(literal, "'") {
+		literal = strings.TrimSuffix(literal, "'")
+		if !strings.ContainsRune(literal, '\'') {
+			return strings.TrimSpace(literal)
+		}
+	}
+	return command
+}
+
+func isFrontendTestCheck(check session.VerificationCheckV1) bool {
+	return check.Kind == "command" && strings.HasSuffix(check.ID, "-test") && len(check.Command) == 3 && check.Command[1] == "run" && check.Command[2] == "test"
+}
+
+func frontendTestCommandCoversFiles(check session.VerificationCheckV1, command string, files []session.WorkRevisionFileV1) bool {
+	if len(files) == 0 {
+		return false
+	}
+	if strings.ContainsAny(command, ";&|<>`$\\\n\r") {
+		return false
+	}
+	runner := ""
+	switch check.Command[0] {
+	case "bun":
+		runner = "bunx vitest"
+	case "npm":
+		runner = "npx vitest"
+	case "pnpm":
+		runner = "pnpm exec vitest"
+	case "yarn":
+		runner = "yarn exec vitest"
+	}
+	if !strings.HasPrefix(command, runner+" ") {
+		if !strings.HasPrefix(command, shellCommand(nil, "", check.Command)+" ") {
+			return false
+		}
+	}
+	foundTest := false
+	for _, file := range files {
+		if !file.Touched || !isFrontendTestPath(file.Path) {
+			continue
+		}
+		path := filepath.ToSlash(filepath.Clean(file.Path))
+		if check.CWD != "" {
+			cwd := filepath.ToSlash(filepath.Clean(check.CWD))
+			if !strings.HasPrefix(path, cwd+"/") {
+				continue
+			}
+			path = strings.TrimPrefix(path, cwd+"/")
+		}
+		foundTest = true
+		matched := false
+		for _, token := range strings.Fields(command) {
+			if strings.Trim(token, "'\"") == path {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return foundTest
+}
+
+func isFrontendTestPath(path string) bool {
+	base := strings.ToLower(filepath.Base(filepath.FromSlash(path)))
+	return strings.Contains(base, ".test.") || strings.Contains(base, ".spec.")
 }
 
 func matchingGofmtRecords(check session.VerificationCheckV1, files []session.WorkRevisionFileV1, records []session.ToolRecord) ([]*session.ToolRecord, bool) {
@@ -670,7 +796,7 @@ func matchingGofmtRecords(check session.VerificationCheckV1, files []session.Wor
 	return matches, true
 }
 
-func matchingReadbackRecord(path string, files []session.WorkRevisionFileV1, records []session.ToolRecord, after time.Time) *session.ToolRecord {
+func matchingReadbackRecord(path string, files []session.WorkRevisionFileV1, records []session.ToolRecord) *session.ToolRecord {
 	sha := ""
 	for _, file := range files {
 		if file.Path == path {
@@ -678,6 +804,10 @@ func matchingReadbackRecord(path string, files []session.WorkRevisionFileV1, rec
 			break
 		}
 	}
+	if sha == "" {
+		return nil
+	}
+	after := fileMutationBoundary(path, records)
 	var matched *session.ToolRecord
 	for index := range records {
 		record := &records[index]
@@ -691,6 +821,27 @@ func matchingReadbackRecord(path string, files []session.WorkRevisionFileV1, rec
 		}
 	}
 	return matched
+}
+
+func fileMutationBoundary(path string, records []session.ToolRecord) time.Time {
+	var after time.Time
+	for _, record := range records {
+		if record.State != session.ToolCompleted {
+			continue
+		}
+		mutated := toolRecordMutated(record)
+		// Without file observations a known mutation cannot be scoped safely.
+		affectsFile := mutated && len(record.Observations) == 0
+		for _, observation := range record.Observations {
+			if filepath.ToSlash(filepath.Clean(observation.Path)) == path && fileObservationMutated(observation, mutated) {
+				affectsFile = true
+			}
+		}
+		if affectsFile && record.CompletedAt.After(after) {
+			after = record.CompletedAt
+		}
+	}
+	return after
 }
 
 func toolCommand(record session.ToolRecord) string {
@@ -810,11 +961,20 @@ func runtimeVerificationResult(snapshot runtimeEvidenceSnapshot, status string, 
 	}
 }
 
+const verificationCommandGuidance = "Run each listed command verbatim in a separate coding.shell call, preserving its working directory and environment. " +
+	"Do not append echo, join separate checks with ; or &&, or substitute a different package manager; the tool already records the exit status. " +
+	"Resolve the listed missing checks before retrying completion. "
+
 func verificationRetryMessage(snapshot runtimeEvidenceSnapshot, missing []string) string {
 	if len(missing) == 0 {
 		missing = []string{"Record current criterion-linked verification evidence"}
 	}
-	return "Before answering, complete exactly one verification retry for the current workspace snapshot. Run or perform each missing check, inspect failures, and only then answer:\n- " + strings.Join(missing, "\n- ")
+	return "Before answering, complete exactly one verification retry for the current workspace snapshot. " +
+		"Continue the same run; this is host-owned verification, not a new user request. " +
+		"Do not initialize or replace the session Todo for this retry. If an existing Todo has open items, update those items in place. " +
+		"After these checks, answer the original user request using the implementation and verified evidence from the entire run, including work completed before this retry. " +
+		"The final report must not describe this retry as a separate user turn or imply that earlier implementation and checks did not happen. " +
+		verificationCommandGuidance + "Run or perform each missing check, inspect failures, and only then answer:\n- " + strings.Join(missing, "\n- ")
 }
 
 func guardrailTodoItems(todo session.TodoList, enforceSessionTodo bool) []session.TodoItem {
@@ -862,4 +1022,27 @@ func appendUniqueSource(values []session.SourceRefV1, value session.SourceRefV1)
 func shortEvidenceHash(value string) string {
 	digest := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(digest[:12])
+}
+
+func verifyTodoCompletion(ctx context.Context, sessions *session.Service, workspace, sessionID, runID string, runIDs []string) error {
+	lock := runtimeEvidenceLock(sessions, sessionID)
+	lock.Lock()
+	defer lock.Unlock()
+	snapshot, err := deriveRuntimeEvidence(ctx, sessions, workspace, sessionID, runID, runIDs)
+	if err != nil {
+		return err
+	}
+	if !snapshot.mutating {
+		return nil
+	}
+	state := evaluateRuntimeChecks(snapshot)
+	if state.status == "pass" && len(snapshot.captureErrors) == 0 {
+		return nil
+	}
+	missing := append(state.missing, state.failed...)
+	missing = append(missing, snapshot.captureErrors...)
+	if len(missing) == 0 {
+		missing = []string{"Inspect and fix the failed verification checks before marking this item done"}
+	}
+	return fmt.Errorf("keep the final Todo item in progress; complete verification before calling done. %s\n- %s", verificationCommandGuidance, strings.Join(missing, "\n- "))
 }

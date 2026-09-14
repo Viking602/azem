@@ -1,45 +1,65 @@
 package tui
 
-import "github.com/Viking602/azem/internal/app"
+import (
+	"github.com/Viking602/azem/internal/app"
+	"github.com/Viking602/azem/internal/desktop"
+	"github.com/Viking602/azem/internal/session"
+)
 
-type appEventMsg struct{ Event app.Event }
-type appStreamClosedMsg struct{ Err error }
-type animationTickMsg struct{}
-type backgroundPollMsg struct {
-	Generation uint64
-	ProcessID  string
-}
+type (
+	appEventMsg        struct{ Event app.Event }
+	appStreamClosedMsg struct{ Err error }
+	animationTickMsg   struct{}
+	backgroundPollMsg  struct {
+		Generation uint64
+		ProcessID  string
+	}
+)
+
 type backgroundPollResultMsg struct {
 	Generation uint64
 	ProcessID  string
 	Err        error
 }
 type startTurnResultMsg struct {
-	RunID string
-	Err   error
+	RunID       string
+	Text        string
+	Attachments []session.Attachment
+	Err         error
 }
-type cancelResultMsg struct{ Cancelled bool }
+type cancelResultMsg struct {
+	Cancelled bool
+	Err       error
+}
 type actionResultMsg struct {
 	Action Action
 	Err    error
 }
-type shutdownResultMsg struct{ Err error }
+type (
+	shutdownResultMsg  struct{ Err error }
+	sessionSelectedMsg struct {
+		Snapshot desktop.ReconnectSnapshot
+		Err      error
+	}
+)
 
-type BootstrapDoneMsg = appEventMsg
-type SessionLoadedMsg = appEventMsg
-type RunStartedMsg = appEventMsg
-type AgentStateMsg = appEventMsg
-type ThinkingDeltaMsg = appEventMsg
-type TextDeltaMsg = appEventMsg
-type ToolStartedMsg = appEventMsg
-type ToolUpdateMsg = appEventMsg
-type ToolFinishedMsg = appEventMsg
-type DiffReadyMsg = appEventMsg
-type ApprovalRequestedMsg = appEventMsg
-type ApprovalResolvedMsg = appEventMsg
-type ModelCatalogMsg = appEventMsg
-type AuthStateMsg = appEventMsg
-type MCPStateMsg = appEventMsg
-type RunFinishedMsg = appEventMsg
-type RunFailedMsg = appEventMsg
-type RunCancelledMsg = appEventMsg
+type (
+	BootstrapDoneMsg     = appEventMsg
+	SessionLoadedMsg     = appEventMsg
+	RunStartedMsg        = appEventMsg
+	AgentStateMsg        = appEventMsg
+	ThinkingDeltaMsg     = appEventMsg
+	TextDeltaMsg         = appEventMsg
+	ToolStartedMsg       = appEventMsg
+	ToolUpdateMsg        = appEventMsg
+	ToolFinishedMsg      = appEventMsg
+	DiffReadyMsg         = appEventMsg
+	ApprovalRequestedMsg = appEventMsg
+	ApprovalResolvedMsg  = appEventMsg
+	ModelCatalogMsg      = appEventMsg
+	AuthStateMsg         = appEventMsg
+	MCPStateMsg          = appEventMsg
+	RunFinishedMsg       = appEventMsg
+	RunFailedMsg         = appEventMsg
+	RunCancelledMsg      = appEventMsg
+)

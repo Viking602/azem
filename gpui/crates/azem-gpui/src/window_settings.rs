@@ -1,6 +1,103 @@
 use super::*;
 
 impl AzemWindow {
+    pub(super) fn load_catalog_provider_fields(
+        &mut self,
+        provider: &serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
+        let id = provider
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if id.is_empty() || self.native_settings.catalog_loaded_id.as_deref() == Some(id) {
+            return;
+        }
+        self.native_settings.catalog_loaded_id = Some(id.to_string());
+        self.native_settings.catalog_enabled = provider
+            .get("enabled")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let locale = Locale::resolve(&self.state.settings.language);
+        let default_url = provider
+            .get("defaultBaseUrl")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        let url = provider
+            .get("baseUrl")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(default_url);
+        let locked = !default_url.is_empty();
+        self.native_settings
+            .provider_base_url
+            .update(cx, |input, cx| {
+                if input.text() != url {
+                    input.set_text(url, cx);
+                }
+                input.set_placeholder(
+                    locale.text(if locked {
+                        "ui.officialAPIAddressLocked"
+                    } else {
+                        "ui.customAPIBaseURL"
+                    }),
+                    cx,
+                );
+            });
+        let configured = provider
+            .get("credentialConfigured")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let env = provider
+            .get("envKey")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let placeholder = if configured {
+            locale.text("ui.keepCredential").to_string()
+        } else if !env.is_empty() {
+            env.to_string()
+        } else {
+            locale.text("ui.apiKey").to_string()
+        };
+        self.native_settings
+            .provider_api_key
+            .update(cx, |input, cx| {
+                input.clear(cx);
+                input.set_placeholder(placeholder, cx);
+            });
+    }
+
+    fn sync_catalog_editor(&mut self, cx: &mut Context<Self>) {
+        if !self.settings_open || self.settings_section != "catalog" {
+            return;
+        }
+        let selected = self.settings_provider.clone().or_else(|| {
+            self.state.catalogs.providers.iter().find_map(|provider| {
+                provider
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            })
+        });
+        let Some(id) = selected else {
+            return;
+        };
+        if let Some(provider) = self
+            .state
+            .catalogs
+            .providers
+            .iter()
+            .find(|provider| {
+                provider.get("id").and_then(serde_json::Value::as_str) == Some(id.as_str())
+            })
+            .cloned()
+        {
+            self.load_catalog_provider_fields(&provider, cx);
+        }
+    }
+
     pub(super) fn execute_extension_action(
         &mut self,
         mut payload: serde_json::Value,
@@ -54,10 +151,12 @@ impl AzemWindow {
         palette: ThemePalette,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        self.sync_catalog_editor(cx);
         let locale = Locale::resolve(&self.state.settings.language);
         let close_label = locale.text("ui.closeSettings");
-        let picker = (self.model_picker_open && self.route_picker_target.is_some())
-            .then(|| self.model_picker_view(palette, cx));
+        let picker = (self.popup_motion("model").visible()
+            && self.model_picker_render_target.is_some())
+        .then(|| self.model_picker_view(palette, cx));
         let content = settings_surface(
             &self.state,
             palette,
@@ -71,7 +170,7 @@ impl AzemWindow {
                 self.settings_provider_scroll.clone(),
                 self.settings_model_scroll.clone(),
             ),
-            (self.route_picker_target.as_ref(), picker),
+            (self.model_picker_render_target.as_ref(), picker),
             self.subagent_setting_menu,
             (
                 self.archive_days,
@@ -84,20 +183,19 @@ impl AzemWindow {
             cx,
         );
         let dialog = self.settings_dialog(content, palette);
-        div()
+        let modal = div()
             .id("settings-modal-backdrop")
             .role(Role::Region)
             .aria_label(close_label)
             .absolute()
             .occlude()
             .size_full()
-            .p(px(42.))
-            .bg(hsla(220. / 360., 0.08, 0.18, 0.26))
+            .bg(palette.paper)
             .flex()
             .items_center()
             .justify_center()
-            .child(dialog)
-            .into_any_element()
+            .child(dialog);
+        popup_transition(modal, self.popup_motion("settings"))
     }
 
     pub(super) fn settings_dialog(
@@ -115,21 +213,12 @@ impl AzemWindow {
             .occlude()
             .w_full()
             .h_full()
-            .max_w(px(1420.))
-            .max_h(px(880.))
-            .rounded(px(14.))
-            .border_1()
-            .border_color(palette.border_strong)
-            .shadow(vec![
-                BoxShadow::new(px(0.), px(18.), hsla(220. / 360., 0.15, 0.12, 0.22))
-                    .blur_radius(px(48.)),
-            ])
+            .bg(palette.paper)
             .overflow_hidden()
             .child(
                 div()
                     .id("settings-modal-content")
                     .size_full()
-                    .rounded(px(13.))
                     .overflow_hidden()
                     .child(content),
             )
@@ -265,7 +354,7 @@ impl AzemWindow {
                         )
                 }),
         );
-        div()
+        let popover = div()
             .id("context-composition-popover")
             .on_mouse_down_out(cx.listener(Self::dismiss_picker))
             .role(Role::Region)
@@ -340,7 +429,7 @@ impl AzemWindow {
                             .text_color(palette.faint)
                             .child(format!("{used} / {total}")),
                     ),
-            )
-            .into_any_element()
+            );
+        popup_transition(popover, self.popup_motion("context"))
     }
 }

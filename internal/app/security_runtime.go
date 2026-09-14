@@ -27,15 +27,15 @@ func (e *securityExecutor) Execute(ctx context.Context, request securityscan.Exe
 	allowed := map[string]bool{}
 	switch request.Worker.Kind {
 	case securityscan.WorkerAudit:
-		for _, name := range []string{"coding.list_files", "coding.glob", "coding.read_file", "coding.search", agentservice.ToolASTGrep, agentservice.ToolWebSearch} {
+		for _, name := range []string{"coding.list_files", "coding.glob", "coding.read_file", "coding.search"} {
 			allowed[name] = true
 		}
 	case securityscan.WorkerFixer:
-		for _, name := range []string{"coding.list_files", "coding.glob", "coding.read_file", "coding.search", agentservice.ToolASTGrep, agentservice.ToolWebSearch, "coding.edit_hashline", "coding.replace", "coding.write_file", "coding.delete_file", "coding.gofmt", "coding.go_test"} {
+		for _, name := range []string{"coding.list_files", "coding.glob", "coding.read_file", "coding.search", "coding.edit_hashline", "coding.replace", "coding.write_file", "coding.delete_file", "coding.gofmt", "coding.go_test"} {
 			allowed[name] = true
 		}
 	case securityscan.WorkerVerifier:
-		for _, name := range []string{"coding.list_files", "coding.glob", "coding.read_file", "coding.search", agentservice.ToolASTGrep, agentservice.ToolWebSearch, "coding.git_diff", "coding.go_test"} {
+		for _, name := range []string{"coding.list_files", "coding.glob", "coding.read_file", "coding.search", "coding.git_diff", "coding.go_test"} {
 			allowed[name] = true
 		}
 	}

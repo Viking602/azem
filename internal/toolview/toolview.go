@@ -34,7 +34,7 @@ type FileChangeSummary struct {
 // IsFileChangeTool reports whether the named tool mutates workspace files and
 // therefore participates in file-change projections.
 func IsFileChangeTool(name string) bool {
-	return name == "coding.edit_hashline" || name == "coding.replace" ||
+	return name == "coding.edit_hashline" || name == "coding.replace" || name == "ast_edit" ||
 		name == "coding.write_file" || name == "coding.delete_file"
 }
 
@@ -46,7 +46,7 @@ func IsFileChangeTool(name string) bool {
 func CompletedFileChanges(name, arguments, structured, output string) (FileChangeSummary, bool) {
 	var sections []FileChange
 	switch name {
-	case "coding.edit_hashline", "coding.replace":
+	case "coding.edit_hashline", "coding.replace", "ast_edit":
 		sections = structuredSections(structured)
 		if len(sections) == 0 {
 			sections = ParseCompactEditOutput(output)
@@ -204,6 +204,10 @@ func ParseCompactEditOutput(output string) []FileChange {
 		}
 		if line == "--- compact diff ---" {
 			inDiff = true
+			continue
+		}
+		if line == "--- current source ---" {
+			inDiff = false
 			continue
 		}
 		if inDiff {

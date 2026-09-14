@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -10,6 +11,9 @@ import (
 
 	agentservice "github.com/Viking602/azem/internal/agent"
 	"github.com/Viking602/azem/internal/app"
+	"github.com/Viking602/azem/internal/desktop"
+	"github.com/Viking602/azem/internal/desktopipc"
+	"github.com/Viking602/azem/internal/session"
 )
 
 type inertRuntime struct{}
@@ -18,9 +22,38 @@ func (inertRuntime) NextEvent(context.Context) (app.Event, error) {
 	return app.Event{}, errors.New("closed")
 }
 
-func (inertRuntime) StartTurn(string) (string, error) { return "run_test", nil }
+func (inertRuntime) StartConfiguredTurn(app.TurnRequest) (string, error) {
+	return "run_test", nil
+}
 
-func (inertRuntime) CancelActive() bool { return true }
+func (inertRuntime) GuideActiveTurnWithAttachments(string, string, string, []session.Attachment) error {
+	return nil
+}
+
+func (inertRuntime) CancelRunWithChildren(string, string, bool) (bool, error) {
+	return true, nil
+}
+func (inertRuntime) ExecuteAction(context.Context, Action) error { return nil }
+func (inertRuntime) Request(context.Context, desktopipc.Method, any, any) error {
+	return errActionUnsupported
+}
+
+func (inertRuntime) ImportImage(string, string) (session.Attachment, error) {
+	return session.Attachment{}, errActionUnsupported
+}
+
+func (inertRuntime) ImportImageBytes(string, string, string, []byte) (session.Attachment, error) {
+	return session.Attachment{}, errActionUnsupported
+}
+func (inertRuntime) HasActiveChildren() bool { return false }
+func (inertRuntime) ApprovalModeState() (ApprovalMode, bool) {
+	return ApprovalModePrompt, false
+}
+
+func (inertRuntime) ActiveShellExecutions() []agentservice.ShellExecutionSnapshot {
+	return nil
+}
+func (inertRuntime) Detach() error { return nil }
 
 func assertTranscriptStatusOnly(t *testing.T, footer, label string) {
 	t.Helper()
@@ -50,7 +83,7 @@ func (r *configuredTurnRuntime) StartConfiguredTurn(request app.TurnRequest) (st
 	return "run_configured", nil
 }
 
-func (r *configuredTurnRuntime) GuideActiveTurn(_, _ string, text string) error {
+func (r *configuredTurnRuntime) GuideActiveTurnWithAttachments(_, _ string, text string, _ []session.Attachment) error {
 	if r.guidanceErr != nil {
 		return r.guidanceErr
 	}
@@ -60,8 +93,9 @@ func (r *configuredTurnRuntime) GuideActiveTurn(_, _ string, text string) error 
 
 type skillCommandRuntime struct {
 	inertRuntime
-	request app.TurnRequest
-	actions []Action
+	request        app.TurnRequest
+	actions        []Action
+	expandedPrompt string
 }
 
 func (r *skillCommandRuntime) StartConfiguredTurn(request app.TurnRequest) (string, error) {
@@ -74,6 +108,18 @@ func (r *skillCommandRuntime) ExecuteAction(_ context.Context, action Action) er
 	return nil
 }
 
+func (r *skillCommandRuntime) Request(_ context.Context, method desktopipc.Method, _ any, target any) error {
+	if method != desktopipc.MethodExpandSkillInvocation {
+		return errActionUnsupported
+	}
+	prompt := r.expandedPrompt
+	if prompt == "" {
+		prompt = "expanded verify instructions"
+	}
+	encoded, _ := json.Marshal(desktop.SkillInvocation{Name: "verify", Prompt: prompt})
+	return json.Unmarshal(encoded, target)
+}
+
 type recordedRuntime struct {
 	cancelled          bool
 	actions            []Action
@@ -82,31 +128,29 @@ type recordedRuntime struct {
 	backgroundChildren bool
 	cancelChildren     bool
 	shells             []agentservice.ShellExecutionSnapshot
+	selectedSession    string
 }
 
 func (*recordedRuntime) NextEvent(context.Context) (app.Event, error) {
 	return app.Event{}, errors.New("closed")
 }
 
-func (*recordedRuntime) StartTurn(string) (string, error) { return "run_next", nil }
-
-func (r *recordedRuntime) CancelActive() bool {
-	r.cancelled = true
-	return true
+func (*recordedRuntime) StartConfiguredTurn(app.TurnRequest) (string, error) {
+	return "run_next", nil
 }
 
-func (r *recordedRuntime) HasActiveForegroundChildren() bool {
-	return r.foregroundChildren
+func (*recordedRuntime) GuideActiveTurnWithAttachments(string, string, string, []session.Attachment) error {
+	return nil
+}
+
+func (r *recordedRuntime) CancelRunWithChildren(_, _ string, children bool) (bool, error) {
+	r.cancelled = true
+	r.cancelChildren = children
+	return true, nil
 }
 
 func (r *recordedRuntime) HasActiveChildren() bool {
 	return r.foregroundChildren || r.backgroundChildren
-}
-
-func (r *recordedRuntime) CancelActiveWithChildren(children bool) bool {
-	r.cancelled = true
-	r.cancelChildren = children
-	return true
 }
 
 func (r *recordedRuntime) ActiveShellExecutions() []agentservice.ShellExecutionSnapshot {
@@ -116,6 +160,43 @@ func (r *recordedRuntime) ActiveShellExecutions() []agentservice.ShellExecutionS
 func (r *recordedRuntime) ExecuteAction(_ context.Context, action Action) error {
 	r.actions = append(r.actions, action)
 	return nil
+}
+
+func (r *recordedRuntime) Request(_ context.Context, method desktopipc.Method, payload any, target any) error {
+	if method != desktopipc.MethodResumeSession {
+		return errActionUnsupported
+	}
+	encoded, _ := json.Marshal(payload)
+	var params struct {
+		SessionID string `json:"sessionId"`
+	}
+	_ = json.Unmarshal(encoded, &params)
+	r.selectedSession = params.SessionID
+	snapshot := desktop.ReconnectSnapshot{
+		DaemonEpoch: "test", SelectedSessionID: params.SessionID,
+		Base: desktop.Snapshot{SessionID: params.SessionID},
+		Session: &app.SessionProjection{
+			Version: app.SessionProjectionVersion, Session: session.Session{ID: params.SessionID},
+			Blocks: []app.TranscriptBlock{}, ToolRecords: []session.ToolRecord{},
+			Todo: session.TodoList{Phases: []session.TodoPhase{}}, AgentSnapshots: []app.AgentSnapshotPayload{},
+		},
+		Runs: []app.RunProjection{}, LiveBlocks: []app.LiveBlockProjection{}, Controls: []app.PendingControlProjection{},
+		PromptQueues: []session.PromptQueueV1{}, RuntimeRecovery: app.RecoveryProjection{State: "clear", Items: []app.PendingControlProjection{}},
+	}
+	encoded, _ = json.Marshal(snapshot)
+	return json.Unmarshal(encoded, target)
+}
+
+func (r *recordedRuntime) ImportImage(string, string) (session.Attachment, error) {
+	return session.Attachment{}, errActionUnsupported
+}
+
+func (r *recordedRuntime) ImportImageBytes(string, string, string, []byte) (session.Attachment, error) {
+	return session.Attachment{}, errActionUnsupported
+}
+
+func (r *recordedRuntime) ApprovalModeState() (ApprovalMode, bool) {
+	return ApprovalModePrompt, false
 }
 
 type blockingActionRuntime struct {
@@ -134,7 +215,7 @@ func (r *blockingActionRuntime) ExecuteAction(ctx context.Context, _ Action) err
 	}
 }
 
-func (r *recordedRuntime) Shutdown(context.Context) error {
+func (r *recordedRuntime) Detach() error {
 	r.shutdown = true
 	return nil
 }

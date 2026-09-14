@@ -32,6 +32,7 @@ func TestLateRunDeltaIsDiscarded(t *testing.T) {
 func TestAutoWakeRunStartedAfterParentFailureBecomesVisibleAndAcceptsGuidance(t *testing.T) {
 	runtime := &configuredTurnRuntime{}
 	model := NewModel(runtime, "/tmp/workspace", "chatgpt", "model", "high", "single")
+	model.deliveryMode = "guide"
 	model.status = "Running"
 	model.runID = "parent-run"
 	model.applyEvent(app.Event{Kind: app.EventRunFailed, SessionID: "default", RunID: "parent-run", Text: "stream interrupted"})
@@ -284,8 +285,8 @@ func TestResumeCommandOpensPickerAndResumesSelectedSession(t *testing.T) {
 	updated, _ = model.Update(resumeCmd())
 	model = updated.(AppModel)
 
-	if len(runtime.actions) != 2 || runtime.actions[1].Kind != ActionResumeSession || runtime.actions[1].Target != "session-2" {
-		t.Fatalf("picker actions = %+v", runtime.actions)
+	if len(runtime.actions) != 1 || runtime.selectedSession != "session-2" || model.sessionID != "session-2" {
+		t.Fatalf("picker selection actions=%+v selected=%q model=%q", runtime.actions, runtime.selectedSession, model.sessionID)
 	}
 	if model.overlay != OverlayNone || model.actionBusy {
 		t.Fatalf("picker completion = overlay:%q busy:%v", model.overlay, model.actionBusy)
@@ -307,6 +308,7 @@ func TestSessionTransitionAdoptsNewIDAndClearsPriorState(t *testing.T) {
 	model.composer.Blur()
 	_ = model.View()
 
+	model.sessionID = "next-session"
 	model.applyEvent(app.Event{
 		Kind: app.EventSessionLoaded, SessionID: "next-session", State: "new",
 		Data: map[string]string{"blocks": "[]", "provider": "grok", "model": "grok-model", "reasoning": "medium", "agentMode": "team"},
@@ -347,6 +349,7 @@ func TestSessionTransitionInvalidatesScrollMetricsBeforeNextFrame(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	model.sessionID = "long-session"
 	model.applyEvent(app.Event{
 		Kind: app.EventSessionLoaded, SessionID: "long-session", State: "loaded",
 		Data: map[string]string{"blocks": string(encoded)},
@@ -372,6 +375,7 @@ func TestSessionTransitionInvalidatesScrollMetricsBeforeNextFrame(t *testing.T) 
 func TestSessionReloadRestoresContextUsageFooter(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "gpt-main", "high", "single")
 	model.selectModels([]ModelChoice{{ID: "gpt-main", ContextWindow: 272_000, SupportsReasoning: true}})
+	model.sessionID = "restored"
 	model.applyEvent(app.Event{
 		Kind: app.EventSessionLoaded, SessionID: "restored", State: "loaded",
 		Data: map[string]string{
@@ -407,6 +411,7 @@ func TestSessionReloadKeepsCompleteFailedOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	model.sessionID = "restored"
 	model.applyEvent(app.Event{
 		Kind: app.EventSessionLoaded, SessionID: "restored", State: "loaded",
 		Data: map[string]string{"blocks": string(blocks)},
@@ -435,6 +440,7 @@ func TestSessionReloadRestoresDurableToolTimelineInSequence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	model.sessionID = "restored"
 	model.applyEvent(app.Event{
 		Kind: app.EventSessionLoaded, SessionID: "restored", State: "loaded",
 		Data: map[string]string{
@@ -590,6 +596,7 @@ func TestToolDisplayNameReusesProvidedCatalog(t *testing.T) {
 func TestSessionReloadRebuildsTypedTasksWithoutDuplicateLifecycleCards(t *testing.T) {
 	model := NewModel(inertRuntime{}, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	model.agents = []AgentView{{ID: "stale"}}
+	model.sessionID = "reloaded"
 	model.applyEvent(app.Event{
 		Kind: app.EventSessionLoaded, SessionID: "reloaded", State: "loaded",
 		Data: map[string]string{

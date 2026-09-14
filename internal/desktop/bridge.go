@@ -3,10 +3,12 @@ package desktop
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -15,12 +17,14 @@ import (
 	"time"
 
 	azemapp "github.com/Viking602/azem/internal/app"
+	"github.com/Viking602/azem/internal/collab"
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/desktop/termhost"
 	"github.com/Viking602/azem/internal/githubpr"
 	"github.com/Viking602/azem/internal/securityscan"
 	"github.com/Viking602/azem/internal/session"
 	"github.com/Viking602/azem/internal/sessionexport"
+	"github.com/Viking602/azem/internal/sessionimport"
 	"github.com/Viking602/azem/internal/sessionshare"
 )
 
@@ -54,8 +58,10 @@ type Snapshot struct {
 	Model                    string                  `json:"model"`
 	Reasoning                string                  `json:"reasoning"`
 	AgentMode                string                  `json:"agentMode"`
+	WorkflowMode             string                  `json:"workflowMode"`
 	Language                 string                  `json:"language"`
 	ApprovalMode             string                  `json:"approvalMode"`
+	AutoReviewAvailable      bool                    `json:"autoReviewAvailable"`
 	QueueMode                string                  `json:"queueMode"`
 	SubagentConcurrency      int                     `json:"subagentConcurrency"`
 	SubagentMaxDepth         int                     `json:"subagentMaxDepth"`
@@ -69,6 +75,7 @@ type Snapshot struct {
 }
 
 type TurnRequest struct {
+	MutationID       string                   `json:"mutationId"`
 	SessionID        string                   `json:"sessionId"`
 	Prompt           string                   `json:"prompt"`
 	Provider         string                   `json:"provider"`
@@ -90,6 +97,21 @@ type Attachment struct {
 	MIMEType string `json:"mimeType"`
 	Path     string `json:"path"`
 	Size     int64  `json:"size"`
+}
+
+type StartTurnReceipt struct {
+	MutationID string    `json:"mutationId"`
+	SessionID  string    `json:"sessionId"`
+	RunID      string    `json:"runId"`
+	AcceptedAt time.Time `json:"acceptedAt"`
+}
+
+type TurnControlReceipt struct {
+	MutationID string    `json:"mutationId"`
+	SessionID  string    `json:"sessionId"`
+	RunID      string    `json:"runId"`
+	Kind       string    `json:"kind"`
+	AcceptedAt time.Time `json:"acceptedAt"`
 }
 
 type ActionRequest struct {
@@ -115,20 +137,62 @@ type PullRequestDetail struct {
 	PullRequest githubpr.PullRequest  `json:"pullRequest"`
 	Monitor     githubpr.MonitorState `json:"monitor"`
 }
+type SkillInvocation struct {
+	Name   string `json:"name"`
+	Prompt string `json:"prompt"`
+}
+
+type CollaborationRequest struct {
+	Action    string `json:"action"`
+	SessionID string `json:"sessionId"`
+	RelayURL  string `json:"relayUrl,omitempty"`
+}
+
+type CollaborationState struct {
+	State        string `json:"state"`
+	Link         string `json:"link,omitempty"`
+	ViewLink     string `json:"viewLink,omitempty"`
+	Participants int    `json:"participants"`
+}
+type (
+	PromptQueueMutation   = azemapp.PromptQueueMutation
+	PromptQueueProjection = session.PromptQueueV1
+)
+
 type ReconnectSnapshot struct {
-	Base            Snapshot                           `json:"base"`
-	Session         *Event                             `json:"session,omitempty"`
-	Tree            *session.SessionTree               `json:"tree,omitempty"`
-	Skills          SkillCatalogSnapshot               `json:"skills"`
-	Hooks           *azemapp.HookCatalogSnapshot       `json:"hooks"`
-	Marketplace     *azemapp.MarketplaceCatalogPayload `json:"marketplace"`
-	PullRequests    *githubpr.Dashboard                `json:"pullRequests,omitempty"`
-	Terminals       []TerminalSession                  `json:"terminals"`
-	ActiveSessionID string                             `json:"activeSessionId,omitempty"`
-	Sessions        []session.Session                  `json:"sessions"`
-	Projects        []session.Project                  `json:"projects"`
-	ActiveRunID     string                             `json:"activeRunId,omitempty"`
-	PendingControls []Event                            `json:"pendingControls,omitempty"`
+	DaemonEpoch       string                             `json:"daemonEpoch"`
+	WireSequence      uint64                             `json:"wireSequence"`
+	SelectedSessionID string                             `json:"selectedSessionId"`
+	Base              Snapshot                           `json:"base"`
+	Session           *azemapp.SessionProjection         `json:"session,omitempty"`
+	ContextProfile    *azemapp.ContextProfile            `json:"contextProfile,omitempty"`
+	Tree              *session.SessionTree               `json:"tree,omitempty"`
+	Skills            SkillCatalogSnapshot               `json:"skills"`
+	Hooks             *azemapp.HookCatalogSnapshot       `json:"hooks"`
+	Marketplace       *azemapp.MarketplaceCatalogPayload `json:"marketplace"`
+	PullRequests      *githubpr.Dashboard                `json:"pullRequests,omitempty"`
+	Terminals         []TerminalSession                  `json:"terminals"`
+	Sessions          []session.Session                  `json:"sessions"`
+	Projects          []session.Project                  `json:"projects"`
+	Runs              []azemapp.RunProjection            `json:"runs"`
+	LiveBlocks        []azemapp.LiveBlockProjection      `json:"liveBlocks"`
+	Controls          []azemapp.PendingControlProjection `json:"controls"`
+	RuntimeRecovery   azemapp.RecoveryProjection         `json:"runtimeRecovery"`
+	PromptQueues      []session.PromptQueueV1            `json:"promptQueues"`
+}
+
+type SessionSelectionSnapshot struct {
+	DaemonEpoch       string                             `json:"daemonEpoch"`
+	WireSequence      uint64                             `json:"wireSequence"`
+	SelectedSessionID string                             `json:"selectedSessionId"`
+	Session           *azemapp.SessionProjection         `json:"session"`
+	Ephemeral         bool                               `json:"ephemeral,omitempty"`
+	ContextProfile    *azemapp.ContextProfile            `json:"contextProfile,omitempty"`
+	Runs              []azemapp.RunProjection            `json:"runs"`
+	LiveBlocks        []azemapp.LiveBlockProjection      `json:"liveBlocks"`
+	Controls          []azemapp.PendingControlProjection `json:"controls"`
+	RuntimeRecovery   azemapp.RecoveryProjection         `json:"runtimeRecovery"`
+	PromptQueues      []session.PromptQueueV1            `json:"promptQueues"`
 }
 
 type Event struct {
@@ -172,26 +236,32 @@ type Event struct {
 	SecurityFindings   []securityscan.Finding             `json:"securityFindings,omitempty"`
 	SecurityFinding    *securityscan.Finding              `json:"securityFinding,omitempty"`
 	SecurityPatch      *securityscan.PatchResult          `json:"securityPatch,omitempty"`
+	SessionProjection  *azemapp.SessionProjection         `json:"sessionProjection,omitempty"`
+	RunProjection      *azemapp.RunProjection             `json:"runProjection,omitempty"`
+	PromptQueue        *session.PromptQueueV1             `json:"promptQueue,omitempty"`
 	At                 time.Time                          `json:"at"`
 }
 
 type Bridge struct {
-	runtime      *azemapp.Service
-	cfg          config.Config
-	workspace    string
-	sessionID    string
-	openProject  func(string, string, int64) error
-	emit         EventEmitter
-	rawTerminal  func(TerminalEvent, []byte)
-	ctx          context.Context
-	cancel       context.CancelFunc
-	startOnce    sync.Once
-	primeOnce    sync.Once
-	sequence     atomic.Uint64
-	terminalSeq  atomic.Uint64
-	pullRequests *githubpr.Client
-	prMonitor    *githubpr.Monitor
-	terminals    *termhost.Host
+	runtime        *azemapp.Service
+	cfg            config.Config
+	workspace      string
+	sessionID      string
+	openProject    func(string, string, int64) error
+	emit           EventEmitter
+	rawTerminal    func(TerminalEvent, []byte)
+	ctx            context.Context
+	cancel         context.CancelFunc
+	startOnce      sync.Once
+	primeOnce      sync.Once
+	sequence       atomic.Uint64
+	terminalSeq    atomic.Uint64
+	pullRequests   *githubpr.Client
+	prMonitor      *githubpr.Monitor
+	terminals      *termhost.Host
+	collabMu       sync.Mutex
+	collabHost     *collab.Host
+	collabStarting bool
 }
 
 func NewBridge(parent context.Context, boot azemapp.BootstrapResult, emit EventEmitter, openProject func(string, string, int64) error) *Bridge {
@@ -237,6 +307,7 @@ func (b *Bridge) StartRuntime() {
 		return
 	}
 	b.startOnce.Do(func() {
+		b.runtime.StartPromptQueueCoordinator()
 		go b.pump()
 		if b.prMonitor != nil {
 			b.prMonitor.Start()
@@ -258,11 +329,13 @@ func (b *Bridge) baseSnapshot() Snapshot {
 	if b.prMonitor != nil {
 		monitors = b.prMonitor.States()
 	}
+	_, autoReviewAvailable := b.runtime.ApprovalModeState()
 	return Snapshot{
 		Workspace: b.workspace, CurrentBranch: currentBranch, SessionID: b.sessionID,
 		Provider: b.cfg.Defaults.Provider, Model: b.cfg.Defaults.Model,
 		Reasoning: b.cfg.Defaults.Reasoning, AgentMode: b.cfg.Defaults.AgentMode,
-		Language: b.cfg.Defaults.Language, ApprovalMode: b.cfg.Defaults.ApprovalMode,
+		WorkflowMode: b.runtime.WorkflowMode(),
+		Language:     b.cfg.Defaults.Language, ApprovalMode: b.cfg.Defaults.ApprovalMode, AutoReviewAvailable: autoReviewAvailable,
 		QueueMode:                b.cfg.Defaults.QueueMode,
 		SubagentConcurrency:      b.cfg.Agents.Subagents.MaxConcurrency,
 		SubagentMaxDepth:         b.cfg.Agents.Subagents.MaxDepth,
@@ -313,42 +386,79 @@ func (b *Bridge) UsageReport(scope string) (session.UsageReport, error) {
 	return b.runtime.UsageReport(ctx, scope)
 }
 
+func (b *Bridge) PromptQueue(sessionID string) (PromptQueueProjection, error) {
+	return b.runtime.PromptQueue(b.ctx, sessionID)
+}
+
+func (b *Bridge) MutatePromptQueue(request PromptQueueMutation) (PromptQueueProjection, error) {
+	return b.runtime.MutatePromptQueue(b.ctx, request)
+}
+
 func (b *Bridge) ReconnectSnapshot(sessionID string) (ReconnectSnapshot, error) {
+	return b.reconnectSnapshot(sessionID)
+}
+
+func (b *Bridge) reconnectSnapshot(sessionID string) (ReconnectSnapshot, error) {
 	if b.runtime == nil || b.runtime.Sessions() == nil {
 		return ReconnectSnapshot{}, fmt.Errorf("runtime is unavailable")
 	}
 	b.StartRuntime()
 	base := b.baseSnapshot()
+	ctx, cancel := context.WithTimeout(b.ctx, 20*time.Second)
+	defer cancel()
+	activeSessionID, _ := b.runtime.ActiveRun()
 	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		sessionID = activeSessionID
+	}
+	if sessionID == "" {
+		recent, err := b.runtime.Sessions().WorkspaceSession(ctx, b.workspace)
+		if err == nil {
+			sessionID = recent
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return ReconnectSnapshot{}, fmt.Errorf("load workspace session: %w", err)
+		}
+	}
 	if sessionID == "" {
 		sessionID = base.SessionID
 	}
-	ctx, cancel := context.WithTimeout(b.ctx, 5*time.Second)
-	defer cancel()
-	snapshot := ReconnectSnapshot{Base: base, Terminals: b.ListTerminals()}
-	snapshot.ActiveSessionID, snapshot.ActiveRunID = b.runtime.ActiveRun()
+	terminals := b.ListTerminals()
+	if terminals == nil {
+		terminals = []TerminalSession{}
+	}
+	snapshot := ReconnectSnapshot{
+		Base: base, SelectedSessionID: sessionID, Terminals: terminals,
+		Runs: []azemapp.RunProjection{}, LiveBlocks: []azemapp.LiveBlockProjection{},
+		Controls: []azemapp.PendingControlProjection{}, PromptQueues: []session.PromptQueueV1{},
+	}
 	var err error
 	snapshot.Sessions, err = b.runtime.Sessions().List(ctx, 100)
 	if err != nil {
 		return ReconnectSnapshot{}, fmt.Errorf("list reconnect sessions: %w", err)
 	}
+	if snapshot.Sessions == nil {
+		snapshot.Sessions = []session.Session{}
+	}
 	snapshot.Projects, err = b.runtime.Sessions().Projects(ctx)
 	if err != nil {
 		return ReconnectSnapshot{}, fmt.Errorf("list reconnect projects: %w", err)
 	}
-	projection, err := b.runtime.SessionProjection(ctx, sessionID)
-	if err == nil {
-		sessionEvent := eventDTO(projection)
-		snapshot.Session = &sessionEvent
-		if tree, treeErr := b.runtime.Sessions().LoadSessionTree(ctx, sessionID); treeErr == nil {
-			snapshot.Tree = &tree
-		}
-	} else if sessionID != base.SessionID || !errors.Is(err, session.ErrSessionNotFound) {
+	if snapshot.Projects == nil {
+		snapshot.Projects = []session.Project{}
+	}
+	runtimeProjection, err := b.runtime.RuntimeProjection(ctx, sessionID)
+	if err != nil {
 		return ReconnectSnapshot{}, err
 	}
-	for _, control := range b.runtime.PendingControlEvents(sessionID) {
-		snapshot.PendingControls = append(snapshot.PendingControls, eventDTO(control))
-	}
+	snapshot.Session = runtimeProjection.Session
+	snapshot.Runs = runtimeProjection.Runs
+	snapshot.LiveBlocks = runtimeProjection.LiveBlocks
+	snapshot.Controls = runtimeProjection.PendingControls
+	snapshot.PromptQueues = runtimeProjection.PromptQueues
+	snapshot.RuntimeRecovery = runtimeProjection.Recovery
+	snapshot.ContextProfile, _ = b.runtime.SessionContextProfile(ctx, "")
+	// Session trees are loaded through SessionTree on demand. Embedding their
+	// unbounded parent chain here exceeds native JSON depth limits on long chats.
 	// Optional catalogs are deliberately excluded from the first reconnect
 	// response. Dispatcher starts RefreshProjection after this durable snapshot
 	// is complete, so providers, Skills, Hooks, plugins, marketplace data, MCP,
@@ -485,20 +595,72 @@ func (b *Bridge) SearchSessions(query string, limit int) ([]session.SessionSearc
 	return b.runtime.SearchSessions(ctx, query, limit)
 }
 
-// ResumeSession returns a direct durable projection in addition to the normal
-// runtime event. The readback makes navigation deterministic for the window
-// that initiated it while preserving the event stream for every other window.
+// ResumeSession activates a durable conversation once and returns that
+// projection directly. The runtime still broadcasts the same session_loaded
+// event for other windows, but the initiating window must not rebuild the
+// projection a second time on the navigation critical path.
 func (b *Bridge) ResumeSession(sessionID string) (Event, error) {
 	ctx, cancel := context.WithTimeout(b.ctx, 2*time.Second)
 	defer cancel()
-	if err := b.runtime.ExecuteAction(ctx, azemapp.Action{Kind: azemapp.ActionResumeSession, Target: sessionID, SessionID: sessionID}); err != nil {
-		return Event{}, err
-	}
-	event, err := b.runtime.SessionProjection(ctx, sessionID)
+	event, err := b.runtime.ResumeSession(ctx, sessionID)
 	if err != nil {
 		return Event{}, err
 	}
 	return eventDTO(event), nil
+}
+
+func (b *Bridge) SelectSession(sessionID string) (ReconnectSnapshot, error) {
+	ctx, cancel := context.WithTimeout(b.ctx, 5*time.Second)
+	defer cancel()
+	if err := b.runtime.PrepareSessionSelection(ctx, strings.TrimSpace(sessionID)); err != nil {
+		return ReconnectSnapshot{}, err
+	}
+	return b.reconnectSnapshot(sessionID)
+}
+
+func (b *Bridge) SelectSessionFast(sessionID string) (SessionSelectionSnapshot, error) {
+	ctx, cancel := context.WithTimeout(b.ctx, 3*time.Second)
+	defer cancel()
+	sessionID = strings.TrimSpace(sessionID)
+	if err := b.runtime.PrepareSessionSelection(ctx, sessionID); err != nil {
+		return SessionSelectionSnapshot{}, err
+	}
+	return b.sessionSelectionSnapshot(ctx, sessionID, nil, false)
+}
+
+func (b *Bridge) CreateSession(title string) (SessionSelectionSnapshot, error) {
+	ctx, cancel := context.WithTimeout(b.ctx, 3*time.Second)
+	defer cancel()
+	projection, err := b.runtime.NewSessionProjection(ctx, title)
+	if err != nil {
+		return SessionSelectionSnapshot{}, err
+	}
+	return b.sessionSelectionSnapshot(ctx, projection.Session.ID, &projection, true)
+}
+
+func (b *Bridge) sessionSelectionSnapshot(ctx context.Context, sessionID string, replacement *azemapp.SessionProjection, ephemeral bool) (SessionSelectionSnapshot, error) {
+	runtimeProjection, err := b.runtime.RuntimeProjection(ctx, sessionID)
+	if err != nil {
+		return SessionSelectionSnapshot{}, err
+	}
+	if replacement != nil {
+		runtimeProjection.Session = replacement
+	}
+	queues := make([]session.PromptQueueV1, 0, 1)
+	for _, queue := range runtimeProjection.PromptQueues {
+		if queue.SessionID == sessionID {
+			queues = append(queues, queue)
+			break
+		}
+	}
+	contextProfile, _ := b.runtime.SessionContextProfile(ctx, "")
+	return SessionSelectionSnapshot{
+		SelectedSessionID: sessionID, Session: runtimeProjection.Session,
+		Ephemeral: ephemeral, ContextProfile: contextProfile,
+		Runs: runtimeProjection.Runs, LiveBlocks: runtimeProjection.LiveBlocks,
+		Controls: runtimeProjection.PendingControls, RuntimeRecovery: runtimeProjection.Recovery,
+		PromptQueues: queues,
+	}, nil
 }
 
 func (b *Bridge) SessionTree(sessionID string) (session.SessionTree, error) {
@@ -559,6 +721,125 @@ func (b *Bridge) ShareSession(sessionID, serverURL, store string, allBranches bo
 	ctx, cancel := context.WithTimeout(b.ctx, 2*time.Minute)
 	defer cancel()
 	return sessionshare.New(b.runtime.Sessions()).Share(ctx, sessionID, sessionshare.Options{ServerURL: serverURL, Store: sessionshare.Store(store), AllBranches: allBranches})
+}
+
+type serviceAttachmentImporter struct {
+	runtime *azemapp.Service
+}
+
+func (importer serviceAttachmentImporter) ImportBytes(sessionID, name, mimeType string, data []byte) (session.Attachment, error) {
+	return importer.runtime.ImportImageBytes(sessionID, name, mimeType, data)
+}
+
+func (b *Bridge) ImportSession(source, inputPath, targetSessionID string) (session.Session, error) {
+	if source != string(sessionimport.SourceClaude) && source != string(sessionimport.SourceCodex) {
+		return session.Session{}, fmt.Errorf("unsupported session import source %q", source)
+	}
+	absolute, err := filepath.Abs(strings.TrimSpace(inputPath))
+	if err != nil {
+		return session.Session{}, err
+	}
+	info, err := os.Stat(absolute)
+	if err != nil {
+		return session.Session{}, err
+	}
+	if !info.Mode().IsRegular() {
+		return session.Session{}, fmt.Errorf("session import path %q is not a regular file", absolute)
+	}
+	importInfo := sessionimport.Info{
+		Source: sessionimport.Source(source), ID: strings.TrimSuffix(filepath.Base(absolute), filepath.Ext(absolute)),
+		Path: absolute, Workspace: b.workspace, CreatedAt: info.ModTime(), UpdatedAt: info.ModTime(),
+	}
+	ctx, cancel := context.WithTimeout(b.ctx, 2*time.Minute)
+	defer cancel()
+	return sessionimport.New(b.runtime.Sessions(), serviceAttachmentImporter{runtime: b.runtime}).Import(ctx, importInfo, targetSessionID, b.workspace)
+}
+
+func (b *Bridge) ExpandSkillInvocation(name, arguments string) (SkillInvocation, error) {
+	expanded, err := b.runtime.ExpandSkillInvocation(name, arguments)
+	if err != nil {
+		return SkillInvocation{}, err
+	}
+	return SkillInvocation{Name: expanded.Name, Prompt: expanded.Prompt}, nil
+}
+
+func (b *Bridge) Collaboration(request CollaborationRequest) (CollaborationState, error) {
+	switch strings.TrimSpace(request.Action) {
+	case "", "status":
+		b.collabMu.Lock()
+		host := b.collabHost
+		starting := b.collabStarting
+		b.collabMu.Unlock()
+		if starting {
+			return CollaborationState{State: "starting"}, nil
+		}
+		if host == nil {
+			return CollaborationState{State: "inactive"}, nil
+		}
+		return CollaborationState{State: "hosting", Link: host.Link(), ViewLink: host.ViewLink(), Participants: len(host.Participants())}, nil
+	case "host":
+		b.collabMu.Lock()
+		if b.collabHost != nil || b.collabStarting {
+			b.collabMu.Unlock()
+			return CollaborationState{}, errors.New("collaboration is already active")
+		}
+		b.collabStarting = true
+		b.collabMu.Unlock()
+		defer func() {
+			b.collabMu.Lock()
+			b.collabStarting = false
+			b.collabMu.Unlock()
+		}()
+		sessionID := strings.TrimSpace(request.SessionID)
+		if _, err := b.runtime.Sessions().LoadSession(b.ctx, sessionID); err != nil {
+			if _, ensureErr := b.runtime.Sessions().Ensure(b.ctx, session.Session{ID: sessionID, Title: "New session", AgentMode: "single"}); ensureErr != nil {
+				return CollaborationState{}, ensureErr
+			}
+		}
+		relayURL := strings.TrimSpace(request.RelayURL)
+		if relayURL == "" {
+			relayURL = collab.DefaultRelayURL
+		}
+		host, err := collab.NewHost(collab.HostOptions{
+			RelayURL: relayURL, SessionID: sessionID, Sessions: b.runtime.Sessions(),
+			OnPrompt: func(_ context.Context, _ collab.Participant, text string) error {
+				_, err := b.runtime.StartConfiguredTurn(azemapp.TurnRequest{
+					SessionID: sessionID, Prompt: text, Provider: b.cfg.Defaults.Provider,
+					Model: b.cfg.Defaults.Model, Reasoning: b.cfg.Defaults.Reasoning, AgentMode: b.cfg.Defaults.AgentMode,
+				})
+				return err
+			},
+			OnAbort: func(context.Context, collab.Participant) error {
+				activeSession, runID := b.runtime.ActiveRun()
+				if activeSession == sessionID && runID != "" {
+					_, err := b.runtime.CancelRunWithChildren(sessionID, runID, false)
+					return err
+				}
+				return nil
+			},
+		})
+		if err != nil {
+			return CollaborationState{}, err
+		}
+		if err := host.Start(b.ctx); err != nil {
+			return CollaborationState{}, err
+		}
+		b.collabMu.Lock()
+		b.collabHost = host
+		b.collabMu.Unlock()
+		return CollaborationState{State: "hosting", Link: host.Link(), ViewLink: host.ViewLink()}, nil
+	case "stop":
+		b.collabMu.Lock()
+		host := b.collabHost
+		b.collabHost = nil
+		b.collabMu.Unlock()
+		if host != nil {
+			host.Stop("stopped")
+		}
+		return CollaborationState{State: "inactive"}, nil
+	default:
+		return CollaborationState{}, fmt.Errorf("unsupported collaboration action %q", request.Action)
+	}
 }
 
 func (b *Bridge) PullRequestDashboard() (githubpr.Dashboard, error) {
@@ -634,6 +915,13 @@ func (b *Bridge) Close() {
 	if b.terminals != nil {
 		b.terminals.CloseAll()
 	}
+	b.collabMu.Lock()
+	host := b.collabHost
+	b.collabHost = nil
+	b.collabMu.Unlock()
+	if host != nil {
+		host.Stop("daemon shutdown")
+	}
 	b.cancel()
 	b.prMonitor.Close()
 }
@@ -689,6 +977,14 @@ func (b *Bridge) emitEvent(event Event) {
 	if b.emit != nil {
 		b.emit(EventName, event)
 	}
+	b.collabMu.Lock()
+	host := b.collabHost
+	b.collabMu.Unlock()
+	if host != nil {
+		if encoded, err := json.Marshal(event); err == nil {
+			_ = host.BroadcastEvent(b.ctx, encoded)
+		}
+	}
 }
 
 func eventDTO(event azemapp.Event) Event {
@@ -706,7 +1002,8 @@ func eventDTO(event azemapp.Event) Event {
 		BackgroundLogs: event.BackgroundLogs, GitBranches: event.GitBranches, UsageReport: event.UsageReport,
 		SecurityConfig: event.SecurityConfig, Security: event.Security, SecurityScans: event.SecurityScans, SecurityFindings: event.SecurityFindings,
 		SecurityFinding: event.SecurityFinding, SecurityPatch: event.SecurityPatch,
-		WorkspaceDirty: event.WorkspaceDirty, At: event.At,
+		WorkspaceDirty: event.WorkspaceDirty, SessionProjection: event.SessionProjection,
+		RunProjection: event.RunProjection, PromptQueue: event.PromptQueue, At: event.At,
 	}
 }
 
@@ -729,8 +1026,8 @@ func allowedAction(kind azemapp.ActionKind) bool {
 		azemapp.ActionListThemes,
 		azemapp.ActionListSkills, azemapp.ActionListPlugins, azemapp.ActionSetPluginImported, azemapp.ActionListHooks, azemapp.ActionSetPluginHooksTrusted, azemapp.ActionSetHookEnabled, azemapp.ActionReloadSkills, azemapp.ActionSetSkillEnabled,
 		azemapp.ActionListMemories, azemapp.ActionRemember, azemapp.ActionForgetMemory,
-		azemapp.ActionShowRecap, azemapp.ActionListModels, azemapp.ActionListModelProviders, azemapp.ActionDiscoverProviderModels, azemapp.ActionSetModelProvider, azemapp.ActionSetModelEnabled,
-		azemapp.ActionListModelRoutes, azemapp.ActionSetModelRoute,
+		azemapp.ActionShowRecap, azemapp.ActionListModels, azemapp.ActionListModelProviders, azemapp.ActionDiscoverProviderModels, azemapp.ActionSetModelProvider, azemapp.ActionSetModelEnabled, azemapp.ActionSetModelExtendedContext,
+		azemapp.ActionListModelRoutes, azemapp.ActionSetModelRoute, azemapp.ActionSetSessionMode, azemapp.ActionSetWorkflowMode,
 		azemapp.ActionResetModelRoute, azemapp.ActionSetSubagentConcurrency,
 		azemapp.ActionSetSubagentDepth, azemapp.ActionSetShellConcurrency, azemapp.ActionSetShellMaxWallClock, azemapp.ActionSetSubagentAwait, azemapp.ActionSetSubagentIdle,
 		azemapp.ActionSetChatGPTFastMode, azemapp.ActionSetSessionPreferences, azemapp.ActionListBackground,
@@ -740,7 +1037,8 @@ func allowedAction(kind azemapp.ActionKind) bool {
 		azemapp.ActionStartSecurityScan, azemapp.ActionCancelSecurityScan, azemapp.ActionResumeSecurityScan,
 		azemapp.ActionListSecurityScans, azemapp.ActionGetSecurityScan, azemapp.ActionListSecurityFindings,
 		azemapp.ActionGetSecurityFinding, azemapp.ActionSetSecurityTriage, azemapp.ActionPatchSecurityFindings,
-		azemapp.ActionExportSecurityScan:
+		azemapp.ActionPatchSecurityWithPR, azemapp.ActionExportSecurityScan, azemapp.ActionPublishSecurityScan,
+		azemapp.ActionReconcileSecurityPublish:
 		return true
 	default:
 		return false

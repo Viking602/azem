@@ -7,67 +7,144 @@ pub(super) fn settings_routes_body(
     route_picker: Option<gpui::AnyElement>,
     cx: &mut Context<AzemWindow>,
 ) -> gpui::AnyElement {
-    let core = state
-        .catalogs
-        .routes
-        .iter()
-        .filter(|route| {
-            is_core_settings_route(
-                route
-                    .get("scope")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default(),
-            )
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    let subagents = state
-        .catalogs
-        .routes
-        .iter()
-        .filter(|route| route.get("scope").and_then(serde_json::Value::as_str) == Some("subagent"))
-        .cloned()
-        .collect::<Vec<_>>();
-    let (core_picker, subagent_picker) =
-        if route_picker_target.is_some_and(|target| target.scope == "subagent") {
-            (None, route_picker)
-        } else {
-            (route_picker, None)
-        };
-    div()
+    let mut route_picker = route_picker;
+    let mut body = div()
         .w_full()
         .flex()
-        .items_start()
-        .gap_4()
-        .child(settings_route_card(
-            (
-                locale.text("ui.coreWorkflows"),
-                locale.text("ui.mainConversationAndCriticalDecisions"),
+        .flex_col()
+        .gap_6()
+        .child(settings_section(
+            locale.text("ui.coreWorkflows"),
+            locale.text("ui.workflowSelectionDescription"),
+            div().child(
+                div()
+                    .id("settings-workflow-choice")
+                    .flex()
+                    .gap_3()
+                    .role(Role::RadioGroup)
+                    .aria_label(locale.text("ui.executionWorkflow"))
+                    .children(
+                        [("vibe", "ui.vibeWorkflow"), ("fusion", "ui.fusionWorkflow")]
+                            .into_iter()
+                            .map(|(mode, label)| {
+                                let selected = state.settings.workflow_mode.as_ref() == mode;
+                                div()
+                                    .id(format!("settings-workflow-{mode}"))
+                                    .role(Role::RadioButton)
+                                    .aria_label(locale.text(label))
+                                    .aria_selected(selected)
+                                    .aria_toggled(selected.into())
+                                    .tab_stop(state.connection.connected)
+                                    .flex_1()
+                                    .min_h(px(48.))
+                                    .px_4()
+                                    .py_3()
+                                    .rounded(px(10.))
+                                    .border_1()
+                                    .border_color(if selected {
+                                        palette.accent
+                                    } else {
+                                        palette.border
+                                    })
+                                    .bg(if selected {
+                                        palette.accent_soft
+                                    } else {
+                                        palette.paper
+                                    })
+                                    .text_color(if selected {
+                                        palette.accent
+                                    } else {
+                                        palette.ink_soft
+                                    })
+                                    .text_sm()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .when(state.connection.connected, |button| {
+                                        button.cursor_pointer()
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.select_workflow_mode(mode, cx)
+                                    }))
+                                    .child(locale.text(label))
+                                    .when(selected, |button| {
+                                        button.child(icon("check", 14., palette.accent))
+                                    })
+                                    .animate_selection(
+                                        selected,
+                                        palette.paper,
+                                        palette.accent_soft,
+                                        cx,
+                                    )
+                            }),
+                    ),
             ),
-            core,
+            palette,
+        ));
+    for (group, title, description) in [
+        workflow_route_group(state.settings.workflow_mode.as_ref()),
+        (
+            "common",
+            "ui.sharedWorkflowModels",
+            "ui.mainConversationAndCriticalDecisions",
+        ),
+        (
+            "subagent",
+            "ui.subagentDefaults",
+            "ui.rolesCanStillOverrideThisSetting",
+        ),
+    ] {
+        let routes = state
+            .catalogs
+            .routes
+            .iter()
+            .filter(|route| {
+                let scope = route["scope"].as_str().unwrap_or_default();
+                if group == "common" {
+                    is_core_settings_route(scope)
+                } else {
+                    scope == group
+                }
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let picker = if route_picker_target.is_some_and(|target| {
+            if group == "common" {
+                is_core_settings_route(&target.scope)
+            } else {
+                target.scope == group
+            }
+        }) {
+            route_picker.take()
+        } else {
+            None
+        };
+        body = body.child(settings_route_card(
+            (locale.text(title), locale.text(description)),
+            routes,
             state,
-            (route_picker_target, core_picker),
+            (route_picker_target, picker),
             palette,
             locale,
             cx,
-        ))
-        .child(settings_route_card(
-            (
-                locale.text("ui.subagentDefaults"),
-                locale.text("ui.rolesCanStillOverrideThisSetting"),
-            ),
-            subagents,
-            state,
-            (route_picker_target, subagent_picker),
-            palette,
-            locale,
-            cx,
-        ))
-        .into_any_element()
+        ));
+    }
+    body.into_any_element()
+}
+
+fn workflow_route_group(mode: &str) -> (&'static str, &'static str, &'static str) {
+    match mode {
+        "fusion" => (
+            "fusion",
+            "ui.fusionWorkflow",
+            "ui.fusionWorkflowDescription",
+        ),
+        _ => ("vibe", "ui.vibeWorkflow", "ui.vibeWorkflowDescription"),
+    }
 }
 
 pub(in crate::surfaces) fn is_core_settings_route(scope: &str) -> bool {
-    !matches!(scope, "main" | "subagent" | "security")
+    !matches!(scope, "main" | "subagent" | "security" | "vibe" | "fusion")
 }
 
 fn settings_route_card(
@@ -82,7 +159,6 @@ fn settings_route_card(
     let (title, description) = copy;
     let (route_picker_target, mut route_picker) = route_picker;
     let empty = routes.is_empty();
-    let has_picker = route_picker.is_some();
     let mut rows = Vec::with_capacity(routes.len());
     for route in routes {
         let scope = route
@@ -107,21 +183,13 @@ fn settings_route_card(
             cx,
         ));
     }
-    div()
-        .flex_1()
-        .min_w(px(320.))
-        .rounded(px(12.))
-        .border_1()
-        .border_color(palette.border)
-        .bg(palette.paper)
-        .when(!has_picker, |card| card.overflow_hidden())
-        .child(settings_card_header(title, description, palette))
-        .when(empty, |card| {
+    settings_group(
+        title,
+        description,
+        settings_rows(rows, palette).when(empty, |card| {
             card.child(
                 div()
-                    .h(px(72.))
-                    .border_t_1()
-                    .border_color(palette.border)
+                    .h(px(80.))
                     .text_color(palette.faint)
                     .text_sm()
                     .flex()
@@ -129,9 +197,10 @@ fn settings_route_card(
                     .justify_center()
                     .child(locale.text("ui.noModelRoutes")),
             )
-        })
-        .children(rows)
-        .into_any_element()
+        }),
+        palette,
+    )
+    .into_any_element()
 }
 
 pub(in crate::surfaces) fn settings_route_title(
@@ -144,6 +213,9 @@ pub(in crate::surfaces) fn settings_route_title(
         "main" => locale.text("ui.main").to_string(),
         "title" => locale.text("ui.conversationTitle").into(),
         "plan" => locale.text("ui.planningModel").into(),
+        "fusion" => locale.text("ui.fusionSidekick").into(),
+        "vibe" if role == "fast" => locale.text("ui.vibeFast").into(),
+        "vibe" if role == "good" => locale.text("ui.vibeGood").into(),
         "approval" => locale.text("ui.approvalModel").into(),
         "vision" => locale.text("ui.visionModel").into(),
         "recap" => locale.text("ui.recapModel").into(),
@@ -215,9 +287,12 @@ fn settings_route_row(
         .to_string();
     let title = settings_route_title(scope, role, &label, locale);
     let description = match scope {
+        "vibe" if role == "fast" => locale.text("ui.vibeFastDescription"),
+        "vibe" if role == "good" => locale.text("ui.vibeGoodDescription"),
         "main" => locale.text("ui.mainConversationAndTools"),
         "title" => locale.text("ui.generateTheSidebarTitleFromTheFirstUserMessage"),
         "plan" => locale.text("ui.planningAndTaskDecomposition"),
+        "fusion" => locale.text("ui.fusionDescription"),
         "approval" => locale.text("ui.structuredApprovalReview"),
         "vision" => locale.text("ui.imageAndVisualRouting"),
         "recap" => locale.text("ui.briefPostTurnRecap"),
@@ -234,6 +309,11 @@ fn settings_route_row(
         description
     };
     let route_value = route.get("route").unwrap_or(&route);
+    let fusion_unconfigured = scope == "fusion"
+        && route_value
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .is_none_or(str::is_empty);
     let configured_provider = route_value
         .get("provider")
         .and_then(serde_json::Value::as_str)
@@ -244,27 +324,45 @@ fn settings_route_row(
         .and_then(serde_json::Value::as_str)
         .filter(|value| !value.is_empty())
         .unwrap_or(state.settings.model.as_ref());
-    let provider = configured_provider.to_string();
-    let model = settings_route_model_name(providers, configured_provider, configured_model);
-    let provider_name = settings_route_provider_name(providers, configured_provider);
+    let logo = catalog_provider_logo_id(
+        providers.iter().find(|item| {
+            item.get("id").and_then(serde_json::Value::as_str) == Some(configured_provider)
+        }),
+        configured_provider,
+    );
+    let model = if fusion_unconfigured {
+        locale.text("ui.selectModel").to_string()
+    } else {
+        crate::selected_model_display_name(providers, configured_provider, configured_model)
+    };
+    let provider_name = if fusion_unconfigured {
+        locale.text("ui.selectModel").to_string()
+    } else {
+        settings_route_provider_name(providers, configured_provider)
+    };
     let reasoning = route_value
         .get("reasoning")
         .and_then(serde_json::Value::as_str)
         .filter(|value| !value.is_empty())
-        .unwrap_or(state.settings.reasoning.as_ref());
-    let reasoning = Some(reasoning)
-        .map(|value| match value {
-            "low" => locale.text("ui.low"),
-            "medium" => locale.text("ui.medium"),
-            "high" => locale.text("ui.high"),
-            "xhigh" => locale.text("ui.xhigh"),
-            "max" | "ultra" => locale.text("ui.max"),
-            _ => value,
-        })
-        .unwrap_or("—")
-        .to_string();
+        .unwrap_or(if scope == "fusion" {
+            ""
+        } else {
+            state.settings.reasoning.as_ref()
+        });
+    let modes = crate::model_modes(
+        providers,
+        configured_provider,
+        configured_model,
+        reasoning,
+        state.settings.chatgpt_fast_mode,
+    );
+    let reasoning = if fusion_unconfigured {
+        "—".to_string()
+    } else {
+        crate::model_reasoning_display_name(&modes, reasoning, locale)
+    };
     let route_id = format!("{}-{}", scope, role);
-    let model_aria = format!("{} {}", title, locale.text("ui.model"));
+    let model_aria = format!("{} {} · {}", title, locale.text("ui.model"), provider_name);
     let reasoning_aria = format!("{} {}", title, locale.text("ui.reasoning"));
     let model_scope = scope.to_string();
     let model_role = role.to_string();
@@ -274,56 +372,77 @@ fn settings_route_row(
     let reasoning_label = label;
     div()
         .id(format!("settings-route-{route_id}"))
-        .min_h(px(62.))
+        .min_h(px(72.))
         .px_3()
-        .py_2()
-        .border_t_1()
-        .border_color(palette.border)
+        .py_3()
         .flex()
         .items_center()
-        .gap_3()
-        .child(provider_logo(&provider, 19., palette.ink))
+        .flex_wrap()
+        .gap(px(16.))
         .child(
             div()
-                .min_w_0()
+                .min_w(px(220.))
                 .flex_1()
                 .flex()
-                .flex_col()
-                .gap_1()
+                .items_center()
+                .gap_3()
                 .child(
                     div()
-                        .truncate()
-                        .text_color(palette.ink)
-                        .text_sm()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .child(title),
+                        .size(px(32.))
+                        .flex_shrink_0()
+                        .rounded(px(8.))
+                        .bg(palette.paper_muted)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(provider_logo(&logo, 18., palette.ink)),
                 )
                 .child(
                     div()
-                        .truncate()
-                        .text_color(palette.faint)
-                        .text_xs()
-                        .child(description),
+                        .min_w_0()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_color(palette.ink)
+                                .text_sm()
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .text_color(palette.muted)
+                                .text_xs()
+                                .line_height(px(18.))
+                                .child(description),
+                        ),
                 ),
         )
         .child(
             div()
                 .relative()
-                .w(px(270.))
+                .ml_auto()
+                .w(px(332.))
+                .max_w_full()
+                .flex_shrink_0()
                 .flex()
                 .items_center()
-                .gap(px(6.))
+                .rounded(px(8.))
+                .bg(palette.paper_muted)
                 .child(
                     settings_route_value(
                         model,
-                        provider_name,
-                        px(176.),
+                        false,
+                        px(224.),
                         expanded_kind == Some(RoutePickerKind::Model),
                         palette,
                     )
                     .id(format!("settings-route-model-{route_id}"))
                     .role(Role::Button)
                     .aria_label(model_aria)
+                    .aria_expanded(expanded_kind == Some(RoutePickerKind::Model))
                     .tab_stop(true)
                     .cursor_pointer()
                     .hover(move |style| style.bg(palette.hover))
@@ -341,14 +460,17 @@ fn settings_route_row(
                 .child(
                     settings_route_value(
                         reasoning,
-                        String::new(),
-                        px(88.),
+                        true,
+                        px(108.),
                         expanded_kind == Some(RoutePickerKind::Reasoning),
                         palette,
                     )
+                    .border_l_1()
+                    .border_color(palette.border)
                     .id(format!("settings-route-reasoning-{route_id}"))
                     .role(Role::Button)
                     .aria_label(reasoning_aria)
+                    .aria_expanded(expanded_kind == Some(RoutePickerKind::Reasoning))
                     .tab_stop(true)
                     .cursor_pointer()
                     .hover(move |style| style.bg(palette.hover))
@@ -364,7 +486,24 @@ fn settings_route_row(
                     })),
                 )
                 .when_some(route_picker, |controls, picker| {
-                    controls.child(deferred(picker).with_priority(10))
+                    let right = if expanded_kind == Some(RoutePickerKind::Model) {
+                        224.
+                    } else {
+                        332.
+                    };
+                    controls.child(
+                        div().absolute().top_0().left_0().child(
+                            deferred(
+                                gpui::anchored()
+                                    .anchor(gpui::Anchor::TopRight)
+                                    .position_mode(gpui::AnchoredPositionMode::Local)
+                                    .position(gpui::point(px(right), px(42.)))
+                                    .snap_to_window_with_margin(px(8.))
+                                    .child(picker),
+                            )
+                            .with_priority(10),
+                        ),
+                    )
                 }),
         )
         .into_any_element()
@@ -372,37 +511,37 @@ fn settings_route_row(
 
 fn settings_route_value(
     primary: String,
-    secondary: String,
+    reasoning: bool,
     width: Pixels,
     expanded: bool,
     palette: ThemePalette,
 ) -> gpui::Div {
     div()
         .w(width)
-        .h(px(40.))
-        .px_2()
-        .rounded(px(8.))
-        .bg(palette.paper_muted)
-        .text_color(palette.muted)
+        .min_w_0()
+        .h(px(36.))
+        .px_3()
+        .rounded(px(6.))
+        .when(expanded, |value| value.bg(palette.hover))
+        .text_color(if reasoning {
+            palette.muted
+        } else {
+            palette.ink
+        })
         .flex()
         .items_center()
         .gap_2()
+        .when(reasoning, |value| {
+            value.child(icon("brain", 14., palette.muted))
+        })
         .child(
             div()
                 .min_w_0()
                 .flex_1()
-                .flex()
-                .flex_col()
-                .child(
-                    div()
-                        .truncate()
-                        .text_sm()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .child(primary),
-                )
-                .when(!secondary.is_empty(), |value| {
-                    value.child(div().truncate().text_xs().child(secondary))
-                }),
+                .truncate()
+                .text_sm()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .child(primary),
         )
         .child(icon(
             if expanded {
@@ -413,4 +552,14 @@ fn settings_route_value(
             12.,
             palette.muted,
         ))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn workflow_settings_select_one_model_group_and_default_to_vibe() {
+        for (mode, group) in [("vibe", "vibe"), ("fusion", "fusion"), ("", "vibe")] {
+            assert_eq!(super::workflow_route_group(mode).0, group);
+        }
+    }
 }

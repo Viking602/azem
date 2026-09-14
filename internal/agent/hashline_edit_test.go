@@ -51,6 +51,24 @@ func TestHashlineAppliesBlocksRegistersMovesAndRemovals(t *testing.T) {
 	assertFileContent(t, filepath.Join(root, "later.py"), "def greet():\n    return 'hi'\n")
 }
 
+func TestHashlineResultSupportsNextEditWithoutAnotherRead(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	service := newWriteTestService(t, ctx, root)
+	edit := findWorkspaceTool(t, service, root, ToolEditHashline)
+	writeTestFile(t, filepath.Join(root, "a.txt"), "old\ntail\n")
+	result := executeHashline(t, ctx, edit, "*** Begin Patch\n"+sectionHeader("a.txt", "old\ntail\n")+"\nPUT 1.=1:\n+new\n*** End Patch\n")
+	if !strings.Contains(result.Content, "1:new\n2:tail") {
+		t.Fatalf("missing numbered post-edit context: %s", result.Content)
+	}
+	var changed EditHashlineResult
+	if err := json.Unmarshal(result.Structured, &changed); err != nil {
+		t.Fatal(err)
+	}
+	executeHashline(t, ctx, edit, "*** Begin Patch\n"+changed.Sections[0].Header+"\nPUT 2.=2:\n+done\n*** End Patch\n")
+	assertFileContent(t, filepath.Join(root, "a.txt"), "new\ndone\n")
+}
+
 func TestHashlineSupportsOriginalLineGapsAndMarkdownBlocks(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
@@ -130,4 +148,30 @@ func callHashline(ctx context.Context, driver tool.Driver, patch string) tool.Re
 
 func hashlineTestPatch(header, hunks string) string {
 	return "*** Begin Patch\n" + header + "\n" + hunks + "\n*** End Patch\n"
+}
+
+func TestHashlineSyntaxRetryKeepsCurrentTagWithoutARead(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	service := newWriteTestService(t, ctx, root)
+	edit := findWorkspaceTool(t, service, root, ToolEditHashline)
+	original := "one\ntwo\n"
+	writeTestFile(t, filepath.Join(root, "a.txt"), original)
+	header := sectionHeader("a.txt", original)
+	for _, patch := range []string{
+		header + "\nPUT 1.=1:\n+ONE\n",
+		"*** Begin Patch\n" + header + "\nPUT 2.=1:\n+ONE\n*** End Patch\n",
+	} {
+		result := callHashline(ctx, edit, patch)
+		if !result.IsError || !strings.Contains(result.Content, "No files changed") || strings.Contains(result.Content, "Re-read affected lines") || hashlineFailureRequiresRead(result.Content) {
+			t.Fatalf("syntax recovery: %+v", result)
+		}
+		assertFileContent(t, filepath.Join(root, "a.txt"), original)
+	}
+	executeHashline(t, ctx, edit, "*** Begin Patch\n"+header+"\nPUT 1.=1:\n+ONE\n*** End Patch\n")
+	stale := callHashline(ctx, edit, "*** Begin Patch\n"+header+"\nPUT 2.=2:\n+TWO\n*** End Patch\n")
+	if !stale.IsError || !hashlineFailureRequiresRead(stale.Content) {
+		t.Fatalf("stale tag guard lost: %+v", stale)
+	}
+	assertFileContent(t, filepath.Join(root, "a.txt"), "ONE\ntwo\n")
 }

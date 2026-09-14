@@ -192,9 +192,9 @@ func buildInput(messages []message.Message, toolCallItemID func(string) string, 
 			if current.ToolResult == nil {
 				return "", nil, fmt.Errorf("tool message %q has no result", current.ID)
 			}
-			output := current.ToolResult.Content
-			if output == "" && len(current.ToolResult.Structured) > 0 {
-				output = string(current.ToolResult.Structured)
+			output, err := wireToolOutput(*current.ToolResult)
+			if err != nil {
+				return "", nil, err
 			}
 			input = append(input, map[string]any{"type": "function_call_output", "call_id": current.ToolResult.ToolCallID, "output": output})
 		case message.RoleAssistant:
@@ -246,6 +246,43 @@ func buildInput(messages []message.Message, toolCallItemID func(string) string, 
 		return "", nil, fmt.Errorf("explicit prompt cache breakpoint %q has no cacheable content block", breakpoint)
 	}
 	return strings.Join(instructions, "\n\n"), input, nil
+}
+
+func wireToolOutput(result message.ToolResult) (any, error) {
+	text := result.Content
+	if text == "" && len(result.Structured) > 0 {
+		text = string(result.Structured)
+	}
+	var output []any
+	hasImage, hasText := false, false
+	for _, part := range result.Parts {
+		switch part.Kind {
+		case message.ContentText, message.ContentCommentary, message.ContentFinalAnswer:
+			hasText = true
+			output = append(output, map[string]any{"type": "input_text", "text": part.Text})
+			continue
+		case message.ContentImage:
+		default:
+			continue
+		}
+		mediaType := http.DetectContentType(part.Data)
+		switch mediaType {
+		case "image/png", "image/jpeg", "image/gif", "image/webp":
+		default:
+			return nil, fmt.Errorf("tool output %q has unsupported or empty image data", result.ToolCallID)
+		}
+		hasImage = true
+		output = append(output, map[string]any{
+			"type": "input_image", "image_url": "data:" + mediaType + ";base64," + base64.StdEncoding.EncodeToString(part.Data),
+		})
+	}
+	if !hasImage {
+		return text, nil
+	}
+	if !hasText && text != "" {
+		output = append([]any{map[string]any{"type": "input_text", "text": text}}, output...)
+	}
+	return output, nil
 }
 
 func SupportsExplicitPromptCaching(model string) bool {

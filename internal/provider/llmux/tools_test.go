@@ -2,6 +2,7 @@ package llmuxdriver
 
 import (
 	"encoding/json"
+	"github.com/Viking602/azem/internal/provider/toolnames"
 	"io"
 	"reflect"
 	"regexp"
@@ -24,20 +25,21 @@ func TestSanitizeToolNameMatchesOpenAIDeepSeekPattern(t *testing.T) {
 		"todo":                    "todo",
 		"hydaelyn_activate_skill": "hydaelyn_activate_skill",
 		"...weird...":             "weird",
+		"mcp.读取":                  "mcp",
 	}
 	for input, want := range cases {
-		got := sanitizeToolName(input)
+		got := toolnames.Sanitize(input)
 		if got != want {
-			t.Fatalf("sanitizeToolName(%q) = %q, want %q", input, got, want)
+			t.Fatalf("toolnames.Sanitize(%q) = %q, want %q", input, got, want)
 		}
 		if got != "" && !openAIToolNamePattern.MatchString(got) {
-			t.Fatalf("sanitizeToolName(%q) = %q does not match provider pattern", input, got)
+			t.Fatalf("toolnames.Sanitize(%q) = %q does not match provider pattern", input, got)
 		}
 	}
 }
 
 func TestToolNamesRoundTripAndCollision(t *testing.T) {
-	names := newToolNames([]message.ToolDefinition{
+	names := toolnames.New([]message.ToolDefinition{
 		{Name: "coding.read_file"},
 		{Name: "coding_read_file"},
 		{Name: "coding.shell"},
@@ -234,7 +236,7 @@ func privateSystemFollowupRequest() hyprovider.Request {
 }
 
 func TestStreamAdapterRestoresCanonicalToolNames(t *testing.T) {
-	names := newToolNames([]message.ToolDefinition{{Name: "coding.read_file"}})
+	names := toolnames.New([]message.ToolDefinition{{Name: "coding.read_file"}})
 	stream := &streamAdapter{inner: &sliceStream{parts: []sdk.Part{{
 		Kind:     sdk.PartToolCall,
 		ToolCall: &sdk.ToolCall{ID: "call_1", Name: "coding_read_file", Arguments: json.RawMessage(`{"path":"a.go"}`)},

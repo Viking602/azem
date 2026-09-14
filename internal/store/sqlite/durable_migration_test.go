@@ -19,7 +19,7 @@ import (
 )
 
 func TestMigrationV27DurabilitySurvivesCurrentSchemaAndReopens(t *testing.T) {
-	if len(migrations) != schemaVersion || schemaVersion != 28 {
+	if len(migrations) != schemaVersion || schemaVersion != 29 {
 		t.Fatalf("migration count=%d schema=%d", len(migrations), schemaVersion)
 	}
 	ctx := context.Background()
@@ -202,7 +202,7 @@ func TestOpenRejectsFutureSchemaWithoutMutation(t *testing.T) {
 	applyFixtureMigrations(t, ctx, db, len(migrations))
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO sessions(id,title,created_at,updated_at) VALUES('future-session','Future',42,42);
-		PRAGMA user_version=29;
+		PRAGMA user_version=30;
 	`); err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +213,7 @@ func TestOpenRejectsFutureSchemaWithoutMutation(t *testing.T) {
 	if provider, err := Open(ctx, path); err == nil {
 		_ = provider.Close(ctx)
 		t.Fatal("future schema opened successfully")
-	} else if !strings.Contains(err.Error(), "database schema 29 is newer than supported schema 28") {
+	} else if !strings.Contains(err.Error(), "database schema 30 is newer than supported schema 29") {
 		t.Fatalf("future schema error=%v", err)
 	}
 
@@ -230,7 +230,7 @@ func TestOpenRejectsFutureSchemaWithoutMutation(t *testing.T) {
 	if err := db.QueryRowContext(ctx, `SELECT title FROM sessions WHERE id='future-session'`).Scan(&title); err != nil {
 		t.Fatal(err)
 	}
-	if version != 29 || title != "Future" {
+	if version != 30 || title != "Future" {
 		t.Fatalf("future database mutated version=%d title=%q", version, title)
 	}
 	if _, err := os.Stat(path + ".bak"); !os.IsNotExist(err) {

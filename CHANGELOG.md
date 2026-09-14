@@ -1,6 +1,252 @@
 # Changelog
 
+- GPUI: align composer and environment surfaces with shared light borders, 16px corners and subtle shadows; simplify the conversation title and Recap typography.
+
+- GPUI: remove Todo from the environment card, group Editor and Recap controls, and translate Todo as 待办.
+
+- GPUI: fold completed thinking-only turns into the shared duration disclosure, matching tool-backed turns while keeping final answers visible.
+
+- Fix queue self-drop errors and show thinking only after provider thinking output arrives.
+
+- GPUI: clear the active Todo rail after a run settles and use compact, divided queue rows while preserving stopped history and queue guidance guards.
+
 ## Unreleased
+- Fix the Environment card snapping away when dragging the right divider across
+  the available-width threshold; animate from the resize event through release.
+- Animate the Environment card sliding behind the right side panel, with a
+  reversible reveal and immediate switching when reduced motion is enabled.
+- Remember the right side panel width independently for each session across
+  panel reopening, session navigation, and app restarts.
+- Fix context compaction after oversized assistant output in a long task: archive
+  the complete assistant/tool group when ordinary recent-turn cuts cannot fit,
+  retaining user instructions, exact recovery artifacts and completed tool work.
+- Split native core workflows into Vibe scheduling and Fusion collaboration, persist
+  the choice in Settings, remove the composer Fusion switch, and return the first
+  completed worker from Vibe waits.
+- Keep Vibe worker names reusable after a registry persist failure, skip purged
+  worker runs during restore so Vibe tools still load, and reserve names before
+  parallel spawn so two workers cannot share one session name.
+- Remove the React/Wails desktop, its webview adapter, frontend dependencies,
+  TypeScript contract output, and build targets. GPUI and TUI retain the shared daemon.
+- Remove the bundled JavaScript runtime (`runtime-js/`) and every tool and bridge
+  backed by it: `ast_grep`, `lsp`, `debug`, `eval`, `browser`, `computer`,
+  `web_search`, `github`, `generate_image`, `tts`, the `xd://` and `ssh://`
+  resource schemes, `hub` process supervision, and the Bun-hosted custom tool /
+  extension-command / file-mutation-broker subsystem (`internal/customtools`).
+  Peer messaging and background job `jobs`/`wait`/`cancel` operations remain.
+  Native replacements below restore tool capabilities without these bridges.
+  TTSR `ast_conditions` and the
+  `extensions.trust_project_code` / `additional_tool_paths` /
+  `additional_extension_paths` keys remain accepted for compatibility but no
+  longer have an effect.
+- Restore AST, LSP, persistent Python, Chrome CDP, macOS desktop, DAP debugging,
+  web/GitHub, images, speech and named Hub processes using Go and native system
+  programs. Add memory `reflect`/`learn`, default worker/role routing and durable
+  AST/media evidence. See `docs/native-tools.md` for the complete OMP mapping,
+  prerequisites, permission boundaries and real-program smoke tests.
+- Compact the native composer plan into a progress/current-task row by default,
+  with an expandable numbered list, lighter framing and aligned status markers.
+- Expand data-heavy native Settings pages to the available workspace width.
+  Model routes now use stacked groups with readable purpose labels and aligned
+  model/reasoning selectors; fixed the route reasoning menu failing to open.
+  Long settings pages retain their content height so scrolling reaches the last
+  row, with independent scroll state per section.
+- GPUI session navigation now fades in for 140 ms; sidebars use reversible
+  300 ms motion. Settings fills the workspace with a bounded reading column.
+  Settings, search, rename, context, model, permission and branch popups retain
+  their presentation through reversible 200 ms exits and stop animating when settled.
+- Native model picker, composer chip, and route rows now use the same
+  models.dev logo id as Settings (for example `novita` → `novita-ai`) instead
+  of falling back to the robot icon when the profile id has no matching SVG.
+- Upgraded llmux to v0.3.2. Novita's default OpenAI-compatible base URL is
+  `https://api.novita.ai/openai/v1`, so Settings 「获取模型」 can list current
+  models including `zai-org/glm-5.3-flash`.
+- Native file edits and reads now share a source card with syntax highlighting.
+  Diffs keep add/remove gutters; reads strip Hashline headers and `N:` prefixes
+  instead of rendering as Markdown.
+- Fixed native Settings catalog hiding llmux API addresses and blocking API key entry.
+  Non-subscription providers now show the official or custom base URL, a password
+  API key field, and Save provider. Fetch models and save send the typed secret;
+  credentialSource `none` is no longer shown as the account subtitle.
+- GPUI: show tool edits in Synara-style file diff cards and Todo updates as readable tasks;
+  place queue guidance on queued messages, place compact queue rows inside the composer, and
+  show pending submissions immediately without duplicate queue mutations.
+- Persist queued guidance and queue removal atomically. Reduce search snapshot
+  rendering and return bounded numbered source context after Hashline edits.
+- Fixed idle workspace daemons remaining after all clients exit. A five-second
+  reconnect grace preserves active work and other clients; unattended daemons
+  shut down after work completes and close their owned helper processes.
+  GPUI now exits with its last window or Cmd+Q and reaps exited daemon children.
+- Fixed ChatGPT Settings 「获取模型」 still scanning the previous Codex catalog.
+  The request now advertises Codex CLI `0.153.4` as `client_version`, `Version`,
+  and User-Agent `codex_cli_rs/0.153.4` instead of `azem/1` or older CLI pins,
+  unlocking GPT-6-Astra (min `0.153.0`). Catalog responses may be up to 32 MiB
+  so instruction templates do not truncate newer rows. The decoder keeps newer
+  rows even when a sibling model uses object reasoning levels, object speed
+  tiers, or nested pagination.
+- Fixed Settings 「获取模型」 not updating the visible ChatGPT/Grok/Cursor model
+  list. A forced refresh now bypasses ChatGPT ETag 304, replaces the persisted
+  account catalog, and emits a `model_providers` snapshot for the settings UI.
+  Native Settings also applies the matching `model_catalog` onto that provider,
+  React replaces an already-populated subscription on `catalog_updated`, and a
+  failed ChatGPT fetch no longer keeps the cached rows as a successful refresh.
+- Fixed successful verification commands wrapped in a literal `eval` argument
+  being reported as missing evidence. Failed, stale, and partial checks remain
+  blocked; provider prompts and message order are unchanged.
+- Fixed native startup failing with `recursion limit exceeded` on long
+  conversations: recursive session trees now load on demand instead of being
+  embedded in startup snapshots. Failed snapshot retries retain their backoff.
+- Fixed native reconnect looping forever on startup. Crash recovery no longer
+  hashes every leftover durable execution before the daemon listens, liveness
+  probes no longer replay the event log, and snapshot wait drops already-
+  acknowledged replay instead of overflowing a 16 MiB buffer and retrying
+  from sequence zero. Optional catalogs still start after the snapshot
+  response is written.
+- Native GPUI can attach images from the composer plus button, file drop,
+  and clipboard paste. Sent user messages render those attachments in the
+  transcript instead of dropping them.
+- Stopped showing raw `context deadline exceeded` when a Grok/thinking
+  stream waits too long for the first SSE headers. Streaming header waits
+  now allow a long thinking pause, deadline expiry is classified as
+  `timeout` rather than user cancellation, and the desktop titles the
+  failure as a model-response timeout.
+- Fixed main conversations displaying a final answer before host completion
+  checks, then unexpectedly resuming work. Candidate final text now stays
+  private until guard acceptance and durable completion; progress remains live.
+  Frontend JS/TS/CSS verification follows its package manifest instead of an
+  unrelated Go embed package, and matching scoped test evidence is recognized.
+  Static prompts, tool schemas, and provider prefix-cache order are unchanged.
+- Fixed delayed React sends and disappearing user bubbles. A session-local
+  pending bubble appears immediately, duplicate submits are blocked while the
+  receipt is pending, and failed sends preserve the draft and error feedback
+  without adding phantom history rows.
+- Fixed incomplete streamed replies: IPC snapshot coalescing and native Wails
+  window delivery now preserve sequence order instead of discarding text.
+  React no longer uses an artificial character queue, and stale live fragments
+  cannot replace a complete canonical answer. Empty native agent/operation
+  lists no longer throw during projection updates and hide user messages.
+- Fixed packaged startup when a protocol-2 daemon replays events during the
+  protocol-3 upgrade handshake. Nested event validation now uses the
+  connection's pinned protocol; unrelated transport errors no longer claim
+  that active work is blocking startup. Old daemons still stop only when idle.
+- Fixed unsent React drafts appearing as `New session` history rows after a
+  projection refresh or reconnect. Drafts remain outside history and its view
+  cache until the first canonical user turn; reconnect preserves the matching
+  local draft, and existing conversation order stays unchanged.
+- Made Grok's authenticated model API the complete catalog authority. Removed
+  the nine-model curated overlay; a successful refresh now replaces the
+  account-scoped cache and removes models the API no longer returns. Failed
+  refreshes keep only the prior successful catalog as explicitly stale.
+- Made the TUI consume the daemon's complete `model_providers` projection.
+  `/provider` and `/models` now include every enabled llmux catalog and omit
+  disabled providers/models. Subscription accounts and llmux credential
+  availability come from the same secret-free daemon projection used by both
+  GUIs; the TUI keeps no separate credentials.
+- Made live Guide updates reconcile the durable Todo before work continues:
+  newly requested deliverables are appended, withdrawn open items are
+  cancelled, and only explicitly erased non-current items are removed. React
+  now preserves phase hierarchy, shows overall/per-phase counts, and updates
+  added or cancelled rows in place. This changes the static main prompt and
+  Todo tool description, starting one new provider prefix-cache epoch;
+  subsequent turns reuse the new stable prefix and message order.
+- Refined the React new-conversation surface: repeated New session actions
+  reuse the same untouched ephemeral draft instead of adding blank sidebar
+  rows, target receipts preload the selected Session's context composition, the
+  empty header divider is absent, the larger composer sits higher, and focus
+  no longer changes the neutral border/background or adds a shadow.
+- Kept React Subagent collaboration cards inside the transcript width and made
+  their completed state compact, without the duplicated completion/progress
+  column.
+- Fixed React startup across daemon wire upgrades. Protocol 3 now identifies
+  daemon epoch, target-only session selection/creation, ephemeral-selection
+  identity, and preloaded context profile. The launcher uses a
+  version-pinned compatibility codec under the workspace start lock only to ask
+  an idle older daemon to stop, waits for token removal, and then starts the
+  current daemon. Active legacy work is never killed and produces an explicit
+  error instead of a replacement loop.
+- Made React session navigation immediate. The selected row and title change in
+  the click frame, revisits restore cached content synchronously, first visits
+  use a dedicated loading surface aligned to the conversation column and its
+  Environment-panel inset, and keep the one docked composer mounted below it.
+  Text and attachment drafts remain client-local per Session; the input stays
+  editable during loading while mutations are disabled. A target-only
+  `select_session` response replaces the previous full reconnect on the
+  navigation path, and stale responses cannot undo a newer click. React session
+  creation now uses a direct typed `create_session` receipt from every entry
+  point, while untouched empty sessions remain ephemeral until their first user
+  turn.
+
+
+- Fixed React session selection reordering the chosen conversation to the top.
+  Existing catalog rows are replaced in place. Historical
+  `reconcile_required` runs also no longer impersonate active output: they do
+  not show the thinking wait, queue placeholder, or Stop, and orphaned
+  `streaming` blocks hydrate as interrupted history.
+- Moved React/Wails and the interactive TUI onto the same authenticated,
+  workspace-scoped `azem-daemon` runtime already used by GPUI. Concurrent
+  launches converge through a canonical-workspace start lock; closing any
+  client is detach-only; and TUI, React, or GPUI can take over an active run,
+  pending approval, terminal, or recovered transcript. Reconnect now applies
+  one typed snapshot for canonical session/tool state, active runs and
+  operations, bounded live blocks, pending controls, recovery, terminals, and
+  queues before replaying newer events. Mutations remain disabled during
+  reconnect/resync without clearing confirmed content or local drafts.
+
+- Added schema 29 durable prompt queues. Queue items are session-owned,
+  revisioned, size-bounded, BlobStore-backed when large, and dispatched FIFO by
+  the daemon rather than a renderer timer. Duplicate mutation retries are
+  receipt-idempotent; cancellation/suspension pauses remaining work; and
+  restart reconciliation binds dispatching items to their durable run. Guide
+  remains an exact active-run control and never aliases Queue. This changes no
+  provider static prefix, tool schema, message order, or per-turn host context,
+  so provider prompt-cache prefixes remain reusable.
+- Restored the complete React/Wails desktop source under `frontend/` and
+  `cmd/azem-gui/`, including its tests, embedded assets, window integration,
+  Wails dependency, macOS/Windows build targets, and signed macOS packaging.
+  `make gui` and `make test-gui` now target React/Wails again; the native GPUI
+  client remains available through `make gpui` and `make test-gpui`. The Wails
+  client is adapted to the current Bridge contract: generated TypeScript action
+  and event unions are restored, cancellation carries the owning session and
+  run IDs, deep links consume the direct durable resume projection, and current
+  subagent/background metadata survives sparse event updates.
+
+- Fixed unintended React/Wails cancellations caused by the global unmodified
+  `Escape` shortcut clicking the live stop control. Stopping now requires the
+  explicit control, cancellation copy no longer attributes every source to the
+  user, Queue keeps a visible editable draft for the next run, and Steer alone
+  guides the active run immediately. Private completion-verification retries
+  remain inside the same run, explicitly reuse the existing Todo, and never
+  become user-authored turns. This changes only the private retry message tail;
+  the static provider prefix, tool schemas, and message order remain unchanged,
+  so existing prompt-cache prefixes remain reusable.
+
+- Aligned the React/Wails conversation shell with Synara's compact desktop
+  proportions: a 736px shared reading column, tighter turn rhythm, a 12/11/10/9
+  UI type scale with 12px chat and 11px code defaults, a quieter docked
+  Environment card, animated inert panel disclosures, animated project-list
+  expansion, and a fused compact queue rail above the composer. Existing custom
+  typography choices are retained; only the former default tuple migrates once.
+
+- Restored React/Wails tool-list disclosure motion and removed its long-history
+  scroll hot path. Settled and live tool bodies now share a 180ms
+  opacity/translate lifecycle, remain mounted but inert while closing, and
+  honor reduced motion. Deferred lists coalesce scroll updates to one animation
+  frame, stop observing outside a one-viewport overscan region, cancel their
+  RAF/observer/listeners on cleanup, and retain stable fixed offscreen turn sizing.
+
+- Fixed tool completions aborting with `session: invalid work contract:
+  invalid file observation` when a model supplied an absolute or parent-escaping
+  path. Host evidence now relativizes paths under the workspace, drops escapes,
+  and filters unsafe paths out of observation envelopes so durable tool finish
+  can complete.
+
+- Desktop session switching no longer rebuilds the durable projection twice or
+  waits on Inspector context-profile estimation before returning the initiating
+  window's readback. Navigation loads transcript/tool state without decoding
+  `ModelHistory`, sidebar selection updates optimistically, and an identical
+  broadcast `session_loaded` no longer reparses the transcript that the direct
+  `ResumeSession` response already applied.
+
 - Fixed a native restart regression where closing the GPUI renderer stopped its
   workspace daemon. Relaunch now reuses the daemon, and explicit daemon
   shutdown retains non-secret workspace metadata for the next cold launch.
@@ -40,11 +286,14 @@
   thinking now renders as plain 「思考」 while tool/run summaries retain timing.
 
 - Replaced workspace-wide Go file scanning in `coding.search` with one bounded
-  ripgrep `--json` process. Literal, regexp, path, glob, ignore, hidden-file,
-  1 MiB file, and global 200-line limits are explicit; only matched files enter
-  the Hashline snapshot path. Zero matches return an expandable localized
-  result. GPUI distributions bundle and sign ripgrep beside the daemon, so
-  packaged search does not depend on the user's `PATH` or system installation.
+  ripgrep `--json` process. Queries are case-sensitive regex by default, while
+  `literal:true`, path, glob, ignore, hidden-file, 1 MiB file, and global
+  200-line limits remain explicit. This makes alternation queries behave like
+  the agent grep contract instead of producing zero-result synonym retries.
+  Only matched files enter the Hashline snapshot path, and zero matches return
+  an expandable localized result. GPUI distributions bundle and sign ripgrep
+  beside the daemon, so packaged search does not depend on the user's `PATH` or
+  system installation.
 
 - Kept expanded tool steps readable by placing all reasoning prose before tool
   rows and reducing multiline command bodies to a single-line executable
@@ -59,10 +308,9 @@
   oldest to newest while the original user instruction, tool pairing, message
   order, and latest eight atomic groups remain intact.
 
-- Removed upstream implementation branding from runtime-facing copy. Context
-  archive failures, Hashline guidance, web-search descriptions, executable
-  prompts, and runtime asset errors now use Azem-owned, product-neutral terms;
-  the frozen parity manifest remains internal maintenance evidence.
+- Removed upstream implementation branding and the external comparison
+  declaration from product and maintenance documentation. The associated
+  manifest/test gate is gone; Azem now describes its own capabilities directly.
 
 - Kept GPUI as a single-window application. Selecting a project or conversation
   in another workspace now reconnects the existing renderer to that
@@ -125,12 +373,6 @@
   SHA-256 verified. No database schema, runtime configuration default,
   executable prompt, static provider prefix, or provider message order changed.
 
-- Completed the frozen OMP v18.0.3 behavioral-parity program at commit
-  `160ed439ac0df594347e7d7018b813a7ffdb5e81`. The executable parity manifest
-  now records all 71 in-scope coding-agent and operator capabilities as
-  `complete` or `stronger`; public-library API compatibility and OMP visual
-  identity remain outside that frozen scope.
-
 - Upgraded Venat from v0.15.4 to v0.16.1 with a clean execution cutover:
   each main, Team-role, Subagent, and automation dispatch now binds one
   immutable execution manifest to the service-lifetime durable runtime.
@@ -153,7 +395,7 @@
   terminal state, stop reason, reported usage/cache flags,
   sources/files/warnings, modalities, and compatibility descriptors.
 
-- Added OMP-compatible read/write/Hashline/glob/grep/AST/LSP/DAP/eval/browser/
+- Added built-in read/write/Hashline/glob/grep/AST/LSP/DAP/eval/browser/
   computer/web/GitHub/SSH/process/media/memory tools. Eval supports persistent
   Python, JavaScript, Ruby, and Julia kernels when the host runtime exists.
   Custom extensions may broker only permission-failed workspace-local ordinary
@@ -420,7 +662,7 @@
   This host-side check does not change the static instruction prefix, message
   order, or provider cache identity.
 
-- Todo initialization now matches the host-owned OMP lifecycle: the model
+- Todo initialization now matches the host-owned lifecycle: the model
   supplies only a goal, phase titles, and item content. Azem assigns every
   phase/item ID and status, so a phase/item naming collision cannot invalidate
   the first durable snapshot. A complete goal-plus-phases payload is also
@@ -435,7 +677,7 @@
   mismatch; non-sentinel mismatches and missing/corrupt blobs still fail closed.
 
 - Desktop and TUI now treat Cursor as a reserved subscription like ChatGPT
-  and Grok. Login uses Oh My Pi's `loginDeepControl` PKCE poll against
+  and Grok. Login uses Cursor's `loginDeepControl` PKCE poll against
   `api2.cursor.sh`; models come from `GetUsableModels` with a bundled
   fallback; turns stream over Connect protobuf `AgentService/Run`. Native
   Cursor `read`/`bash`/`write`/`delete`/`grep`/`ls` and `pi_*` execs run
@@ -494,10 +736,10 @@
   are removed from pointer and keyboard interaction.
   Folded rows now report both base-family and exact-variant counts, retain every
   raw ID as a search alias, and show tier/Fast availability. Cursor's
-  account-scoped `GetUsableModels` response remains authoritative; static OMP
-  rows absent from that response are not injected as potentially unusable
-  models. Raw `(NO ZDR)` text is removed from the model name and replaced with
-  a localized data-retention warning and explanation.
+  account-scoped `GetUsableModels` response remains authoritative; static
+  fallback rows absent from that response are not injected as potentially
+  unusable models. Raw `(NO ZDR)` text is removed from the model name and
+  replaced with a localized data-retention warning and explanation.
   Model catalog search matches a family name, variant label, alias, or exact raw
   ID while retaining the complete matching family. A family switch now changes
   every variant in one atomic configuration update; partial families show an
@@ -1420,3 +1662,5 @@
   Existing sessions are adopted automatically only when one valid project can
   be identified; ambiguous legacy ownership is not guessed.
 - Configuration: project history is no longer written to `workspace.root`.
+
+- GPUI: merge the separate window chrome and conversation header into one row, including window-control clearance when the sidebar is collapsed.

@@ -15,8 +15,10 @@ import (
 
 const CurrentVersion = 1
 
-var mcpServerNamePattern = regexp.MustCompile(`^[a-z0-9_-]+$`)
-var uiLanguagePattern = regexp.MustCompile(`^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})*$`)
+var (
+	mcpServerNamePattern = regexp.MustCompile(`^[a-z0-9_-]+$`)
+	uiLanguagePattern    = regexp.MustCompile(`^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})*$`)
+)
 
 // ValidUILanguage validates a translation-pack identifier, not a fixed language list.
 func ValidUILanguage(value string) bool {
@@ -36,12 +38,12 @@ const (
 )
 
 func SubscriptionProviderIDs() []string {
-	return []string{"chatgpt", "grok", "cursor"}
+	return []string{"chatgpt", "grok", "cursor", "devin"}
 }
 
 func IsSubscriptionProvider(id string) bool {
 	switch strings.ToLower(strings.TrimSpace(id)) {
-	case "chatgpt", "grok", "cursor":
+	case "chatgpt", "grok", "cursor", "devin":
 		return true
 	default:
 		return false
@@ -178,7 +180,24 @@ type ProvidersConfig struct {
 	ChatGPT ChatGPTConfig                  `yaml:"chatgpt"`
 	Grok    GrokConfig                     `yaml:"grok"`
 	Cursor  CursorConfig                   `yaml:"cursor"`
+	Devin   ProviderConfig                 `yaml:"devin"`
 	LLMux   map[string]LLMuxProviderConfig `yaml:"llmux,omitempty"`
+}
+
+// Subscription returns the configuration owned by a subscription provider.
+func (p *ProvidersConfig) Subscription(id string) *ProviderConfig {
+	switch strings.ToLower(strings.TrimSpace(id)) {
+	case "chatgpt":
+		return &p.ChatGPT.ProviderConfig
+	case "grok":
+		return &p.Grok.ProviderConfig
+	case "cursor":
+		return &p.Cursor.ProviderConfig
+	case "devin":
+		return &p.Devin
+	default:
+		return nil
+	}
 }
 
 type LLMuxProviderConfig struct {
@@ -203,6 +222,7 @@ type LLMuxModelConfig struct {
 	Aliases          []string `yaml:"aliases,omitempty" json:"aliases,omitempty"`
 	Description      string   `yaml:"description,omitempty" json:"description,omitempty"`
 	ContextWindow    int      `yaml:"context_window,omitempty" json:"contextWindow"`
+	ExtendedContext  bool     `yaml:"-" json:"extendedContext,omitempty"`
 	MaxOutputTokens  int      `yaml:"max_output_tokens,omitempty" json:"maxOutputTokens,omitempty"`
 	ReasoningLevels  []string `yaml:"reasoning_levels,omitempty" json:"reasoningLevels,omitempty"`
 	DefaultReasoning string   `yaml:"default_reasoning,omitempty" json:"defaultReasoning,omitempty"`
@@ -219,8 +239,24 @@ type ProviderConfig struct {
 }
 
 type ChatGPTConfig struct {
-	ProviderConfig `yaml:",inline"`
-	FastMode       bool `yaml:"fast_mode"`
+	ProviderConfig        `yaml:",inline"`
+	FastMode              bool     `yaml:"fast_mode"`
+	ExtendedContextModels []string `yaml:"extended_context_models,omitempty"`
+}
+
+func SupportsChatGPTExtendedContext(modelID string) bool {
+	return modelID == "gpt-5.6-sol" || modelID == "gpt-6-astra"
+}
+
+func validateChatGPTExtendedContext(models []string) error {
+	seen := make(map[string]bool, len(models))
+	for _, modelID := range models {
+		if !SupportsChatGPTExtendedContext(modelID) || seen[modelID] {
+			return fmt.Errorf("providers.chatgpt.extended_context_models accepts only unique gpt-5.6-sol and gpt-6-astra IDs")
+		}
+		seen[modelID] = true
+	}
+	return nil
 }
 
 type GrokConfig struct {
@@ -234,6 +270,7 @@ type CursorConfig struct {
 }
 
 type AgentsConfig struct {
+	Workflow   string           `yaml:"workflow" json:"workflow"`
 	Main       MainAgentConfig  `yaml:"main"`
 	Team       TeamConfig       `yaml:"team"`
 	Title      ModelRouteConfig `yaml:"title" json:"title"`
@@ -244,6 +281,7 @@ type AgentsConfig struct {
 	Advisor    AdvisorConfig    `yaml:"advisor" json:"advisor"`
 	Context    ContextConfig    `yaml:"context"`
 	Vibe       VibeConfig       `yaml:"vibe" json:"vibe"`
+	Fusion     ModelRouteConfig `yaml:"fusion" json:"fusion"`
 	LoopGuards LoopGuardConfig  `yaml:"loop_guards" json:"loopGuards"`
 	Subagents  SubagentConfig   `yaml:"subagents"`
 }
@@ -617,6 +655,7 @@ func Default() Config {
 			ChatGPT: ChatGPTConfig{ProviderConfig: ProviderConfig{Enabled: true, TTL: "5m", CatalogTTL: 5 * time.Minute}},
 			Grok:    GrokConfig{ProviderConfig: ProviderConfig{Enabled: true, TTL: "5m", CatalogTTL: 5 * time.Minute}, ExperimentalOAuth: true, Transport: "api"},
 			Cursor:  CursorConfig{ProviderConfig: ProviderConfig{Enabled: true, TTL: "5m", CatalogTTL: 5 * time.Minute}},
+			Devin:   ProviderConfig{Enabled: true, TTL: "5m", CatalogTTL: 5 * time.Minute},
 			LLMux:   map[string]LLMuxProviderConfig{},
 		},
 		Retry: RetryConfig{
@@ -625,6 +664,7 @@ func Default() Config {
 		},
 		TTSR: TTSRConfig{Enabled: true, ContextMode: "discard", InterruptMode: "always", RepeatMode: "once", RepeatGap: 10, Rules: []StreamRuleConfig{}},
 		Agents: AgentsConfig{
+			Workflow: "vibe",
 			Main:     MainAgentConfig{MaxTokens: 0, MaxToolCalls: 0, MaxWallClock: "0s"},
 			Team:     TeamConfig{MaxConcurrency: 2, MaxTicks: 12},
 			Title:    ModelRouteConfig{Provider: "chatgpt", Model: "gpt-5.6-luna", Reasoning: "low"},
@@ -689,9 +729,10 @@ func builtInMCPServers() map[string]MCPServerConfig {
 }
 
 func builtInSubagentRoles() map[string]SubagentRoleConfig {
-	readOnly := []string{"coding.list_files", "coding.glob", "coding.read_file", "coding.search", "ast_grep", "lsp", "web_search", "github", "recall", "coding.git_diff"}
-	all := append(append([]string(nil), readOnly...), "coding.edit_hashline", "coding.replace", "coding.write_file", "coding.delete_file", "coding.gofmt", "coding.go_test", "coding.shell", "debug", "eval", "browser", "computer", "hub", "generate_image", "tts", "retain", "memory_edit")
-	execute := append(append([]string(nil), readOnly...), "coding.go_test", "coding.shell", "debug", "eval", "browser", "computer", "hub")
+	readOnly := []string{"coding.list_files", "coding.glob", "coding.read_file", "coding.search", "recall", "coding.git_diff"}
+	nativeRead := append(append([]string(nil), readOnly...), "ast_grep", "inspect_image", "reflect", "web_search")
+	all := append(append([]string(nil), nativeRead...), "coding.edit_hashline", "coding.replace", "coding.write_file", "coding.delete_file", "coding.gofmt", "coding.go_test", "coding.shell", "hub", "retain", "memory_edit", "ast_edit", "coding.eval", "lsp", "browser", "computer", "debug", "github", "generate_image", "tts", "learn")
+	execute := append(append([]string(nil), nativeRead...), "coding.go_test", "coding.shell", "hub", "coding.eval", "lsp", "browser", "computer", "debug")
 	return map[string]SubagentRoleConfig{
 		"worker": {
 			Description:    "Implement one scoped coding task end-to-end and return verified evidence.",
@@ -701,17 +742,17 @@ func builtInSubagentRoles() map[string]SubagentRoleConfig {
 		"explore": {
 			Description:    "Investigate the workspace without changes and return file-backed evidence.",
 			Instructions:   strings.TrimSpace(exploreSubagentInstructions),
-			CapabilityMode: "read-only", Isolation: "none", Tools: append([]string(nil), readOnly...), Source: "builtin",
+			CapabilityMode: "read-only", Isolation: "none", Tools: append([]string(nil), nativeRead...), Source: "builtin",
 		},
 		"plan": {
 			Description:    "Produce a decision-complete implementation plan without changing the workspace.",
 			Instructions:   strings.TrimSpace(planSubagentInstructions),
-			CapabilityMode: "read-only", Isolation: "none", Tools: append([]string(nil), readOnly...), Source: "builtin",
+			CapabilityMode: "read-only", Isolation: "none", Tools: append([]string(nil), nativeRead...), Source: "builtin",
 		},
 		"review": {
 			Description:    "Review a delegated change for requirement, correctness, and regression risks without editing.",
 			Instructions:   strings.TrimSpace(reviewSubagentInstructions),
-			CapabilityMode: "read-only", Isolation: "none", Tools: append([]string(nil), readOnly...), Source: "builtin",
+			CapabilityMode: "read-only", Isolation: "none", Tools: append([]string(nil), nativeRead...), Source: "builtin",
 		},
 		"security-baseline": {
 			Description:    "Run one independent read-only source-backed security audit.",
@@ -749,8 +790,11 @@ func (c *Config) Validate() error {
 	if err := c.validateHooksDisabled(); err != nil {
 		return err
 	}
-	if c.Defaults.AgentMode != "single" && c.Defaults.AgentMode != "team" {
-		return fmt.Errorf("defaults.agent_mode must be single or team")
+	if c.Defaults.AgentMode != "single" && c.Defaults.AgentMode != "team" && c.Defaults.AgentMode != "fusion" && c.Defaults.AgentMode != "vibe" {
+		return fmt.Errorf("defaults.agent_mode must be single, team, fusion, or vibe")
+	}
+	if c.Agents.Workflow != "vibe" && c.Agents.Workflow != "fusion" {
+		return fmt.Errorf("agents.workflow must be vibe or fusion")
 	}
 	if !ValidUILanguage(c.Defaults.Language) {
 		return fmt.Errorf("defaults.language must be a valid translation-pack identifier")
@@ -802,7 +846,8 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("workspace.shell.max_wall_clock must be a duration of at least 1s")
 	}
 	c.Workspace.Shell.MaxWallClockDuration = shellWall
-	for name, provider := range map[string]*ProviderConfig{"chatgpt": &c.Providers.ChatGPT.ProviderConfig, "grok": &c.Providers.Grok.ProviderConfig, "cursor": &c.Providers.Cursor.ProviderConfig} {
+	for _, name := range SubscriptionProviderIDs() {
+		provider := c.Providers.Subscription(name)
 		ttl, err := time.ParseDuration(provider.TTL)
 		if err != nil || ttl <= 0 {
 			return fmt.Errorf("providers.%s.catalog_ttl must be a positive duration", name)
@@ -811,6 +856,9 @@ func (c *Config) Validate() error {
 		if err := validateDisabledModels(name, provider.DisabledModels); err != nil {
 			return err
 		}
+	}
+	if err := validateChatGPTExtendedContext(c.Providers.ChatGPT.ExtendedContextModels); err != nil {
+		return err
 	}
 	if c.Providers.Grok.Transport != "api" && c.Providers.Grok.Transport != "cli_proxy" {
 		return fmt.Errorf("providers.grok.transport must be api or cli_proxy")
@@ -872,6 +920,9 @@ func (c *Config) Validate() error {
 	}
 	c.Agents.Advisor.CatchupTimeoutDuration = advisorTimeout
 	if err := validateInheritedModelRoute("agents.vibe.fast", c.Agents.Vibe.Fast); err != nil {
+		return err
+	}
+	if err := validateInheritedModelRoute("agents.fusion", c.Agents.Fusion); err != nil {
 		return err
 	}
 	if err := validateInheritedModelRoute("agents.vibe.good", c.Agents.Vibe.Good); err != nil {
@@ -1321,10 +1372,9 @@ func (c *Config) validateSubagents() error {
 	if subagents.Personas == nil {
 		subagents.Personas = map[string]SubagentPersonaConfig{}
 	}
-	allowedTools := map[string]bool{
-		"coding.list_files": true, "coding.glob": true, "coding.read_file": true, "coding.search": true, "ast_grep": true, "lsp": true, "web_search": true, "github": true, "recall": true, "coding.git_diff": true,
-		"coding.edit_hashline": true, "coding.replace": true, "coding.write_file": true, "coding.delete_file": true, "coding.gofmt": true,
-		"coding.go_test": true, "coding.shell": true, "debug": true, "eval": true, "browser": true, "computer": true, "hub": true, "generate_image": true, "tts": true, "retain": true, "memory_edit": true,
+	allowedTools := make(map[string]bool)
+	for _, name := range builtInSubagentRoles()["worker"].Tools {
+		allowedTools[name] = true
 	}
 	for name, persona := range subagents.Personas {
 		if !mcpServerNamePattern.MatchString(name) {
@@ -1346,7 +1396,7 @@ func (c *Config) validateSubagents() error {
 			return fmt.Errorf("agents.subagents persona %q isolation must be none or worktree", name)
 		}
 	}
-	readOnlyTools := []string{"coding.list_files", "coding.glob", "coding.read_file", "coding.search", "ast_grep", "lsp", "web_search", "github", "coding.git_diff"}
+	readOnlyTools := []string{"coding.list_files", "coding.glob", "coding.read_file", "coding.search", "coding.git_diff"}
 	if len(subagents.Roles) > maxConfiguredSubagentRoles {
 		return fmt.Errorf("agents.subagents.roles must contain at most %d roles", maxConfiguredSubagentRoles)
 	}

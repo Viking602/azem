@@ -46,10 +46,15 @@ func turnInstructions(planMode bool) (string, string) {
 	return instructions, hex.EncodeToString(sum[:])
 }
 
-func turnInstructionsWithProject(planMode bool, projectContext string) (string, string) {
+func turnInstructionsWithProject(planMode bool, projectContext, agentMode string) (string, string) {
 	instructions, _ := turnInstructions(planMode)
 	if projectContext = strings.TrimSpace(projectContext); projectContext != "" {
 		instructions += "\n\n" + projectContext
+	}
+	if agentMode == "fusion" {
+		instructions += "\n\n" + fusionInstructions
+	} else if agentMode == "vibe" {
+		instructions += "\n\n" + vibeInstructions
 	}
 	sum := sha256.Sum256([]byte(instructions))
 	return instructions, hex.EncodeToString(sum[:])
@@ -101,6 +106,8 @@ type TurnRequest struct {
 	approvedPlanContext    string
 	accountID              string
 	historicalContext      string
+	sessionReferences      string
+	queueItemID            string
 	resuming               bool
 	budgetRestored         bool
 	maxTokens              int64
@@ -229,6 +236,11 @@ func (c turnContext) activateCompactionResult(ctx context.Context, result []mess
 
 func (c turnContext) savedModelHistoryCompatible() bool {
 	saved := c.modelHistory
+	// Older Fusion checkpoints stored turn policy in replayed private history.
+	// Rebuild those once; current policy belongs to the fingerprinted root.
+	if legacyFusionCheckpoint(saved.Messages) || legacyVibeCheckpoint(saved.Messages) {
+		return false
+	}
 	fingerprint := c.instructionFingerprint
 	if fingerprint == "" {
 		fingerprint = mainInstructionFingerprint
@@ -431,6 +443,7 @@ func blockMessage(block session.Block) (message.Message, bool) {
 		return message.Message{}, false
 	}
 	if block.Kind == "user" {
+		text += sessionReferenceEvidence(block.Data[sessionReferenceDataKey])
 		value := UserMessageWithAttachments(text, block.Attachments)
 		value.Metadata = copyMessageMetadata(value.Metadata, block.Sequence)
 		return value, true

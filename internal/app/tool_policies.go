@@ -98,3 +98,7 @@ func (*vibeDriver) ToolPolicy() agentruntime.ToolPolicy {
 	policy.Concurrency = tool.ConcurrencyParallel
 	return policy
 }
+
+func (*historyDriver) ToolPolicy() agentruntime.ToolPolicy {
+	return (&contextArtifactDriver{}).ToolPolicy()
+}

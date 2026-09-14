@@ -44,7 +44,7 @@ func (t *retryTransport) Post(context.Context, []byte) (*resty.Response, error) 
 	t.requests++
 	body := `data: {"type":"error","code":"server_is_overloaded","message":"server overloaded; request ID req_server_456"}` + "\n\n"
 	if t.requests == 3 {
-		body = `data: {"type":"response.completed","response":{"status":"completed"}}` + "\n\n"
+		body = `data: {"type":"response.output_text.delta","delta":"ok"}` + "\n\n" + `data: {"type":"response.completed","response":{"status":"completed"}}` + "\n\n"
 	}
 	return restyStreamResponse(body), nil
 }
@@ -70,6 +70,9 @@ func TestDriverReportsRateLimitRetriesThroughGenericObserver(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer stream.Close()
+	if event, err := stream.Recv(); err != nil || event.Text != "ok" {
+		t.Fatalf("text=%+v err=%v", event, err)
+	}
 	event, err := stream.Recv()
 	if err != nil || event.Kind != hyprovider.EventDone {
 		t.Fatalf("event=%#v error=%v", event, err)

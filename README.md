@@ -23,11 +23,10 @@ Azem is designed for coding work that needs more than a chat window. It combines
 | **Terminal and desktop workflows** | A fast Bubble Tea TUI and native GPUI desktop with virtualized streaming output, inline approvals and diffs, Agent inspection, recovery, and role-model settings |
 | **Governed execution** | Prompt, Auto Review, and YOLO approval modes for file, shell, and external actions |
 | **Durable state** | SQLite-backed sessions, runs, approvals, leases, side-effect reconciliation, and Team resume |
-| **Multiple providers** | ChatGPT through Codex-compatible OAuth, Grok through API or CLI-proxy transport, Cursor through its native agent service, and configurable llmux providers |
+| **Multiple providers** | ChatGPT through Codex-compatible OAuth, Grok through API or CLI-proxy transport, Cursor through its native agent service, Devin through personal CLI browser Auth, and configurable llmux providers |
 | **Extensible tools** | Codex-compatible plugins, MCP servers over stdio or Streamable HTTP, plus dynamically loaded Agent Skills |
 | **Multi-agent work** | Structured team mode and resumable subagents with optional Git worktree isolation |
 | **Evidence-bound evaluation** | Deterministic durable trajectory export, revision-compatible verification records, offline route/training evaluation, and validated exact-model adapter experiments without a second live router |
-| **OMP v18.0.3 behavioral parity** | Frozen, tested coverage for coding tools, Goal/Advisor/Vibe/TTSR modes, extensions and marketplaces, session trees/import/export/share/collaboration, JSON-RPC, ACP, headless operation, auth brokering, and operator workflows |
 
 ## Quick Start
 
@@ -36,11 +35,11 @@ Azem is designed for coding work that needs more than a chat window. It combines
 Requirements:
 
 - Go 1.25.8 or later; the project recommends the Go 1.25.12 toolchain
-- A supported ChatGPT or Grok account or existing credential
+- A supported ChatGPT, Grok, Cursor, or Devin account, or a configured API provider
 - Git when using subagent worktree isolation
-- ripgrep 15 or later when building a distribution; `make gpui` embeds the
-  selected binary beside the daemon, so packaged desktop users do not need a
-  system installation
+- ripgrep 15 or later when building a desktop distribution; the desktop build
+  target embeds the selected binary beside the runtime, so packaged users do
+  not need a system installation
 - Rust 1.97.1 when building the native GPUI desktop client; `gpui/rust-toolchain.toml` selects it automatically
 
 ```bash
@@ -49,26 +48,31 @@ cd azem
 make build
 ```
 
-To build the native GPUI desktop and its workspace daemon on macOS, install
-[Bun](https://bun.sh/) for the AST/LSP runtime packages and run:
+To build the native GPUI desktop on macOS:
 
 ```bash
 make gpui
 open dist/Azem-GPUI.app
 ```
 
-The GPUI window is an IPC client. Each workspace has one authenticated local
-`azem-daemon` process that owns the Go runtime and SQLite stores. Closing or
-restarting the window disconnects only the renderer; active runs continue and
-the next window restores a durable snapshot plus bounded event and terminal
-replay. `make gui` is retained as an alias for `make gpui`.
+The native GPUI and interactive TUI clients connect to one
+authenticated `azem-daemon` per canonical workspace. The daemon owns the Go
+runtime, SQLite stores, provider streams, governed tools, subagents, prompt
+queues, and PTYs. Closing or restarting any client disconnects only that
+renderer; active work continues. With no connected clients or active work,
+the daemon exits after a five-second reconnect grace period and closes its
+PTYs, LSP/MCP processes, and stores. A later client restores one typed snapshot
+containing canonical session blocks, durable tool records, active runs,
+bounded live blocks, pending controls, recovery state, terminals, and durable
+prompt queues, then resumes from the snapshot's event cursor.
 
-Azem keeps one GPUI window. Selecting a conversation in another project
-detaches the renderer from the current workspace daemon and reconnects that
-same window to the conversation's owning daemon; background work in the old
-workspace continues.
+Cross-project navigation rebinds the existing desktop window to the target
+workspace daemon. The previous daemon remains independent, so its active work
+continues.
 
 The native client provides an integrated macOS titlebar, conversation/workspace
+Workspace files include a built-in PNG/JPEG/GIF/WebP image viewer, syntax-highlighted code previews, rendered Markdown, and an independently scrollable file list with folder and file icons.
+
 sidebar, durable project/session history, centered new-task composer, full
 provider/model picker, virtualized messages, foldable reasoning/tool/diff
 trails, the floating Environment panel, editor/files, changes, structured PR
@@ -77,16 +81,22 @@ catalog uses the complete MIT-licensed models.dev provider-logo set, quota
 state, provider/model enable controls, capability metadata, and independently
 scrollable provider and compact model lists.
 
+Dragging the right side panel saves its width for the current session. Closing
+and reopening the panel, switching sessions, and restarting the app restore it.
+The Environment card slides down and right behind the side panel when hidden,
+including when dragging the divider leaves insufficient space,
+and returns along the same path when shown; reduced motion switches instantly.
+
 In the native composer, type `/` for commands and enabled Skills or `@` to find files
 in the current project. Arrow keys navigate, Enter or Tab inserts a choice,
 and Escape or clicking outside closes the list without sending the draft.
 Skills use the existing runtime activation contract; file references insert
 project-relative paths, not automatically uploaded file contents.
 
-The native desktop and TUI share the same Go runtime, SQLite sessions, approval
-policy, model routes, Skills, subagents, and recovery state. GPUI reaches the
-closed desktop operation set through an owner-only, authenticated local IPC
-protocol; the renderer exposes no arbitrary shell or filesystem binding.
+All three interactive clients share the same Go runtime, SQLite sessions,
+approval policy, model routes, Skills, subagents, queue coordinator, and
+recovery state through the closed desktop operation set. The renderers expose
+no arbitrary shell or filesystem binding.
 
 Desktop global search (`Cmd+K` on macOS or `Ctrl+K` elsewhere) searches application actions, every settings control and configured model/MCP/Skill/plugin name, session titles, and durable user/assistant conversation content across projects. Settings results open and focus the exact control. Conversation-content results return a short SQLite FTS snippet and jump to the durable matching message; cross-project results open the owning project first. Input is debounced, stale responses are discarded, and complete transcripts are never copied into the in-memory search index.
 
@@ -130,7 +140,7 @@ The desktop **Pull Requests** workspace uses the authenticated [GitHub CLI](http
 
 ### 2. Start it in a project
 
-The desktop app keeps a durable catalog of projects and restores the most recently opened project. A project's context menu can remove it from Azem without deleting workspace files or owned conversations; opening the path again restores it. `--workspace` selects the initial project for the single window without rewriting the user configuration.
+The desktop app keeps a durable catalog of projects and restores the most recently opened project. Click `+` beside Projects to select a folder; on macOS, the picker also supports New Folder. A project's context menu can remove it from Azem without deleting workspace files or owned conversations; opening the path again restores it. `--workspace` selects the initial project for the single window without rewriting the user configuration.
 
 ```bash
 cd /path/to/your/project
@@ -161,6 +171,12 @@ Or import credentials from an existing Codex or Grok installation:
 
 Azem searches `CODEX_HOME` (or `~/.codex`) for Codex credentials and `~/.grok` for Grok credentials. Grok's OAuth-compatible flow is experimental and is not a stable third-party authentication contract provided specifically for Azem.
 
+All clients use the same workspace daemon and `AZEM_HOME`, so login accounts,
+stored llmux API keys, environment-key availability, and account-scoped model
+catalogs are shared immediately between TUI and GPUI. The TUI
+never copies or exposes secret values; `/provider` and `/models` consume the
+same credential-safe provider projection as desktop Settings.
+
 ### 4. Ask for a change
 
 Enter a request such as:
@@ -178,7 +194,7 @@ Azem streams progress in the terminal and asks for approval when the selected po
 - Embedded desktop terminal in the current project workspace (`Cmd+`` / `Ctrl+``), with tabs and a real PTY; this is a human console, not the agent shell tool
 - Streaming model output, reasoning state, tool activity, approval decisions, and usage information
 - General interactive `ask` questions plus a separate planning mode with versioned proposals, review and revision turns, and an explicit Execute Plan handoff into a new ordinary implementation turn
-- ChatGPT, Grok, and Cursor subscription login with live model catalogs, account identity and plan, provider-specific remaining quota, reset countdowns, credit balance, and Cursor Total/Cursor/Third Party pace forecasts. Cursor's exact tier, Thinking, and Fast IDs collapse into one base-model row; each row reports its available variant inventory. Thinking is selected automatically whenever the family has a matching same-tier variant. Fast is changed inside the model picker and appears outside only as `· Fast` in the selected-model summary for both Cursor and ChatGPT/Codex subscriptions. The provider model catalog is searchable, and a family switch enables or disables every raw variant atomically. Models without a zero-data-retention guarantee show an explicit warning.
+- ChatGPT, Grok, Cursor, and Devin subscription login with live model catalogs, account identity and plan, provider-specific remaining quota, reset countdowns, credit balance, and Cursor Total/Cursor/Third Party pace forecasts. Grok availability comes only from the successful account API response; omitted models disappear instead of being restored from a curated list. Cursor's exact tier, Thinking, and Fast IDs collapse into one base-model row; each row reports its available variant inventory. Thinking is selected automatically whenever the family has a matching same-tier variant. Fast is changed inside the model picker and appears outside only as `· Fast` in the selected-model summary for both Cursor and ChatGPT/Codex subscriptions. Devin uses personal CLI browser Auth with an account-authoritative catalog; its quota is unreported. The provider model catalog is searchable, and a family switch enables or disables every raw variant atomically. Models without a zero-data-retention guarantee show an explicit warning.
 - Collapsible, colorized inline diffs with file paths and added/deleted line counts
 - Concise tool summaries that avoid flooding the transcript with raw patches or file contents
 - Persistent conversations start in a fresh session on every launch; use `/resume` to reopen prior sessions with their context, tool history, and recap
@@ -192,11 +208,14 @@ Azem streams progress in the terminal and asks for approval when the selected po
 - Independent tool calls dispatch in parallel while shell and subagent runtimes enforce their configured concurrency limits
 - Optional detached Git worktrees for isolated subagent changes
 - Native Standard, scoped, diff, working-tree, and Deep security scans using host-resolved Azem provider/model routes, immutable read-only source snapshots, durable worker/reducer recovery, canonical findings/reports/SARIF, triage, isolated verified patches, and governed GitHub/MCP publication
-- OMP-compatible read/write/Hashline/AST/LSP/DAP/eval/browser/computer/web/GitHub/SSH/process/media/memory tools, with Python, JavaScript, Ruby, and Julia eval kernels enabled when their host runtimes exist
+- Built-in read/write/Hashline/search/glob/format/test/diff/shell/background-job/memory tools
+- [Native OMP tool coverage](docs/native-tools.md): AST, LSP, persistent Python,
+  browser, macOS desktop, debugger, web/GitHub, images, speech, memory reflection
+  and supervised processes, implemented without a JS/TS runtime.
 - Goal, Advisor, Vibe, TTSR, prewalk, checkpoint/rewind, loop guards, structured subagents, Hub peer messaging, and parked-agent revival
 - Parent-linked session trees with named branches and labels, Claude/Codex import, HTML/text/lossless JSON export, encrypted sharing, and encrypted live collaboration
 - Text and NDJSON headless modes, JSON-RPC, ACP, and the supported Go embedding API
-- Marketplace source management, scoped plugin install/update/upgrade/enable/uninstall, custom Bun tools/commands/providers/agents/themes, and permission-only extension file mutation brokerage
+- Marketplace source management, scoped plugin install/update/upgrade/enable/uninstall, and file-based custom commands, agents, and themes
 - Operator commands for auth broker/gateway services, setup/update/garbage collection, usage reports, benchmarks, signed GitHub webhooks, and bash/zsh/fish completion generation
 
 ## Terminal Workflow
@@ -216,7 +235,7 @@ Azem keeps review context in the conversation instead of hiding it behind raw to
 flowchart LR
     U[Terminal UI] --> A[Application runtime]
     D[Native GPUI desktop] --> A
-    A --> P[ChatGPT / Grok / Cursor subscriptions or llmux providers]
+    A --> P[ChatGPT / Grok / Cursor / Devin subscriptions or llmux providers]
     A --> G[Approval and tool governance]
     G --> T[Files, tests, and shell]
     G --> M[MCP servers]
@@ -274,12 +293,12 @@ Without `-config`, Azem reads `~/.azem/config.yaml`. If the file does not exist,
 | Command | Description |
 |---|---|
 | `/settings` | Configure the plan model, Codex Fast mode, subagent models, concurrency, and interface preferences |
-| `/models` | Search for and select a model |
+| `/models` | Search across every enabled subscription and llmux model catalog, then select a model |
 | `/model-routing` | Configure models for titles, plan mode, approvals, vision fallback, recaps, and each subagent role |
-| `/provider [chatgpt\|grok]` | Switch providers |
+| `/provider [provider-id]` | Switch to any enabled provider with selectable models |
 | `/reasoning [level]` | Set reasoning effort |
-| `/login [provider]` | Sign in or import provider credentials |
-| `/logout [provider]` | Sign out of a provider account |
+| `/login [provider]` | Sign in to ChatGPT, Grok, Cursor, or Devin; import supported existing credentials |
+| `/logout [provider]` | Sign out of a subscription provider account |
 | `/skills [reload]` | Inspect or reload Agent Skills |
 | `/skill <name> [instruction]` | Activate a Skill and run one turn |
 | `/team on\|off` | Enable or disable team mode |
@@ -345,7 +364,7 @@ defaults:
   provider: chatgpt
   model: gpt-5.6-sol
   reasoning: high
-  agent_mode: single       # single | team
+  agent_mode: single       # explicit TUI/API default: single | team | vibe | fusion
   queue_mode: queue        # queue | guide
 
 workspace:
@@ -377,6 +396,7 @@ providers:
     catalog_ttl: 5m
     fast_mode: false       # supported subscription models only; faster responses use more credits
     disabled_models: []   # hidden from pickers and rejected by the runtime
+    extended_context_models: [] # opt in gpt-5.6-sol and/or gpt-6-astra to 1,050,000 tokens
   grok:
     enabled: true
     catalog_ttl: 5m
@@ -405,6 +425,7 @@ ttsr:
   rules: []
 
 agents:
+  workflow: vibe          # desktop: vibe | fusion; select in Settings → Model routing
   main:
     max_tokens: 0          # optional inter-request limit; the final request may overshoot it
     max_tool_calls: 0      # optional per-turn limit; 0 means unbounded
@@ -459,7 +480,7 @@ agents:
     reserve_tokens: 16384       # minimum headroom; effective reserve is at least 15% of the context window
     keep_recent_tokens: 20000   # preferred hot-tail floor; latest 3 user turns are always preserved
     large_tool_result_tokens: 12000
-    history_retrieval_tokens: 4096 # private, session-scoped SQLite FTS evidence budget
+    history_retrieval_tokens: 4096 # on-demand context.search_history token budget
   subagents:
     enabled: true
     max_depth: 2             # nested delegation levels; -1 is unlimited, 0 disables delegation
@@ -518,10 +539,7 @@ plugins:
 
 extensions:
   enabled: true
-  trust_project_code: false
-  additional_tool_paths: []
   additional_command_dirs: []
-  additional_extension_paths: []
   additional_agent_dirs: []
   additional_theme_dirs: []
 
@@ -665,13 +683,14 @@ every Azem process before that migration. `AZEM_HOME` skips it.
 
 Credentials can be stored in SQLite, the system keyring, or a permission-restricted JSON file. SQLite and file storage rely on filesystem permissions and do not provide application-level encryption at rest. Use the system keyring when stronger local credential protection is required.
 
-Desktop **Settings → Model settings** stores llmux API keys through that same
-credential service. Keys are write-only from the UI: runtime events expose only
-whether a stored key or environment variable is available. Once enabled, a
-provider can fetch its authenticated model list and display the exact
-models.dev context limits, modalities, capabilities, and reasoning levels
-before storing the catalog in SQLite. Subscription and llmux catalogs resolve provider
-slugs and aliases through models.dev, so model pickers show friendly names
+Desktop **Settings → Model settings** stores llmux API keys through the shared
+daemon credential service. Keys are write-only: runtime events expose only
+whether a stored key or environment variable is available. TUI and GPUI consume that same secret-free account/provider projection; no renderer
+has a separate credential store. Once enabled, a provider can fetch its
+authenticated model list and display the exact models.dev context limits,
+modalities, capabilities, and reasoning levels before storing the catalog in
+SQLite. Subscription and llmux catalogs resolve provider slugs and aliases
+through models.dev, so model pickers show friendly names
 while requests still use the provider's actual model ID. Cursor may publish one
 raw ID for every reasoning, Thinking, and Fast combination; Model settings
 groups only IDs with a recognized shared base and lets the user switch the
@@ -693,10 +712,6 @@ Azem's approvals and persistent action boundaries help reduce accidental operati
 - `allow_network` relies on tools declaring network use and does not enforce OS-level network isolation.
 - `shell_policy: allow` and YOLO mode remove important confirmation points.
 - A subagent that explicitly requests worktree isolation fails if the worktree cannot be created; it never falls back to the shared workspace.
-- A trusted custom extension may register file write/delete fallbacks. Azem
-  consults them only after an ordinary workspace-local file mutation fails with
-  `EACCES`, `EPERM`, or `EROFS`; non-permission failures, archive/SQLite writes,
-  unresolved symlinks, and paths outside the workspace never reach the broker.
 - Auth broker and gateway bearer tokens grant access to credential projections.
   Use HTTPS except on loopback, keep tokens out of YAML when environment or
   permission-restricted token files are available, and expose neither service
@@ -710,7 +725,6 @@ For strict isolation, run Azem inside a container, virtual machine, or restricte
 cmd/azem/               Terminal application entry point
 cmd/azem-daemon/        Workspace-scoped runtime daemon for native IPC clients
 gpui/                   Rust GPUI desktop client and shared generated IPC contracts
-runtime-js/             Bun packages used by AST and LSP coding tools
 internal/agent/         Tool governance, persistent runs, and team agents
 internal/app/           Application orchestration, providers, and subagents
 internal/auth/          OAuth, credential import, and credential storage
@@ -723,15 +737,13 @@ internal/githubpr/      GitHub CLI projection, mutations, and PR monitor
 internal/authbroker/    Multi-process credential snapshots, refresh, account pools, and usage
 internal/authgateway/   Protocol-compatible provider forwarding gateway
 internal/collab/        Encrypted host/guest live collaboration relay
-internal/customtools/   Isolated Bun tools, commands, providers, agents, themes, and file broker
-internal/parity/        Frozen OMP v18.0.3 capability manifest
 internal/rpc/           JSON-RPC v1/v2 server
 internal/acp/           Agent Client Protocol server
 internal/sessionimport/ Claude and Codex JSONL importers
 internal/sessionexport/ HTML, text, and lossless JSON exporters
 internal/sessionshare/  Encrypted blob/gist session sharing
 internal/mcp/           MCP connection and tool management
-internal/provider/      ChatGPT/Codex, Grok, Cursor, llmux drivers, and model catalogs
+internal/provider/      ChatGPT/Codex, Grok, Cursor, Devin, llmux drivers, and model catalogs
 internal/recovery/      Crash recovery and side-effect reconciliation
 internal/blobstore/     Content-addressed files for large payloads
 internal/session/       Session persistence and compaction
@@ -759,8 +771,7 @@ Run the complete Go suite against declared module dependencies:
 GOWORK=off go test ./...
 ```
 
-Run native GPUI protocol, daemon, Rust, and UI-model checks (`make test-gui` is
-an alias for this command):
+Run native GPUI protocol, daemon, Rust, and UI-model checks separately:
 
 ```bash
 make test-gpui

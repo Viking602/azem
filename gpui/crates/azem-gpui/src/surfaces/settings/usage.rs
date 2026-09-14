@@ -1168,7 +1168,13 @@ pub(super) fn settings_usage_body(
                                     this.pending_requests.insert(id, PendingRequest::Usage);
                                     cx.notify();
                                 }))
-                                .child(locale.text("ui.currentProject")),
+                                .child(locale.text("ui.currentProject"))
+                                .animate_selection(
+                                    project_scope,
+                                    palette.paper_muted,
+                                    palette.paper,
+                                    cx,
+                                ),
                         )
                         .child(
                             div()
@@ -1201,7 +1207,13 @@ pub(super) fn settings_usage_body(
                                     this.pending_requests.insert(id, PendingRequest::Usage);
                                     cx.notify();
                                 }))
-                                .child(locale.text("ui.allProjects")),
+                                .child(locale.text("ui.allProjects"))
+                                .animate_selection(
+                                    !project_scope,
+                                    palette.paper_muted,
+                                    palette.paper,
+                                    cx,
+                                ),
                         ),
                 )
                 .child(div().flex_1())

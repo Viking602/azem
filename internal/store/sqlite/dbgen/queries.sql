@@ -34,6 +34,14 @@ SELECT goal,revision,phases,updated_at FROM session_todos WHERE session_id=?;
 INSERT INTO session_todos(session_id,goal,revision,phases,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(session_id) DO NOTHING;
 -- name: UpdateTodoCAS :execresult
 UPDATE session_todos SET goal=?,revision=?,phases=?,updated_at=? WHERE session_id=? AND revision=?;
+-- name: GetPromptQueue :one
+SELECT revision,state,pause_reason,items_inline,items_digest,updated_at FROM session_prompt_queues WHERE session_id=?;
+-- name: InsertPromptQueue :execresult
+INSERT INTO session_prompt_queues(session_id,revision,state,pause_reason,items_inline,items_digest,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(session_id) DO NOTHING;
+-- name: UpdatePromptQueueCAS :execresult
+UPDATE session_prompt_queues SET revision=sqlc.arg(next_revision),state=sqlc.arg(state),pause_reason=sqlc.arg(pause_reason),items_inline=sqlc.arg(items_inline),items_digest=sqlc.arg(items_digest),updated_at=sqlc.arg(updated_at) WHERE session_id=sqlc.arg(session_id) AND revision=sqlc.arg(expected_revision);
+-- name: ListPromptQueueSessionIDs :many
+SELECT session_id FROM session_prompt_queues ORDER BY session_id;
 -- name: UpdateUsage :execresult
 UPDATE session_projections SET usage=? WHERE session_id=?;
 
@@ -185,6 +193,8 @@ SELECT id,title,provider_id,model_id,reasoning,agent_mode,created_at,updated_at 
 UPDATE sessions SET provider_id=?,model_id=?,reasoning=?,agent_mode=?,updated_at=? WHERE id=?;
 -- name: GetSessionProjection :one
 SELECT last_run_id,model_history,usage,updated_at,checkpoint_generation,cache_epoch,cache_identity_hash FROM session_projections WHERE session_id=?;
+-- name: GetProviderMeteringState :one
+SELECT cache_epoch,checkpoint_generation,usage FROM session_projections WHERE session_id=?;
 -- name: UpdateProjectionRun :exec
 UPDATE session_projections SET last_run_id=?,updated_at=? WHERE session_id=?;
 -- name: UpdateProjectionRunAfterAssistantMutation :exec
@@ -233,12 +243,16 @@ UPDATE session_tool_records SET name=?,state=?,content=?,structured=?,artifact_i
 UPDATE session_tool_records SET name=?,arguments=?,state='running',content='',structured='null',artifact_id='',observations='[]',started_at=?,completed_at=0,content_sha256='',structured_sha256='' WHERE session_id=? AND run_id=? AND tool_call_id=? AND state='interrupted';
 -- name: ListSessionToolRecords :many
 SELECT run_id,tool_call_id,anchor_sequence,name,arguments,state,content,structured,artifact_id,observations,started_at,completed_at,content_sha256,structured_sha256 FROM session_tool_records WHERE session_id=? ORDER BY started_at,run_id,tool_call_id;
+-- name: ListSessionToolRecordsForRuns :many
+SELECT run_id,tool_call_id,anchor_sequence,name,arguments,state,content,structured,artifact_id,observations,started_at,completed_at,content_sha256,structured_sha256 FROM session_tool_records WHERE session_id=? AND run_id IN (sqlc.slice('run_ids')) ORDER BY started_at,run_id,tool_call_id;
 -- name: InterruptRunningSessionToolRecordsByRun :exec
 UPDATE session_tool_records SET state='interrupted',completed_at=? WHERE run_id=? AND state='running';
 -- name: UpsertWorkspaceSession :exec
 INSERT INTO workspace_session_state(anchor,session_id,updated_at) VALUES(?,?,?) ON CONFLICT(anchor) DO UPDATE SET session_id=excluded.session_id,updated_at=excluded.updated_at;
 -- name: GetWorkspaceSession :one
-SELECT session_id FROM workspace_session_state WHERE anchor=?;
+SELECT w.session_id FROM workspace_session_state w
+LEFT JOIN session_ui_state ui ON ui.session_id=w.session_id
+WHERE w.anchor=? AND COALESCE(ui.archived,0)=0;
 -- name: ListAccounts :many
 SELECT id,provider_id,email,display_name,plan,credential_ref,status,created_at,updated_at FROM accounts ORDER BY updated_at DESC;
 -- name: ListAccountsByProvider :many

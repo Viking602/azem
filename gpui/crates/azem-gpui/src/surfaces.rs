@@ -33,10 +33,26 @@ use crate::{
 };
 
 pub(super) const SIDEBAR_WIDTH: f32 = 246.;
-pub(crate) const SIDE_PANEL_TRANSITION: Duration = Duration::from_millis(220);
-const ENVIRONMENT_PANEL_RETURN_TRANSITION: Duration = Duration::from_millis(500);
+pub(crate) const SIDE_PANEL_TRANSITION: Duration = Duration::from_millis(300);
+// Shared density for workspace navigation and content surfaces.
+const WORKSPACE_CONTROL: f32 = 28.;
+const WORKSPACE_ROW: f32 = 32.;
+const WORKSPACE_TOOLBAR: f32 = 40.;
+const WORKSPACE_TEXT: f32 = 13.;
+const WORKSPACE_META: f32 = 12.;
+const WORKSPACE_TITLE: f32 = 15.;
+const WORKSPACE_PAGE_TITLE: f32 = 22.;
+const WORKSPACE_ICON: f32 = 16.;
+const WORKSPACE_INSET: f32 = 20.;
+const WORKSPACE_RAIL: f32 = 360.;
+const WORKSPACE_RADIUS: f32 = 6.;
+mod control_motion;
 mod environment;
+pub(crate) use control_motion::{SelectionMotion, control_animation};
+mod file_icons;
 mod navigation;
+mod navigation_motion;
+pub(super) use navigation_motion::SidebarTreeState;
 mod projects;
 mod pull_requests;
 mod security;
@@ -44,7 +60,9 @@ mod settings;
 mod timeline;
 mod workspace;
 
-pub(super) use environment::{agent_panel_tab, agent_side_panel, environment_panel, side_panel};
+pub(super) use environment::{
+    agent_panel_tab, agent_side_panel, composer_plan, environment_panel, side_panel,
+};
 pub(super) use navigation::{
     search_surface, session_rename_modal, sidebar, sidebar_context_menu_view,
 };
@@ -52,9 +70,11 @@ pub(super) use projects::projects_surface;
 pub(super) use pull_requests::pull_requests_surface;
 pub(super) use security::security_surface;
 pub(super) use settings::{ModelCapabilityTooltip, extension_confirmation, settings_surface};
-pub(super) use timeline::process::needs_pending_process;
+pub(super) use timeline::process::{completed_process_range, needs_pending_process};
 pub(super) use timeline::timeline_entry;
-pub(super) use workspace::{workspace_changes_surface, workspace_files_surface};
+pub(super) use workspace::{
+    WorkspaceSource, workspace_changes_surface, workspace_files_surface, workspace_image,
+};
 
 use settings::{format_usage_duration, pick, settings_card_header};
 use timeline::process::{
@@ -64,8 +84,7 @@ use timeline::process::{
 
 #[cfg(test)]
 use environment::{
-    environment_panel_return_spring, environment_snapshot, projected_agent_blocks, recap_copy,
-    todo_status_mark,
+    environment_snapshot, plan_item_animates, projected_agent_blocks, recap_copy, todo_status_mark,
 };
 #[cfg(test)]
 use security::{security_compact_text, security_progress_fraction};
@@ -74,8 +93,9 @@ use settings::{
     archived_session_groups, extension_items, extension_matches, extension_safe_target,
     format_usage_count, format_usage_exact, is_core_settings_route, marketplace_action,
     marketplace_entries, model_capability_label, model_discovery_request, model_matches_query,
-    model_provider_action, plugin_import_action, plugin_logo, provider_matches_query,
-    provider_quota_remaining, settings_route_model_name, settings_route_title,
+    model_provider_action, model_provider_save_request, plugin_import_action, plugin_logo,
+    provider_base_url, provider_detail_subtitle, provider_matches_query, provider_quota_remaining,
+    provider_quota_windows, settings_route_model_name, settings_route_title,
     settings_search_matches, settings_section_parts, usage_activity_level, usage_heatmap,
 };
 #[cfg(test)]
@@ -88,14 +108,12 @@ use timeline::process::{
     tool_group_range, tool_step_detail, turn_process_range,
 };
 #[cfg(test)]
-use timeline::{final_reply_footer_target, message_time, timeline_message_key};
+use timeline::{
+    final_reply_footer_target, message_time, timeline_message_key, user_attachment_sources,
+};
 
 #[cfg(test)]
 mod tests;
-
-fn pretty_value(value: &serde_json::Value) -> String {
-    serde_json::to_string_pretty(value).unwrap_or_default()
-}
 
 fn picker_menu_position(bounds: gpui::Bounds<Pixels>, below: bool) -> gpui::Point<Pixels> {
     gpui::point(
@@ -193,115 +211,118 @@ pub(super) fn approval_picker_control(
                     palette.faint,
                 )),
         )
-        .when(picker.open && picker.button_bounds.is_some(), |control| {
-            let menu = div()
-                .id("approval-mode-menu")
-                .role(Role::ListBox)
-                .aria_label(locale.text("approval.select"))
-                .min_w(px(300.))
-                .max_w(px(480.))
-                .whitespace_nowrap()
-                .p_1()
-                .rounded(px(10.))
-                .border_1()
-                .border_color(palette.border_strong)
-                .bg(palette.paper)
-                .text_color(palette.ink)
-                .text_xs()
-                .shadow(vec![
-                    BoxShadow::new(px(0.), px(6.), hsla(0., 0., 0., 0.15)).blur_radius(px(20.)),
-                ])
-                .occlude()
-                .on_key_down(cx.listener(AzemWindow::approval_picker_key))
-                .on_mouse_down_out(cx.listener(AzemWindow::dismiss_picker))
-                .children(super::APPROVAL_MODES.into_iter().enumerate().map(
-                    |(index, (mode, label, description))| {
-                        let selected = mode == current;
-                        let color = if mode == "yolo" {
-                            palette.danger
-                        } else {
-                            palette.ink
-                        };
-                        div()
-                            .id(("approval-mode-option", index))
-                            .role(Role::ListBoxOption)
-                            .aria_label(locale.text(label))
-                            .aria_description(locale.text(description))
-                            .aria_selected(selected)
-                            .text_color(color)
-                            .when(index == picker.index, |row| row.aria_active_descendant())
-                            .p_2()
-                            .rounded(px(6.))
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .bg(if index == picker.index {
-                                palette.hover
+        .when(
+            this.popup_motion("approval").visible() && picker.button_bounds.is_some(),
+            |control| {
+                let menu = div()
+                    .id("approval-mode-menu")
+                    .role(Role::ListBox)
+                    .aria_label(locale.text("approval.select"))
+                    .min_w(px(300.))
+                    .max_w(px(480.))
+                    .whitespace_nowrap()
+                    .p_1()
+                    .rounded(px(10.))
+                    .border_1()
+                    .border_color(palette.border_strong)
+                    .bg(palette.paper)
+                    .text_color(palette.ink)
+                    .text_xs()
+                    .shadow(vec![
+                        BoxShadow::new(px(0.), px(6.), hsla(0., 0., 0., 0.15)).blur_radius(px(20.)),
+                    ])
+                    .occlude()
+                    .on_key_down(cx.listener(AzemWindow::approval_picker_key))
+                    .on_mouse_down_out(cx.listener(AzemWindow::dismiss_picker))
+                    .children(super::APPROVAL_MODES.into_iter().enumerate().map(
+                        |(index, (mode, label, description))| {
+                            let selected = mode == current;
+                            let color = if mode == "yolo" {
+                                palette.danger
                             } else {
-                                palette.paper
-                            })
-                            .when(enabled && !busy, |row| {
-                                row.cursor_pointer()
-                                    .hover(move |style| style.bg(palette.hover))
-                            })
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.approval_picker.focus.focus(window, cx);
-                                this.change_approval_mode(mode, cx);
-                            }))
-                            .child(div().size(px(16.)).flex_shrink_0().child(icon(
-                                approval_mode_icon(mode),
-                                15.,
-                                color,
-                            )))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_1()
-                                    .child(locale.text(label))
-                                    .child(
-                                        div()
-                                            .text_size(px(10.))
-                                            .line_height(px(15.))
-                                            .text_color(palette.muted)
-                                            .truncate()
-                                            .child(locale.text(description)),
-                                    ),
-                            )
-                            .child(div().w(px(14.)).when(selected, |mark| {
-                                mark.child(icon(
-                                    "check",
-                                    13.,
-                                    if mode == "yolo" {
-                                        palette.danger
-                                    } else {
-                                        palette.accent
-                                    },
-                                ))
-                            }))
-                    },
-                ))
-                .when(!picker.error.is_empty(), |menu| {
-                    menu.child(
-                        div()
-                            .p_2()
-                            .text_color(palette.danger)
-                            .child(picker.error.clone()),
+                                palette.ink
+                            };
+                            div()
+                                .id(("approval-mode-option", index))
+                                .role(Role::ListBoxOption)
+                                .aria_label(locale.text(label))
+                                .aria_description(locale.text(description))
+                                .aria_selected(selected)
+                                .text_color(color)
+                                .when(index == picker.index, |row| row.aria_active_descendant())
+                                .p_2()
+                                .rounded(px(6.))
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .bg(if index == picker.index {
+                                    palette.hover
+                                } else {
+                                    palette.paper
+                                })
+                                .when(enabled && !busy, |row| {
+                                    row.cursor_pointer()
+                                        .hover(move |style| style.bg(palette.hover))
+                                })
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.approval_picker.focus.focus(window, cx);
+                                    this.change_approval_mode(mode, cx);
+                                }))
+                                .child(div().size(px(16.)).flex_shrink_0().child(icon(
+                                    approval_mode_icon(mode),
+                                    15.,
+                                    color,
+                                )))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .child(locale.text(label))
+                                        .child(
+                                            div()
+                                                .text_size(px(10.))
+                                                .line_height(px(15.))
+                                                .text_color(palette.muted)
+                                                .truncate()
+                                                .child(locale.text(description)),
+                                        ),
+                                )
+                                .child(div().w(px(14.)).when(selected, |mark| {
+                                    mark.child(icon(
+                                        "check",
+                                        13.,
+                                        if mode == "yolo" {
+                                            palette.danger
+                                        } else {
+                                            palette.accent
+                                        },
+                                    ))
+                                }))
+                        },
+                    ))
+                    .when(!picker.error.is_empty(), |menu| {
+                        menu.child(
+                            div()
+                                .p_2()
+                                .text_color(palette.danger)
+                                .child(picker.error.clone()),
+                        )
+                    });
+                control.child(
+                    deferred(
+                        gpui::anchored()
+                            .anchor(gpui::Anchor::BottomLeft)
+                            .position(picker_menu_position(picker.button_bounds.unwrap(), false))
+                            .snap_to_window_with_margin(px(8.))
+                            .child(popup_transition(menu, this.popup_motion("approval"))),
                     )
-                });
-            control.child(
-                deferred(
-                    gpui::anchored()
-                        .anchor(gpui::Anchor::BottomLeft)
-                        .position(picker_menu_position(picker.button_bounds.unwrap(), false))
-                        .snap_to_window_with_margin(px(8.))
-                        .child(menu),
+                    .with_priority(25),
                 )
-                .with_priority(25),
-            )
-        })
+            },
+        )
         .into_any_element()
 }
 
@@ -407,130 +428,132 @@ pub(super) fn branch_picker_control(
                     palette.faint,
                 )),
         )
-        .when(picker.open && picker.button_bounds.is_some(), |control| {
-            let options_enabled = enabled && !busy && picker.confirm_target.is_none();
-            let menu = div()
-                .id("branch-menu")
-                .w(px(280.))
-                .rounded(px(10.))
-                .border_1()
-                .border_color(palette.border_strong)
-                .bg(palette.paper)
-                .text_color(palette.ink)
-                .text_xs()
-                .shadow(vec![
-                    BoxShadow::new(px(0.), px(6.), hsla(0., 0., 0., 0.15)).blur_radius(px(20.)),
-                ])
-                .occlude()
-                .flex()
-                .flex_col()
-                .on_key_down(cx.listener(AzemWindow::branch_picker_key))
-                .on_mouse_down_out(cx.listener(AzemWindow::dismiss_picker))
-                .child(
-                    div()
-                        .h(px(36.))
-                        .px_2()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .border_b_1()
-                        .border_color(palette.border)
-                        .child(icon("search", 14., palette.faint))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .h_full()
-                                .child(picker.search.clone()),
-                        ),
-                )
-                .child(
-                    div()
-                        .id("branch-options")
-                        .role(Role::ListBox)
-                        .aria_label(locale.text("branch.select"))
-                        .max_h(px(224.))
-                        .overflow_y_scroll()
-                        .track_scroll(&picker.scroll)
-                        .p_1()
-                        .when(names.is_empty() || busy, |list| {
-                            list.child(div().p_2().text_color(palette.muted).child(locale.text(
-                                if busy {
-                                    if this.pending_requests.values().any(|request| {
-                                        matches!(
-                                            request,
-                                            PendingRequest::GitBranches {
-                                                target: Some(_),
-                                                ..
-                                            }
-                                        )
-                                    }) {
-                                        "branch.switching"
-                                    } else {
-                                        "branch.loading"
-                                    }
-                                } else {
-                                    "branch.empty"
-                                },
-                            )))
-                        })
-                        .when(!busy, |list| {
-                            list.children(names.into_iter().enumerate().map(|(row, name)| {
-                                let selected = name == current;
-                                let target = name.clone();
-                                div()
-                                    .id(("branch-option", row))
-                                    .role(Role::ListBoxOption)
-                                    .aria_label(name.clone())
-                                    .aria_selected(selected)
-                                    .when(row == index, |row| row.aria_active_descendant())
-                                    .h(px(32.))
-                                    .px_2()
-                                    .rounded(px(6.))
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .bg(if row == index {
-                                        palette.hover
-                                    } else {
-                                        palette.paper
-                                    })
-                                    .when(options_enabled, |row| {
-                                        row.cursor_pointer()
-                                            .hover(move |style| style.bg(palette.hover))
-                                    })
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        if options_enabled {
-                                            this.branch_picker.focus.focus(window, cx);
-                                            this.switch_branch(target.clone(), false, cx);
-                                        }
-                                    }))
-                                    .child(div().flex_1().min_w_0().truncate().child(name))
-                                    .when(selected, |row| {
-                                        row.child(icon("check", 13., palette.accent))
-                                    })
-                            }))
-                        }),
-                )
-                .when(!enabled, |menu| {
-                    menu.child(div().p_2().text_color(palette.muted).child(locale.text(
-                        if this.state.connection.connected {
-                            "branch.busy"
-                        } else {
-                            "branch.unavailable"
-                        },
-                    )))
-                })
-                .when(!picker.error.is_empty(), |menu| {
-                    menu.child(
+        .when(
+            this.popup_motion("branch").visible() && picker.button_bounds.is_some(),
+            |control| {
+                let options_enabled = enabled && !busy && picker.confirm_target.is_none();
+                let menu = div()
+                    .id("branch-menu")
+                    .w(px(280.))
+                    .rounded(px(10.))
+                    .border_1()
+                    .border_color(palette.border_strong)
+                    .bg(palette.paper)
+                    .text_color(palette.ink)
+                    .text_xs()
+                    .shadow(vec![
+                        BoxShadow::new(px(0.), px(6.), hsla(0., 0., 0., 0.15)).blur_radius(px(20.)),
+                    ])
+                    .occlude()
+                    .flex()
+                    .flex_col()
+                    .on_key_down(cx.listener(AzemWindow::branch_picker_key))
+                    .on_mouse_down_out(cx.listener(AzemWindow::dismiss_picker))
+                    .child(
                         div()
-                            .p_2()
-                            .text_color(palette.danger)
-                            .child(picker.error.clone()),
+                            .h(px(36.))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .border_b_1()
+                            .border_color(palette.border)
+                            .child(icon("search", 14., palette.faint))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h_full()
+                                    .child(picker.search.clone()),
+                            ),
                     )
-                })
-                .when_some(picker.confirm_target.clone(), |menu, target| {
-                    menu.child(
+                    .child(
+                        div()
+                            .id("branch-options")
+                            .role(Role::ListBox)
+                            .aria_label(locale.text("branch.select"))
+                            .max_h(px(224.))
+                            .overflow_y_scroll()
+                            .track_scroll(&picker.scroll)
+                            .p_1()
+                            .when(names.is_empty() || busy, |list| {
+                                list.child(div().p_2().text_color(palette.muted).child(
+                                    locale.text(if busy {
+                                        if this.pending_requests.values().any(|request| {
+                                            matches!(
+                                                request,
+                                                PendingRequest::GitBranches {
+                                                    target: Some(_),
+                                                    ..
+                                                }
+                                            )
+                                        }) {
+                                            "branch.switching"
+                                        } else {
+                                            "branch.loading"
+                                        }
+                                    } else {
+                                        "branch.empty"
+                                    }),
+                                ))
+                            })
+                            .when(!busy, |list| {
+                                list.children(names.into_iter().enumerate().map(|(row, name)| {
+                                    let selected = name == current;
+                                    let target = name.clone();
+                                    div()
+                                        .id(("branch-option", row))
+                                        .role(Role::ListBoxOption)
+                                        .aria_label(name.clone())
+                                        .aria_selected(selected)
+                                        .when(row == index, |row| row.aria_active_descendant())
+                                        .h(px(32.))
+                                        .px_2()
+                                        .rounded(px(6.))
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .bg(if row == index {
+                                            palette.hover
+                                        } else {
+                                            palette.paper
+                                        })
+                                        .when(options_enabled, |row| {
+                                            row.cursor_pointer()
+                                                .hover(move |style| style.bg(palette.hover))
+                                        })
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            if options_enabled {
+                                                this.branch_picker.focus.focus(window, cx);
+                                                this.switch_branch(target.clone(), false, cx);
+                                            }
+                                        }))
+                                        .child(div().flex_1().min_w_0().truncate().child(name))
+                                        .when(selected, |row| {
+                                            row.child(icon("check", 13., palette.accent))
+                                        })
+                                }))
+                            }),
+                    )
+                    .when(!enabled, |menu| {
+                        menu.child(div().p_2().text_color(palette.muted).child(locale.text(
+                            if this.state.connection.connected {
+                                "branch.busy"
+                            } else {
+                                "branch.unavailable"
+                            },
+                        )))
+                    })
+                    .when(!picker.error.is_empty(), |menu| {
+                        menu.child(
+                            div()
+                                .p_2()
+                                .text_color(palette.danger)
+                                .child(picker.error.clone()),
+                        )
+                    })
+                    .when_some(picker.confirm_target.clone(), |menu, target| {
+                        menu.child(
                         div()
                             .p_2()
                             .border_t_1()
@@ -612,18 +635,19 @@ pub(super) fn branch_picker_control(
                                     ),
                             ),
                     )
-                });
-            control.child(
-                deferred(
-                    gpui::anchored()
-                        .anchor(gpui::Anchor::TopLeft)
-                        .position(picker_menu_position(picker.button_bounds.unwrap(), true))
-                        .snap_to_window_with_margin(px(8.))
-                        .child(menu),
+                    });
+                control.child(
+                    deferred(
+                        gpui::anchored()
+                            .anchor(gpui::Anchor::TopLeft)
+                            .position(picker_menu_position(picker.button_bounds.unwrap(), true))
+                            .snap_to_window_with_margin(px(8.))
+                            .child(popup_transition(menu, this.popup_motion("branch"))),
+                    )
+                    .with_priority(25),
                 )
-                .with_priority(25),
-            )
-        })
+            },
+        )
         .into_any_element()
 }
 
@@ -767,17 +791,66 @@ pub(super) fn icon(name: &'static str, size: f32, color: Rgba) -> Svg {
         .text_color(color)
 }
 
-pub(super) fn provider_logo(provider: &str, size: f32, color: Rgba) -> Svg {
+pub(crate) fn provider_logo_asset_id(provider: &str) -> String {
     let normalized = provider.to_ascii_lowercase().replace('_', "-");
-    let logo = match normalized.as_str() {
+    match normalized.as_str() {
         "chatgpt" | "azure-openai" => "openai".to_string(),
         "grok" => "xai".to_string(),
         "claude" => "anthropic".to_string(),
         "gemini" | "google-ai" => "google".to_string(),
+        "ai302" => "302ai".to_string(),
+        "bigmodel" | "zhipu-v4" => "zhipuai".to_string(),
+        "cloudflare" => "cloudflare-workers-ai".to_string(),
+        "copilot" | "github" => "github-copilot".to_string(),
+        "firepass" | "fireworks" => "fireworks-ai".to_string(),
+        "gmi" => "gmicloud".to_string(),
+        "gradient-ai" => "digitalocean".to_string(),
+        "kimi" => "moonshotai".to_string(),
+        "meta-llama" => "llama".to_string(),
+        "nanogpt" => "nano-gpt".to_string(),
+        "novita" => "novita-ai".to_string(),
+        "nvidia-nim" => "nvidia".to_string(),
+        "opencode-zen" => "opencode".to_string(),
+        "wafer" => "wafer.ai".to_string(),
+        "xiaomimimo" => "xiaomi".to_string(),
+        "ollama" => "ollama-cloud".to_string(),
         _ => normalized,
-    };
+    }
+}
+
+pub(crate) fn catalog_provider_logo_id(
+    provider: Option<&serde_json::Value>,
+    fallback: &str,
+) -> String {
+    provider
+        .and_then(|value| {
+            value
+                .get("modelsDevId")
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+        })
+        .unwrap_or(fallback)
+        .to_string()
+}
+
+pub(super) fn provider_logo(provider: &str, size: f32, color: Rgba) -> Svg {
+    let logo = provider_logo_asset_id(provider);
     svg()
         .path(format!("logos/{logo}.svg"))
         .size(px(size))
         .text_color(color)
+}
+
+/// Short, paint-only entry shared by native popups; never changes hit regions.
+pub(crate) fn popup_transition(
+    view: gpui::Stateful<gpui::Div>,
+    motion: crate::PopupMotion,
+) -> gpui::AnyElement {
+    view.opacity(motion.opacity)
+        .when(!motion.open, |view| {
+            view.capture_any_mouse_down(|_, _, cx| cx.stop_propagation())
+                .capture_any_mouse_up(|_, _, cx| cx.stop_propagation())
+                .capture_key_down(|_, _, cx| cx.stop_propagation())
+        })
+        .into_any_element()
 }

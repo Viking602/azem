@@ -7,7 +7,7 @@ import (
 )
 
 const (
-	ProtocolVersion         = 1
+	ProtocolVersion         = 3
 	MaxControlFrameBytes    = 16 << 20
 	MaxBinaryChunkBytes     = 256 << 10
 	MaxReassembledBinary    = 256 << 20
@@ -50,6 +50,8 @@ const (
 	MethodAttachmentDataURL       Method = "attachment_data_url"
 	MethodSearchSessions          Method = "search_sessions"
 	MethodResumeSession           Method = "resume_session"
+	MethodSelectSession           Method = "select_session"
+	MethodCreateSession           Method = "create_session"
 	MethodSessionTree             Method = "session_tree"
 	MethodNavigateSessionTree     Method = "navigate_session_tree"
 	MethodCreateSessionFork       Method = "create_session_fork"
@@ -57,6 +59,11 @@ const (
 	MethodExportSession           Method = "export_session"
 	MethodShareSession            Method = "share_session"
 	MethodForkSession             Method = "fork_session"
+	MethodImportSession           Method = "import_session"
+	MethodExpandSkillInvocation   Method = "expand_skill_invocation"
+	MethodCollaboration           Method = "collaboration"
+	MethodPromptQueue             Method = "prompt_queue"
+	MethodMutatePromptQueue       Method = "mutate_prompt_queue"
 	MethodPullRequestDashboard    Method = "pull_request_dashboard"
 	MethodPullRequestDetail       Method = "pull_request_detail"
 	MethodMutatePullRequest       Method = "mutate_pull_request"
@@ -90,9 +97,11 @@ func AllMethods() []Method {
 	return []Method{
 		MethodInitialise, MethodReconnectSnapshot, MethodStartTurn, MethodGuide, MethodFollowUp,
 		MethodCancelActive, MethodExecute, MethodImportAttachment, MethodImportClipboardImage,
-		MethodAttachmentDataURL, MethodSearchSessions, MethodResumeSession, MethodSessionTree,
-		MethodNavigateSessionTree, MethodCreateSessionFork, MethodSetSessionEntryLabel,
-		MethodExportSession, MethodShareSession, MethodForkSession, MethodPullRequestDashboard,
+		MethodAttachmentDataURL, MethodSearchSessions, MethodResumeSession, MethodSelectSession, MethodCreateSession,
+		MethodSessionTree, MethodNavigateSessionTree, MethodCreateSessionFork, MethodSetSessionEntryLabel,
+		MethodExportSession, MethodShareSession, MethodForkSession, MethodImportSession,
+		MethodExpandSkillInvocation, MethodCollaboration, MethodPromptQueue, MethodMutatePromptQueue,
+		MethodPullRequestDashboard,
 		MethodPullRequestDetail, MethodMutatePullRequest, MethodSetPullRequestMonitor,
 		MethodSkillCatalog, MethodHookCatalog, MethodMarketplaceCatalog, MethodUsageReport,
 		MethodWorkspaceChanges, MethodWorkspaceChange, MethodWorkspaceEntries, MethodSearchWorkspaceFiles, MethodWorkspaceFile,
@@ -130,6 +139,7 @@ type ProtocolError struct {
 	Code      string `json:"code"`
 	Message   string `json:"message"`
 	Retryable bool   `json:"retryable,omitempty"`
+	Cursor    uint64 `json:"cursor,omitempty"`
 }
 
 type BinaryMetadata struct {
@@ -149,6 +159,7 @@ type Challenge struct {
 	Nonce       string `json:"nonce"`
 	WorkspaceID string `json:"workspaceId"`
 	Protocol    int    `json:"protocol"`
+	DaemonEpoch string `json:"daemonEpoch"`
 }
 
 type Authenticate struct {
@@ -162,6 +173,7 @@ type HelloAck struct {
 	Protocol        int    `json:"protocol"`
 	WorkspaceID     string `json:"workspaceId"`
 	CurrentSequence uint64 `json:"currentSequence"`
+	DaemonEpoch     string `json:"daemonEpoch"`
 	ReplayAvailable bool   `json:"replayAvailable"`
 }
 
@@ -180,7 +192,11 @@ func NewEnvelope(kind FrameKind) Envelope {
 }
 
 func (envelope Envelope) Validate() error {
-	if envelope.Version != ProtocolVersion {
+	return envelope.validateVersion(ProtocolVersion)
+}
+
+func (envelope Envelope) validateVersion(version int) error {
+	if envelope.Version != version {
 		return fmt.Errorf("unsupported IPC protocol version %d", envelope.Version)
 	}
 	switch envelope.Kind {

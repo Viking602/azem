@@ -257,8 +257,6 @@ pub struct Labels {
     pub send: &'static str,
     pub queue: &'static str,
     pub stop: &'static str,
-    pub prompt_title: &'static str,
-    pub prompt_subtitle: &'static str,
     pub auto_review: &'static str,
     pub plan: &'static str,
 }
@@ -284,8 +282,6 @@ pub fn labels(language: &str) -> Labels {
         send: locale.text("app.send"),
         queue: locale.text("app.queue"),
         stop: locale.text("app.stop"),
-        prompt_title: locale.text("app.prompt_title"),
-        prompt_subtitle: locale.text("app.prompt_subtitle"),
         auto_review: locale.text("app.auto_review"),
         plan: locale.text("app.plan"),
     }

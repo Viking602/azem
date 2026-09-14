@@ -27,7 +27,8 @@ const (
 
 type reliableSearchInput struct {
 	Query      string `json:"query"`
-	Regexp     bool   `json:"regexp,omitempty"`
+	Regexp     *bool  `json:"regexp,omitempty"`
+	Literal    bool   `json:"literal,omitempty"`
 	Path       string `json:"path,omitempty"`
 	Glob       string `json:"glob,omitempty"`
 	MaxResults int    `json:"maxResults,omitempty"`
@@ -47,13 +48,14 @@ func (d reliableSearchDriver) Definition() tool.Definition {
 	additional := false
 	return tool.Definition{
 		Name:        ToolSearch,
-		Description: "Search workspace text with ripgrep or one exact internal resource URI (including ssh://). Workspace search is case-sensitive, literal by default, supports ripgrep regex and glob syntax, respects ignore files, and returns grouped [PATH#TAG] matches. maxResults caps matched lines, not files scanned.",
+		Description: "Search workspace text with bundled ripgrep or one exact internal resource URI. Workspace queries are case-sensitive ripgrep regex by default; set literal:true for fixed strings. Combine synonymous symbols in one alternation and consume returned lines before a narrower follow-up. Path/glob constraints and ignore files are respected. Returns grouped [PATH#TAG] matches; maxResults caps matched lines, not files scanned.",
 		InputSchema: tool.Schema{
 			Type: "object",
 			Properties: map[string]tool.Schema{
 				"query":      {Type: "string"},
 				"path":       {Type: "string"},
 				"regexp":     {Type: "boolean"},
+				"literal":    {Type: "boolean"},
 				"glob":       {Type: "string"},
 				"maxResults": {Type: "integer"},
 			},
@@ -71,13 +73,17 @@ func (d reliableSearchDriver) Execute(ctx context.Context, call tool.Call, _ too
 	if strings.TrimSpace(input.Query) == "" {
 		return reliableSearchError(call, "query must not be empty"), nil
 	}
+	useRegexp, modeErr := input.useRegexp()
+	if modeErr != nil {
+		return reliableSearchError(call, modeErr.Error()), nil
+	}
 	maxResults := input.MaxResults
 	if maxResults <= 0 || maxResults > reliableSearchMaxResults {
 		maxResults = reliableSearchMaxResults
 	}
 	if strings.Contains(input.Path, "://") {
 		var expression *regexp.Regexp
-		if input.Regexp {
+		if useRegexp {
 			compiled, err := regexp.Compile(input.Query)
 			if err != nil {
 				return reliableSearchError(call, "invalid regexp: "+err.Error()), nil
@@ -86,7 +92,20 @@ func (d reliableSearchDriver) Execute(ctx context.Context, call tool.Call, _ too
 		}
 		return d.searchInternalResource(ctx, call, input, expression, maxResults), nil
 	}
-	return d.searchWorkspace(ctx, call, input, maxResults)
+	return d.searchWorkspace(ctx, call, input, maxResults, useRegexp)
+}
+
+func (input reliableSearchInput) useRegexp() (bool, error) {
+	if input.Literal {
+		if input.Regexp != nil && *input.Regexp {
+			return false, fmt.Errorf("literal and regexp:true are mutually exclusive")
+		}
+		return false, nil
+	}
+	if input.Regexp != nil {
+		return *input.Regexp, nil
+	}
+	return true, nil
 }
 
 type ripgrepJSONEvent struct {
@@ -102,7 +121,7 @@ type ripgrepJSONEvent struct {
 	} `json:"data"`
 }
 
-func (d reliableSearchDriver) searchWorkspace(ctx context.Context, call tool.Call, input reliableSearchInput, maxResults int) (tool.Result, error) {
+func (d reliableSearchDriver) searchWorkspace(ctx context.Context, call tool.Call, input reliableSearchInput, maxResults int, useRegexp bool) (tool.Result, error) {
 	ripgrep, err := resolveRipgrepExecutable()
 	if err != nil {
 		return reliableSearchError(call, err.Error()), nil
@@ -134,7 +153,7 @@ func (d reliableSearchDriver) searchWorkspace(ctx context.Context, call tool.Cal
 		reliableSearchMaxFileSizeArg,
 		"--case-sensitive",
 	}
-	if !input.Regexp {
+	if !useRegexp {
 		args = append(args, "--fixed-strings")
 	}
 	if glob := strings.TrimSpace(strings.ReplaceAll(input.Glob, "\\", "/")); glob != "" {
@@ -212,7 +231,8 @@ func (d reliableSearchDriver) searchWorkspace(ctx context.Context, call tool.Cal
 	sort.Strings(paths)
 	result := SearchToolResult{Truncated: truncated}
 	for _, path := range paths {
-		arguments, _ := json.Marshal(map[string]string{"path": path})
+		// Hash the full snapshot, but do not render and marshal the entire file for its tag.
+		arguments, _ := json.Marshal(map[string]any{"path": path, "startLine": 1, "endLine": 1})
 		readResult, err := d.read.Execute(ctx, tool.Call{
 			ID: call.ID + "-read", Name: ToolReadFile, Arguments: arguments,
 		}, nil)

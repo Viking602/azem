@@ -38,7 +38,6 @@ type writeDriver struct {
 	root         string
 	snapshotRead tool.Driver
 	resources    *resource.Router
-	broker       *fileMutationBrokerRef
 }
 
 type writeInput struct {
@@ -57,15 +56,15 @@ type writeResult struct {
 	Content        string `json:"content"`
 }
 
-func newWriteDriver(root string, snapshotRead tool.Driver, resources *resource.Router, broker *fileMutationBrokerRef) tool.Driver {
-	return &writeDriver{root: root, snapshotRead: snapshotRead, resources: resources, broker: broker}
+func newWriteDriver(root string, snapshotRead tool.Driver, resources *resource.Router) tool.Driver {
+	return &writeDriver{root: root, snapshotRead: snapshotRead, resources: resources}
 }
 
 func (driver *writeDriver) Definition() tool.Definition {
 	additional := false
 	return tool.Definition{
 		Name:        ToolWriteFile,
-		Description: "Create or replace a file, registered internal resource, archive member, or SQLite row. Stage structural rewrites by writing JSON to xd://ast_edit, then finalize with one reason sentence to xd://resolve or xd://reject. Hashline display prefixes copied from read output are removed safely.",
+		Description: "Create or replace a file, registered internal resource, archive member, or SQLite row. Hashline display prefixes copied from read output are removed safely.",
 		InputSchema: tool.Schema{
 			Type: "object", Required: []string{"path", "content"}, AdditionalProperties: &additional,
 			Properties: map[string]tool.Schema{
@@ -160,17 +159,6 @@ func (driver *writeDriver) writeLocal(ctx context.Context, call tool.Call, path,
 		mode = info.Mode().Perm()
 	}
 	madeExecutable, err := writeRootedFile(ctx, root, filepath.FromSlash(relative), []byte(content), mode, exists, strings.HasPrefix(content, "#!"))
-	if err != nil && permissionMutationError(err) {
-		if broker := driver.broker.get(); broker != nil {
-			if destination, resolveErr := brokerDestination(driver.root, relative, true); resolveErr == nil {
-				handled, _ := broker.BrokerWrite(ctx, destination, []byte(content), err, brokerCallerSession(ctx))
-				if handled {
-					err = nil
-					madeExecutable = false
-				}
-			}
-		}
-	}
 	if err != nil {
 		return tool.Result{}, err
 	}

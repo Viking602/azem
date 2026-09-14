@@ -31,6 +31,7 @@ type modelLoopGuard struct {
 	thinking        string
 	text            string
 	thinkingTrips   int
+	failure         error
 	queued          bool
 	lastToolHash    string
 	lastToolName    string
@@ -52,7 +53,8 @@ func (guard *modelLoopGuard) TransformContext(_ context.Context, messages []mess
 
 func (guard *modelLoopGuard) BeforeModelCall(context.Context, *hyprovider.Request) error {
 	guard.thinking, guard.text, guard.queued = "", "", false
-	return nil
+	// Fail before opening another physical effect, after the aborted one settles.
+	return guard.failure
 }
 func (*modelLoopGuard) BeforeToolCall(context.Context, *tool.Call) error  { return nil }
 func (*modelLoopGuard) AfterToolCall(context.Context, *tool.Result) error { return nil }
@@ -112,7 +114,8 @@ func (guard *modelLoopGuard) observeToolCall(ctx context.Context, call message.T
 func (guard *modelLoopGuard) interrupt(ctx context.Context, kind, guidance string) error {
 	guard.thinkingTrips++
 	if guard.thinkingTrips > 3 {
-		return fmt.Errorf("%s persisted after three guarded retries", kind)
+		guard.failure = fmt.Errorf("%s persisted after three guarded retries", kind)
+		guidance = guard.failure.Error()
 	}
 	if guard.control == nil {
 		return errors.New("loop guard has no turn-control channel")
@@ -124,12 +127,12 @@ func (guard *modelLoopGuard) interrupt(ctx context.Context, kind, guidance strin
 	value := message.NewText(message.RoleSystem, "[Host loop guard: "+kind+"]\n"+guidance)
 	agentruntime.SetMessageVisibility(&value, agentruntime.MessageVisibilityPrivate)
 	if guard.store != nil {
-		payload, _ := json.Marshal(map[string]any{"version": 1, "kind": kind, "attempt": guard.thinkingTrips, "controlId": id})
+		payload, _ := json.Marshal(map[string]any{"version": 1, "kind": kind, "attempt": guard.thinkingTrips, "controlId": id, "terminal": guard.failure != nil})
 		if _, err := guard.store.PutArtifact(ctx, guard.sessionID, guard.runID, loopGuardArtifactKind, payload, ""); err != nil {
 			return err
 		}
 	}
-	if err := guard.control.Enqueue(turnControlMessage{ID: id, Kind: turnControlSteer, Message: value}); err != nil {
+	if err := guard.control.Enqueue(turnControlMessage{ID: id, Kind: turnControlSteer, Message: value, InterruptStream: true, DiscardRejectedOutput: kind != "tool-call-loop"}); err != nil {
 		return err
 	}
 	guard.queued = true
@@ -149,6 +152,27 @@ var loopParagraphSeparator = regexp.MustCompile(`\n\s*\n`)
 func detectGeneratedLoop(text string) bool {
 	if len(text) < 1024 {
 		return false
+	}
+	// Short prose cycles need not align with fixed byte windows or paragraphs.
+	words := strings.Fields(normalizeLoopText(text[max(0, len(text)-4096):]))
+	for width := 8; width <= min(64, len(words)/4); width++ {
+		suffix := words[len(words)-4*width:]
+		repeated := true
+		for index := width; index < len(suffix); index++ {
+			if suffix[index] != suffix[index%width] {
+				repeated = false
+				break
+			}
+		}
+		if repeated {
+			unique := make(map[string]struct{}, width)
+			for _, word := range suffix[:width] {
+				unique[word] = struct{}{}
+			}
+			if len(unique) >= 4 {
+				return true
+			}
+		}
 	}
 	if len(text)%2 == 0 {
 		half := len(text) / 2

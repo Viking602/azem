@@ -953,7 +953,7 @@ func TestGrokStyleChromeDistributesMetadata(t *testing.T) {
 		t.Fatalf("top chrome still shows session id: %q", header)
 	}
 	composer := ansi.Strip(model.renderComposer())
-	if !strings.Contains(composer, "grok-4.5 (high) · SMART") {
+	if !strings.Contains(composer, "grok-4.5 (high) · QUEUE · SMART") {
 		t.Fatalf("composer caption is missing model/mode: %q", composer)
 	}
 

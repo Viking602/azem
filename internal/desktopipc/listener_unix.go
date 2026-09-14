@@ -4,7 +4,9 @@ package desktopipc
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -14,7 +16,12 @@ import (
 )
 
 func DefaultAddress(stateDir, workspaceID string) string {
-	return filepath.Join(stateDir, "gpui-daemons", workspaceID, "azem.sock")
+	candidate := filepath.Join(stateDir, "gpui-daemons", workspaceID, "azem.sock")
+	if len(candidate) <= 100 {
+		return candidate
+	}
+	digest := sha256.Sum256([]byte(filepath.Clean(stateDir) + "\x00" + workspaceID))
+	return filepath.Join(os.TempDir(), fmt.Sprintf("azem-%d", os.Getuid()), fmt.Sprintf("%x.sock", digest[:16]))
 }
 
 func Listen(address string) (net.Listener, error) {

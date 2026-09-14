@@ -620,3 +620,99 @@ func TestReasoningTraceCollectorSeparatesDiscreteBoldTitles(t *testing.T) {
 		t.Fatalf("thinking trace = %q, want %q", got, want)
 	}
 }
+
+func TestLiveApprovalContinuesSameProviderTurn(t *testing.T) {
+	for _, decision := range []string{"once", "session", "deny"} {
+		t.Run(decision, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			store, err := sqlitestore.Open(ctx, ":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			workspace := t.TempDir()
+			coding, err := agentservice.NewService(store, workspace)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sessions := session.NewService(store.DB(), store.Blobs())
+			if _, err := sessions.Ensure(ctx, session.Session{ID: "live-approval"}); err != nil {
+				t.Fatal(err)
+			}
+			run, err := coding.StartRun(ctx, "perform approved write")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := coding.SealExecutionProfile(ctx, run, agentruntime.ExecutableProfile{
+				Provider: "test", AccountID: "test-account", RawModel: "test", Model: "test", Reasoning: "none",
+				ActiveSkills: []string{}, ToolSetHash: "write", ToolProfileHash: "write", StaticIdentity: "approval-test",
+				WorkspaceAnchor: workspace, PromptFingerprint: "write", ToolSchemaFingerprint: "write",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			service := NewService(ctx, config.Default())
+			service.AttachDurable(sessions, coding)
+			t.Cleanup(func() {
+				cancel()
+				shutdown, stop := context.WithTimeout(context.Background(), 5*time.Second)
+				defer stop()
+				_ = service.Shutdown(shutdown)
+			})
+			var calls atomic.Int32
+			driver := countedApprovalDriver{executions: &calls}
+			governed := &governedAgentTool{definition: driver.Definition(), driver: driver, coding: coding, run: run, host: service, sessionID: "live-approval", agentType: "main"}
+			engine := service.bindProviderEngine(hyagent.Engine{
+				Provider: &compactionTestDriver{streams: [][]hyprovider.Event{{
+					{Kind: hyprovider.EventToolCall, ToolCall: &message.ToolCall{ID: "write", Name: driver.Definition().Name, Arguments: json.RawMessage(`{}`)}},
+					{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonToolUse},
+				}, {{Kind: hyprovider.EventTextDelta, Text: "done"}, {Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete}}}},
+				Model: "test", ContextBuilder: turnContext{instructions: "test"}, Tools: tool.NewBus(governed),
+			})
+			service.wg.Add(1)
+			go service.runProviderTurn(ctx, TurnRequest{SessionID: "live-approval", Prompt: "perform approved write", Provider: "test", Model: "test"}, run, engine)
+			for {
+				event, err := service.NextEvent(ctx)
+				if err != nil {
+					t.Fatalf("approval did not finish: %v; executions=%d", err, calls.Load())
+				}
+				switch event.Kind {
+				case EventApprovalRequested:
+					controls := service.PendingControlEvents("live-approval")
+					if len(controls) != 1 || controls[0].Text == "" || controls[0].Text != event.Text || controls[0].Data["tool"] != event.Data["tool"] || controls[0].Data["risk"] != event.Data["risk"] {
+						t.Fatalf("reconnect lost pending approval details: event=%+v controls=%+v", event, controls)
+					}
+					if err := service.ExecuteAction(ctx, Action{Kind: ActionResolveApproval, Target: event.ApprovalID, Decision: decision}); err != nil {
+						t.Fatal(err)
+					}
+				case EventRunFinished:
+					want := int32(1)
+					if decision == "deny" {
+						want = 0
+					}
+					if calls.Load() != want {
+						t.Fatalf("executions=%d, want %d", calls.Load(), want)
+					}
+					return
+				case EventRunFailed, EventRecoveryState:
+					t.Fatalf("live approval must continue without suspension: %+v", event)
+				}
+			}
+		})
+	}
+}
+
+func TestGitBranchSnapshotAcceptsUninitializedProject(t *testing.T) {
+	root := t.TempDir()
+	branches, current, dirty, count, err := gitBranchSnapshot(context.Background(), root)
+	if err != nil || len(branches) != 0 || current != "" || dirty || count != 0 {
+		t.Fatalf("empty project: %v %q %v %d %v", branches, current, dirty, count, err)
+	}
+	if _, _, _, _, err := gitBranchSnapshot(context.Background(), filepath.Join(root, "missing")); err == nil {
+		t.Fatal("missing directory error was hidden")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, _, _, err := gitBranchSnapshot(ctx, root); err == nil {
+		t.Fatal("cancellation was hidden")
+	}
+}

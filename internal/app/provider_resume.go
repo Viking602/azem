@@ -79,7 +79,7 @@ func (r *ProviderRuntime) resumeRun(ctx context.Context, runID, operationID stri
 		Provider: manifest.Provider, Model: manifest.RawModel,
 		Reasoning: requestedReasoning(manifest.Reasoning), AgentMode: projection.Session.AgentMode,
 		History: append([]session.Block(nil), projection.Blocks...), modelHistory: projection.ModelHistory,
-		toolRecords:        append([]session.ToolRecord(nil), projection.ToolRecords...),
+		toolRecords:        rootToolRecords(projection),
 		checkpointBoundary: projection.ModelHistory.CoveredThroughSequence, resuming: true,
 	}
 	request.ActiveSkills = append([]string(nil), manifest.ActiveSkills...)
@@ -276,7 +276,6 @@ func (r *ProviderRuntime) ResumeTeam(_ context.Context, runID string) error {
 	}
 	runCtx, cancel := context.WithCancel(host.BaseContext())
 	originalPrompt := firstNonempty(run.Metadata["original_prompt"], request.Prompt)
-	request.historicalContext = host.LoadTurnHistoricalContext(host.BaseContext(), request.SessionID, originalPrompt, historicalRetrievalBoundary(request.modelHistory))
 	if err := host.ClaimActiveRun(runID, "", cancel, false); err != nil {
 		cancel()
 		return err

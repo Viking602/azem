@@ -79,14 +79,16 @@ archive/checkpoint 后清除旧 provider 压力，防止新 cache epoch 被旧�
 |`reserve_tokens`|`16384`|最小 headroom；有效值至少为上下文窗口的 15%|
 |`keep_recent_tokens`|`20000`|优先保留的原始 hot-tail token 下限|
 |`large_tool_result_tokens`|`12000`|大工具结果 artifact offload 阈值|
-|`history_retrieval_tokens`|`4096`|私有 session history FTS 证据预算|
+|`history_retrieval_tokens`|`4096`|按需 context.search_history 证据预算，发送时不自动检索|
 
-`keep_recent_tokens` 是优化偏好，不是高于硬窗口的强制条件。如果它因为一个超大旧消息导致所有 carrier 都无法放入目标，reducer 会放弃这个可选 token floor，再按“最近 3 个完整 shared user turn”重切一次。最近三轮本身仍是强制边界；如果它们加 carrier 仍超过硬限制，归档明确失败，并且不写 artifact、不改 live history、不提交部分 checkpoint。
+`keep_recent_tokens` 是优化偏好，不是高于硬窗口的强制条件。如果它因为一个超大旧消息导致所有 carrier 都无法放入目标，reducer 会放弃这个可选 token floor，再按“最近 3 个完整 shared user turn”重切一次。
+
+若常规切点不存在，或最近三轮仍放不下，检查最新 shared user 之后最大的完整 assistant/tool 原子组。仅当用现有 carrier 在原位置替换该组后，完整上下文能放入目标时才归档。用户指令、system 消息、其他原子组和显式 cache prefix 保持原文及顺序；被归档组的正文、reasoning、签名、provider state 和工具结果完整写入同一种 `context_archive` artifact。此路径解决单次长任务的超大助手输出，不拆分工具组，也不重跑已完成工具。下一次归档先展开该 source，保持原始顺序。如果仍放不下，明确失败，不写归档、不改 live history、不提交部分 checkpoint。
 
 ## 5. 切分不变量
 
 - system prefix 保持原顺序；
-- 最近 3 个完整、非 private 的 user turn 原样保留；
+- 常规切分保留最近 3 个完整、非 private 的 user turn；硬预算下只允许上一节所述助手原子组归档，所有 user 指令仍原样保留；
 - private history/vision evidence 不参与“最近 user turn”计数；
 - assistant tool-call message 与其连续 tool results 不可拆分；
 - Todo reminder 在构建前刷新，在 carrier 组装后再次校正；
@@ -147,7 +149,7 @@ Fork 只复制 canonical transcript、终态 tool records、Todo/Recap 与普通
 |source 超过 32 MiB|显式失败，不生成不完整 archive|
 |bitmap renderer/图片能力不可用|尝试更小 bitmap，最后降为 text/artifact carrier|
 |carrier 在可选 token floor 下过大|放弃 token floor，仍保留最近 3 个完整 turn 后重试|
-|最近 3 个完整 turn 仍超过硬限制|显式失败，不持久化|
+|没有常规切点或最近 3 个完整 turn 超过硬限制|尝试原位置归档当前轮最大 assistant/tool 原子组；完整结果仍超限则显式失败，不持久化|
 |frame 丢失或损坏|从匹配 SHA 的 source 确定性修复|
 |source SHA 不匹配|显式失败，不接受损坏 source|
 |checkpoint source stale|采用现有 run 的 durable high-water 重新构建；禁止覆盖新 transcript|
@@ -157,6 +159,8 @@ Fork 只复制 canonical transcript、终态 tool records、Todo/Recap 与普通
 ## 10. Prefix cache
 
 wire version 3、policy version 3 和 archive carrier 会让旧 derived cache identity 在首次切换时失效。之后 system prefix、消息顺序和 carrier 位置稳定；重复归档只替换一个 carrier 并继续追加热尾。删除 `agents.compaction` 也删除了每轮额外 provider 请求，不向主模型 static prefix 注入任何新 prompt。
+
+超大助手组的原位置归档沿用 wire/policy v3 和现有 checkpoint 激活。它仅改变被归档组及其后续 cache identity，不改 static prompt 或其他消息顺序；已能正常归档的历史继续采用原切点。
 
 ## 11. 参考来源
 

@@ -101,8 +101,11 @@ const (
 	ActionDiscoverProviderModels   ActionKind = "discover_provider_models"
 	ActionSetModelProvider         ActionKind = "set_model_provider"
 	ActionSetModelEnabled          ActionKind = "set_model_enabled"
+	ActionSetModelExtendedContext  ActionKind = "set_model_extended_context"
 	ActionListModelRoutes          ActionKind = "list_model_routes"
 	ActionSetModelRoute            ActionKind = "set_model_route"
+	ActionSetSessionMode           ActionKind = "set_session_mode"
+	ActionSetWorkflowMode          ActionKind = "set_workflow_mode"
 	ActionResetModelRoute          ActionKind = "reset_model_route"
 	ActionSetSubagentConcurrency   ActionKind = "set_subagent_concurrency"
 	ActionSetSubagentDepth         ActionKind = "set_subagent_depth"
@@ -308,6 +311,9 @@ func gitBranchSnapshot(ctx context.Context, root string) ([]GitBranchEntry, stri
 	inside, err := gitOutputLimited(ctx, root, 1024, "rev-parse", "--is-inside-work-tree")
 	if err != nil || strings.TrimSpace(string(inside)) != "true" {
 		if err != nil {
+			if ctx.Err() == nil && strings.Contains(err.Error(), "fatal: not a git repository") {
+				return []GitBranchEntry{}, "", false, 0, nil
+			}
 			return nil, "", false, 0, fmt.Errorf("inspect git workspace: %w", err)
 		}
 		return nil, "", false, 0, fmt.Errorf("workspace %q is not a git work tree", root)
@@ -400,6 +406,7 @@ func (s *Service) modelRouteEntries() []ModelRouteEntry {
 		{Scope: "vision", Label: "Vision", Route: s.cfg.Agents.Vision},
 		{Scope: "recap", Label: "Recap", Route: s.cfg.Agents.Recap},
 		{Scope: "advisor", Label: "Advisor", Route: s.cfg.Agents.Advisor.Route()},
+		{Scope: "fusion", Label: "Fusion Sidekick", Route: s.cfg.Agents.Fusion},
 		{Scope: "vibe", Role: "fast", Label: "Vibe fast", Route: s.cfg.Agents.Vibe.Fast},
 		{Scope: "vibe", Role: "good", Label: "Vibe good", Route: s.cfg.Agents.Vibe.Good},
 	}
@@ -437,10 +444,11 @@ func (s *Service) modelRoutesEvent(state string) Event {
 	awaitSeconds := int(s.cfg.Agents.Subagents.AwaitDuration.Seconds())
 	idleSeconds := int(s.cfg.Agents.Subagents.IdleDuration.Seconds())
 	fastMode := s.cfg.Providers.ChatGPT.FastMode
+	workflow := s.cfg.Agents.Workflow
 	s.mu.Unlock()
 	return Event{
 		Kind: EventModelRoutes, State: state, ModelRoutes: s.modelRouteEntries(),
-		Data: map[string]string{"subagent_max_concurrency": strconv.Itoa(maxConcurrency), "subagent_max_depth": strconv.Itoa(maxDepth), "shell_max_concurrency": strconv.Itoa(shellConcurrency), "shell_max_wall_clock_seconds": strconv.Itoa(shellWallSeconds), "subagent_await_seconds": strconv.Itoa(awaitSeconds), "subagent_idle_seconds": strconv.Itoa(idleSeconds), "chatgpt_fast_mode": strconv.FormatBool(fastMode)},
+		Data: map[string]string{"workflow_mode": workflow, "subagent_max_concurrency": strconv.Itoa(maxConcurrency), "subagent_max_depth": strconv.Itoa(maxDepth), "shell_max_concurrency": strconv.Itoa(shellConcurrency), "shell_max_wall_clock_seconds": strconv.Itoa(shellWallSeconds), "subagent_await_seconds": strconv.Itoa(awaitSeconds), "subagent_idle_seconds": strconv.Itoa(idleSeconds), "chatgpt_fast_mode": strconv.FormatBool(fastMode)},
 	}
 }
 
@@ -458,7 +466,7 @@ func (s *Service) updateModelRoute(ctx context.Context, entry *ModelRouteEntry, 
 	}
 	s.routeMu.Lock()
 	defer s.routeMu.Unlock()
-	if entry.Scope != "main" && entry.Scope != "title" && entry.Scope != "plan" && entry.Scope != "approval" && entry.Scope != "vision" && entry.Scope != "recap" && entry.Scope != "advisor" && entry.Scope != "vibe" && entry.Scope != "subagent" && entry.Scope != "security" {
+	if entry.Scope != "main" && entry.Scope != "title" && entry.Scope != "plan" && entry.Scope != "approval" && entry.Scope != "vision" && entry.Scope != "recap" && entry.Scope != "advisor" && entry.Scope != "vibe" && entry.Scope != "fusion" && entry.Scope != "subagent" && entry.Scope != "security" {
 		return fmt.Errorf("unsupported model route scope %q", entry.Scope)
 	}
 	roleScope := entry.Scope == "subagent" || entry.Scope == "security" || entry.Scope == "vibe"
@@ -538,6 +546,8 @@ func (s *Service) updateModelRoute(ctx context.Context, entry *ModelRouteEntry, 
 		s.cfg.Agents.Recap = route
 	} else if entry.Scope == "advisor" {
 		s.cfg.Agents.Advisor.Provider, s.cfg.Agents.Advisor.Model, s.cfg.Agents.Advisor.Reasoning = route.Provider, route.Model, route.Reasoning
+	} else if entry.Scope == "fusion" {
+		s.cfg.Agents.Fusion = route
 	} else if entry.Scope == "vibe" {
 		if entry.Role == "fast" {
 			s.cfg.Agents.Vibe.Fast = route
@@ -917,29 +927,46 @@ func reconciledStatus(value string) (agentruntime.ActionAttemptStatus, error) {
 }
 
 func (s *Service) createSession(ctx context.Context, title string) error {
-	if s.sessions == nil {
-		return fmt.Errorf("session store is unavailable")
-	}
-	id, err := randomID("session")
+	projection, err := s.NewSessionProjection(ctx, title)
 	if err != nil {
 		return err
 	}
-	if title == "" {
-		title = "New session"
-	}
-	projection := session.Projection{Session: session.Session{
-		ID: id, Title: title, ProviderID: s.cfg.Defaults.Provider, ModelID: s.cfg.Defaults.Model,
-		Reasoning: s.cfg.Defaults.Reasoning, AgentMode: s.cfg.Defaults.AgentMode,
-	}}
-	s.emit(ctx, Event{Kind: EventSessionLoaded, SessionID: id, State: "new", Data: sessionProjectionData(projection, "[]")})
-	if err := s.switchSessionHooks(ctx, id, "clear", projection.Session.ModelID); err != nil {
+	legacy := session.Projection{Session: projection.Session}
+	s.emit(ctx, Event{Kind: EventSessionLoaded, SessionID: projection.Session.ID, State: "new", Data: sessionProjectionData(legacy, "[]")})
+	if err := s.switchSessionHooks(ctx, projection.Session.ID, "clear", projection.Session.ModelID); err != nil {
 		return err
 	}
 	s.mu.Lock()
-	s.currentSession = id
+	s.currentSession = projection.Session.ID
 	s.mu.Unlock()
-	_ = s.emitContextProfile(ctx, id)
+	_ = s.emitContextProfile(ctx, projection.Session.ID)
 	return nil
+}
+
+// NewSessionProjection creates a client-local empty session. It remains
+// ephemeral until StartConfiguredTurn persists its first canonical user block.
+func (s *Service) NewSessionProjection(_ context.Context, title string) (SessionProjection, error) {
+	if s.sessions == nil {
+		return SessionProjection{}, fmt.Errorf("session store is unavailable")
+	}
+	id, err := randomID("session")
+	if err != nil {
+		return SessionProjection{}, err
+	}
+	if strings.TrimSpace(title) == "" {
+		title = "New session"
+	}
+	return SessionProjection{
+		Version: SessionProjectionVersion,
+		Session: session.Session{
+			ID: id, Workspace: s.cfg.Workspace.Root, Title: title,
+			ProviderID: s.cfg.Defaults.Provider, ModelID: s.cfg.Defaults.Model,
+			Reasoning: s.cfg.Defaults.Reasoning, AgentMode: s.cfg.Defaults.AgentMode,
+		},
+		Blocks: []TranscriptBlock{}, ToolRecords: []session.ToolRecord{},
+		Todo:           session.TodoList{Phases: []session.TodoPhase{}},
+		AgentSnapshots: []AgentSnapshotPayload{}, Usage: session.Usage{},
+	}, nil
 }
 
 func (s *Service) markSessionUnread(ctx context.Context, sessionID string) error {
@@ -978,18 +1005,26 @@ func (s *Service) ForkSession(ctx context.Context, sourceID string, activate boo
 }
 
 func (s *Service) emitSession(ctx context.Context, id string) error {
-	modelID, err := s.emitSessionProjection(ctx, id, "loaded", true)
+	_, err := s.emitSessionEvent(ctx, id)
+	return err
+}
+
+func (s *Service) emitSessionEvent(ctx context.Context, id string) (Event, error) {
+	event, modelID, err := s.buildSessionProjectionEvent(ctx, id, "loaded", true)
 	if err != nil {
-		return err
+		return Event{}, err
 	}
+	s.emit(ctx, event)
 	if err := s.switchSessionHooks(ctx, id, "resume", modelID); err != nil {
-		return err
+		return Event{}, err
 	}
 	s.mu.Lock()
 	s.currentSession = id
 	s.mu.Unlock()
-	_ = s.emitContextProfile(ctx, id)
-	return nil
+	// Session list unread dots and Inspector context occupancy are useful, but
+	// they must not delay the initiating window's durable transcript readback.
+	s.scheduleSessionSwitchFollowUp(id)
+	return event, nil
 }
 
 func (s *Service) emitSessionProjection(ctx context.Context, id, state string, activate bool) (string, error) {
@@ -999,6 +1034,70 @@ func (s *Service) emitSessionProjection(ctx context.Context, id, state string, a
 	}
 	s.emit(ctx, event)
 	return modelID, nil
+}
+
+// ResumeSession activates a durable conversation once and returns the same
+// projection event the runtime broadcasts. Desktop navigation uses this single
+// readback instead of ExecuteAction plus a second SessionProjection rebuild.
+func (s *Service) ResumeSession(ctx context.Context, id string) (Event, error) {
+	if s.sessions == nil {
+		return Event{}, fmt.Errorf("session store is unavailable")
+	}
+	if err := s.sessions.SetUIState(ctx, id, "unread", false); err != nil {
+		return Event{}, err
+	}
+	if err := s.sessions.SetArchived(ctx, id, false); err != nil {
+		return Event{}, err
+	}
+	return s.emitSessionEvent(ctx, id)
+}
+
+// SelectSession returns a client-local navigation projection. It records the
+// durable workspace preference without changing daemon-global hooks or
+// broadcasting a session_loaded event that would navigate other renderers.
+func (s *Service) SelectSession(ctx context.Context, id string) (Event, error) {
+	if s.sessions == nil {
+		return Event{}, fmt.Errorf("session store is unavailable")
+	}
+	if err := s.sessions.SetUIState(ctx, id, "unread", false); err != nil {
+		return Event{}, err
+	}
+	if err := s.sessions.SetArchived(ctx, id, false); err != nil {
+		return Event{}, err
+	}
+	event, _, err := s.buildSessionProjectionEvent(ctx, id, "loaded", true)
+	if err != nil {
+		return Event{}, err
+	}
+	s.scheduleSessionSwitchFollowUp(id)
+	return event, nil
+}
+
+// PrepareSessionSelection updates durable navigation state without building the
+// legacy session_loaded projection. Typed desktop clients request one
+// RuntimeProjection immediately afterward.
+func (s *Service) PrepareSessionSelection(ctx context.Context, id string) error {
+	if s.sessions == nil {
+		return fmt.Errorf("session store is unavailable")
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return fmt.Errorf("session id is required")
+	}
+	if _, err := s.sessions.LoadSession(ctx, id); err != nil {
+		return err
+	}
+	if err := s.sessions.SetUIState(ctx, id, "unread", false); err != nil {
+		return err
+	}
+	if err := s.sessions.SetArchived(ctx, id, false); err != nil {
+		return err
+	}
+	if err := s.rememberWorkspaceSession(ctx, id); err != nil {
+		return err
+	}
+	s.scheduleSessionSwitchFollowUp(id)
+	return nil
 }
 
 // SessionProjection returns the same durable projection used by the event
@@ -1017,7 +1116,9 @@ func (s *Service) buildSessionProjectionEvent(ctx context.Context, id, state str
 	if id == "" {
 		return Event{}, "", fmt.Errorf("session id is required")
 	}
-	projection, err := s.sessions.LoadProjection(ctx, id)
+	// Navigation paint never needs ModelHistory. Keep the expensive provider
+	// history blob off the session-switch critical path (see LoadDisplayProjection).
+	projection, err := s.sessions.LoadDisplayProjection(ctx, id)
 	if err != nil {
 		return Event{}, "", err
 	}
@@ -1025,6 +1126,10 @@ func (s *Service) buildSessionProjectionEvent(ctx context.Context, id, state str
 		if err := s.rememberWorkspaceSession(ctx, id); err != nil {
 			return Event{}, "", err
 		}
+	}
+	agents, err := s.projectFusionSession(ctx, &projection)
+	if err != nil {
+		return Event{}, "", err
 	}
 	blocks, err := json.Marshal(projection.Blocks)
 	if err != nil {
@@ -1040,12 +1145,33 @@ func (s *Service) buildSessionProjectionEvent(ctx context.Context, id, state str
 	}
 	s.rememberSessionUsage(id, projection.Usage)
 	data := sessionProjectionData(projection, string(blocks))
+	if title := strings.TrimSpace(projection.Session.Title); title != "" {
+		data["title"] = title
+	}
 	s.addActiveRunProjection(data, id)
 	event := Event{
 		Kind: EventSessionLoaded, SessionID: id, State: state,
-		Data: data, AgentSnapshots: s.subagentSnapshots(ctx, id), Todo: &todo, Recap: currentRecap,
+		Data: data, AgentSnapshots: agents, Todo: &todo, Recap: currentRecap,
 	}
 	return event, projection.Session.ModelID, nil
+}
+
+func (s *Service) scheduleSessionSwitchFollowUp(sessionID string) {
+	if s == nil {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
+		defer cancel()
+		_ = s.emitSessionList(ctx)
+		s.mu.Lock()
+		current := s.currentSession
+		s.mu.Unlock()
+		if current != sessionID {
+			return
+		}
+		_ = s.emitContextProfile(ctx, sessionID)
+	}()
 }
 
 func (s *Service) addActiveRunProjection(data map[string]string, sessionID string) {
@@ -1062,24 +1188,6 @@ func (s *Service) addActiveRunProjection(data map[string]string, sessionID strin
 		data["globalActiveRunID"] = activeRunID
 		data["globalActiveSessionID"] = activeSessionID
 	}
-}
-
-func (s *Service) subagentSnapshots(ctx context.Context, sessionID string) []AgentSnapshotPayload {
-	if s.providers == nil {
-		return nil
-	}
-	snapshots := s.providers.ListSubagents(ctx, sessionID)
-	result := make([]AgentSnapshotPayload, 0, len(snapshots))
-	for _, snapshot := range snapshots {
-		if !snapshot.Found {
-			continue
-		}
-		event := subagentStateEvent(snapshot.Run, snapshot.Run.Summary)
-		result = append(result, AgentSnapshotPayload{
-			ID: snapshot.Run.ID, State: string(snapshot.Run.State), Summary: snapshot.Run.Summary, Agent: *event.Agent,
-		})
-	}
-	return result
 }
 
 func archiveInactiveDays(raw string) (int, error) {
@@ -1176,6 +1284,11 @@ func (s *Service) login(ctx context.Context, provider string) error {
 				return openBrowserURL(verificationURL)
 			})
 		}
+	case "devin":
+		if mode != "" {
+			return fmt.Errorf("Devin uses browser sign-in")
+		}
+		account, err = s.authentication.LoginDevin(ctx, openBrowserURL)
 	case "cursor":
 		if mode == "import" {
 			account, err = s.authentication.ImportCursorToken(ctx, os.Getenv("CURSOR_ACCESS_TOKEN"), os.Getenv("CURSOR_REFRESH_TOKEN"))
@@ -1183,7 +1296,7 @@ func (s *Service) login(ctx context.Context, provider string) error {
 			account, err = s.authentication.LoginCursor(ctx, openBrowserURL)
 		}
 	default:
-		return fmt.Errorf("provider must be chatgpt, grok, or cursor")
+		return fmt.Errorf("provider must be chatgpt, grok, cursor, or devin")
 	}
 	if err != nil {
 		return err
@@ -1192,18 +1305,9 @@ func (s *Service) login(ctx context.Context, provider string) error {
 		"provider": account.Provider, "accountID": account.ID, "email": account.Email, "displayName": account.DisplayName, "plan": account.Plan,
 	}})
 	s.emitApprovalMode(ctx)
-	models, err := s.catalog.List(ctx, account.Provider, account.ID, true)
-	if err != nil {
+	if err := s.refreshOneSubscriptionCatalog(ctx, account.Provider, account.ID); err != nil {
 		return fmt.Errorf("load %s model catalog: %w", account.Provider, err)
 	}
-	models = s.catalog.EnrichWithModelsDev(ctx, models)
-
-	models.Models = s.catalogModelsWithAvailability(account.Provider, models.Models)
-	encoded, err := json.Marshal(models.Models)
-	if err != nil {
-		return err
-	}
-	s.emit(ctx, Event{Kind: EventModelCatalog, State: "fresh", Data: map[string]string{"provider": account.Provider, "accountID": account.ID, "models": string(encoded)}})
 	return s.emitModelProviders(ctx, "auth_updated")
 }
 
@@ -1211,7 +1315,7 @@ func (s *Service) emitAuthCatalog(ctx context.Context) {
 	if s.authentication == nil || s.catalog == nil {
 		return
 	}
-	for _, provider := range []string{"chatgpt", "grok", "cursor"} {
+	for _, provider := range config.SubscriptionProviderIDs() {
 		account, ok := s.activeSubscriptionAccount(ctx, provider)
 		if !ok {
 			continue

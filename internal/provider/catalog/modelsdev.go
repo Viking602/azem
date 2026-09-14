@@ -23,6 +23,7 @@ type ModelsDevProviderHint struct {
 type ModelsDevCatalog struct {
 	providers map[string]modelsDevProvider
 	byID      map[string][]modelsDevMatch
+	byName    map[string][]modelsDevMatch
 }
 
 type modelsDevProvider struct {
@@ -87,7 +88,15 @@ func FetchModelsDev(ctx context.Context, client *http.Client, endpoint string) (
 	if err := json.NewDecoder(io.LimitReader(response.Body, 64<<20)).Decode(&providers); err != nil {
 		return ModelsDevCatalog{}, err
 	}
-	catalog := ModelsDevCatalog{providers: providers, byID: make(map[string][]modelsDevMatch)}
+	return indexModelsDev(providers), nil
+}
+
+func indexModelsDev(providers map[string]modelsDevProvider) ModelsDevCatalog {
+	catalog := ModelsDevCatalog{
+		providers: providers,
+		byID:      make(map[string][]modelsDevMatch),
+		byName:    make(map[string][]modelsDevMatch),
+	}
 	for providerID, provider := range providers {
 		for key, model := range provider.Models {
 			if model.ID == "" {
@@ -97,9 +106,12 @@ func FetchModelsDev(ctx context.Context, client *http.Client, endpoint string) (
 			for _, candidate := range modelIDKeys(key, model.ID) {
 				catalog.byID[candidate] = append(catalog.byID[candidate], match)
 			}
+			if name := catalogNameKey(model.Name); name != "" {
+				catalog.byName[name] = append(catalog.byName[name], match)
+			}
 		}
 	}
-	return catalog, nil
+	return catalog
 }
 
 func (c ModelsDevCatalog) Enrich(hint ModelsDevProviderHint, models []Model) (string, int) {
@@ -176,24 +188,35 @@ func (c ModelsDevCatalog) match(providerID string, model Model) (modelsDevModel,
 	if want == "" {
 		return modelsDevModel{}, false
 	}
-	for id, provider := range c.providers {
-		for _, metadata := range provider.Models {
-			if catalogNameKey(metadata.Name) != want {
-				continue
-			}
-			score := 40 + friendlyNameScore(metadata.Name, metadata.ID)
-			if id == providerID {
-				score += 100
-			}
-			if lab != "" && id == lab {
-				score += 200
-			}
-			if score > bestScore {
-				bestScore, best = score, metadata
-			}
+	for _, match := range c.nameMatches(want) {
+		score := 40 + friendlyNameScore(match.model.Name, match.model.ID)
+		if match.provider == providerID {
+			score += 100
+		}
+		if lab != "" && match.provider == lab {
+			score += 200
+		}
+		if score > bestScore {
+			bestScore, best = score, match.model
 		}
 	}
 	return best, bestScore >= 0
+}
+
+func (c ModelsDevCatalog) nameMatches(key string) []modelsDevMatch {
+	if len(c.byName) > 0 {
+		return c.byName[key]
+	}
+	var matches []modelsDevMatch
+	for id, provider := range c.providers {
+		for _, metadata := range provider.Models {
+			if catalogNameKey(metadata.Name) != key {
+				continue
+			}
+			matches = append(matches, modelsDevMatch{provider: id, model: metadata})
+		}
+	}
+	return matches
 }
 
 func enrichModelFromModelsDev(model *Model, metadata modelsDevModel) {
@@ -299,14 +322,16 @@ func friendlyNameScore(name, id string) int {
 	return score
 }
 
+var catalogNameSkip = map[string]bool{
+	"thinking": true, "fast": true, "high": true, "low": true, "medium": true,
+	"max": true, "minimal": true, "none": true, "xhigh": true, "1m": true,
+}
+
 func catalogNameKey(name string) string {
 	name = strings.ToLower(strings.TrimSpace(name))
 	name = strings.ReplaceAll(name, "(no zdr)", " ")
 	fields := strings.Fields(name)
-	skip := map[string]bool{
-		"thinking": true, "fast": true, "high": true, "low": true, "medium": true,
-		"max": true, "minimal": true, "none": true, "xhigh": true, "1m": true,
-	}
+	skip := catalogNameSkip
 	for len(fields) > 1 {
 		last := fields[len(fields)-1]
 		if last == "high" && fields[len(fields)-2] == "extra" {

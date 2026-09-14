@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"os"
 	"sort"
 	"strings"
@@ -14,6 +15,8 @@ import (
 	"github.com/Viking602/azem/internal/app"
 	backgroundservice "github.com/Viking602/azem/internal/background"
 	"github.com/Viking602/azem/internal/collab"
+	"github.com/Viking602/azem/internal/config"
+	"github.com/Viking602/azem/internal/desktopclient"
 	"github.com/Viking602/azem/internal/i18n"
 	"github.com/Viking602/azem/internal/memory"
 	"github.com/Viking602/azem/internal/provider/catalog"
@@ -54,6 +57,10 @@ type Block struct {
 	ID          string
 	Kind        BlockKind
 	RunID       string
+	Sequence    int64
+	AgentID     string
+	TextPhase   string
+	Data        map[string]string
 	ToolCallID  string
 	UserInputID string
 	PlanID      string
@@ -181,6 +188,7 @@ const (
 	OverlayPlan                Overlay = "plan"
 	OverlayCancel              Overlay = "cancel"
 	OverlayDiff                Overlay = "diff"
+	OverlayQueue               Overlay = "queue"
 	OverlayAgents              Overlay = "agents"
 	OverlayMemory              Overlay = "memory"
 	OverlayRecap               Overlay = "recap"
@@ -396,6 +404,11 @@ type AppModel struct {
 	runID                    string
 	lastRunID                string
 	transcript               []Block
+	connection               desktopclient.ConnectionProjection
+	lastWireCursor           uint64
+	runs                     map[string]app.RunProjection
+	promptQueues             map[string]session.PromptQueueV1
+	pendingControls          []app.PendingControlProjection
 	transcriptLayout         *transcriptLayoutCache
 	agentDetailLayout        *transcriptLayoutCache
 	recapLayout              *recapLayoutCache
@@ -418,6 +431,8 @@ type AppModel struct {
 	settingsExpanded         map[string]bool
 	subagentConcurrency      int
 	chatGPTFastMode          bool
+	deliveryMode             string
+	queueEditItemID          string
 	provider                 string
 	model                    string
 	reasoning                string
@@ -433,6 +448,7 @@ type AppModel struct {
 	status                   string
 	approvalMode             ApprovalMode
 	autoReviewAvailable      bool
+	cancelWhenRunStarts      bool
 	errorBanner              string
 	quitting                 bool
 	reducedMotion            bool
@@ -463,6 +479,7 @@ type AppModel struct {
 	backgroundPollGen        uint64
 	models                   []ModelChoice
 	modelsByProvider         map[string][]ModelChoice
+	modelProviders           []app.ModelProviderEntry
 	modelRoutes              []app.ModelRouteEntry
 	pendingModelRoute        *pendingModelRoute
 	pendingSessionModel      *pendingSessionModel
@@ -552,26 +569,23 @@ func NewModel(runtime Runtime, workspace string, provider string, model string, 
 	return AppModel{
 		runtime: runtime, initialCmd: focus, theme: theme, catalog: catalog, composer: composer, modelSearch: modelSearch, settingsSearch: settingsSearch,
 		width: 80, height: 24, sessionID: sessionID, provider: provider, model: model,
-		reasoning: reasoning, agentMode: mode, workspace: workspace, branch: resolveGitBranch(workspace), status: "Ready", approvalMode: approvalMode, autoReviewAvailable: autoReviewAvailable, subagentConcurrency: 2,
+		reasoning: reasoning, agentMode: mode, workspace: workspace, branch: resolveGitBranch(workspace), status: "Ready", approvalMode: approvalMode, autoReviewAvailable: autoReviewAvailable, subagentConcurrency: 2, deliveryMode: "queue",
 		focus: focusComposer, transcriptCursor: -1, transcriptHover: -1, transcriptLayout: &transcriptLayoutCache{}, agentDetailLayout: &transcriptLayoutCache{}, recapLayout: &recapLayoutCache{}, paint: &paintCache{}, contextReportCache: &contextReportRenderCache{}, settingsExpanded: make(map[string]bool),
-		auth: make(map[string]AuthView), modelsByProvider: make(map[string][]ModelChoice),
+		connection: desktopclient.ConnectionProjection{State: desktopclient.ConnectionConnected},
+		runs:       make(map[string]app.RunProjection), promptQueues: make(map[string]session.PromptQueueV1),
+		pendingControls: []app.PendingControlProjection{},
+		auth:            make(map[string]AuthView), modelsByProvider: make(map[string][]ModelChoice),
 		reducedMotion: os.Getenv("AZEM_REDUCED_MOTION") == "1" || os.Getenv("REDUCED_MOTION") == "1",
 	}
 }
 
-type approvalModeStateRuntime interface {
-	ApprovalModeState() (ApprovalMode, bool)
-}
-
 func approvalModeState(runtime Runtime) (ApprovalMode, bool) {
-	if source, ok := runtime.(approvalModeStateRuntime); ok {
-		mode, autoReviewAvailable := source.ApprovalModeState()
-		if mode == ApprovalModeAutoReview && !autoReviewAvailable {
-			return ApprovalModePrompt, false
-		}
-		if mode == ApprovalModePrompt || mode == ApprovalModeAutoReview || mode == ApprovalModeYolo {
-			return mode, autoReviewAvailable
-		}
+	mode, autoReviewAvailable := runtime.ApprovalModeState()
+	if mode == ApprovalModeAutoReview && !autoReviewAvailable {
+		return ApprovalModePrompt, false
+	}
+	if mode == ApprovalModePrompt || mode == ApprovalModeAutoReview || mode == ApprovalModeYolo {
+		return mode, autoReviewAvailable
 	}
 	return ApprovalModePrompt, false
 }
@@ -634,7 +648,11 @@ func (m AppModel) evidenceStatusLabel(status string) string {
 }
 
 func (m AppModel) Init() tea.Cmd {
-	return tea.Batch(m.initialCmd, waitForAppEvent(m.runtime))
+	return tea.Batch(
+		m.initialCmd,
+		executeAction(context.Background(), m.runtime, Action{Kind: ActionListModelProviders}),
+		waitForAppEvent(m.runtime),
+	)
 }
 
 func (m *AppModel) openOverlay(overlay Overlay) {
@@ -775,6 +793,42 @@ func (m *AppModel) moveTranscriptCursor(delta int) {
 		position += len(indices)
 	}
 	m.transcriptCursor = indices[position]
+}
+
+var subscriptionProviderIDs = config.SubscriptionProviderIDs()
+
+func (m AppModel) providerIDs(loginOnly bool) []string {
+	if loginOnly {
+		return append([]string(nil), subscriptionProviderIDs...)
+	}
+	if len(m.modelProviders) == 0 {
+		return append([]string(nil), subscriptionProviderIDs...)
+	}
+	providers := make([]string, 0, len(m.modelProviders))
+	for _, provider := range m.modelProviders {
+		if provider.Enabled && len(m.modelsByProvider[provider.ID]) > 0 {
+			providers = append(providers, provider.ID)
+		}
+	}
+	return providers
+}
+
+func (m AppModel) modelProvider(providerID string) (app.ModelProviderEntry, bool) {
+	for _, provider := range m.modelProviders {
+		if provider.ID == providerID {
+			return provider, true
+		}
+	}
+	return app.ModelProviderEntry{}, false
+}
+
+func (m AppModel) providerAvailable(providerID string) bool {
+	for _, candidate := range m.providerIDs(false) {
+		if candidate == providerID {
+			return true
+		}
+	}
+	return false
 }
 
 func (m AppModel) modelPickerEntries() []modelPickerEntry {

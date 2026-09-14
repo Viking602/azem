@@ -1,12 +1,132 @@
 use super::*;
+pub(super) mod diff;
+pub(super) mod highlight;
 pub(super) mod process;
 use process::{
-    is_agent_block, is_hidden_process_block, is_process_tool_block, is_thinking_text,
-    pending_process_entry, process_detail_row, thinking_belongs_to_tool_group,
+    fusion_source_caption, is_agent_block, is_hidden_process_block, is_process_tool_block,
+    is_thinking_text, pending_process_entry, process_detail_row, thinking_belongs_to_tool_group,
     thinking_process_entry, tool_group_entry,
 };
 
 pub(crate) fn timeline_entry(
+    index: usize,
+    blocks: &[Block],
+    style: (ThemePalette, Locale, bool, f32, i64),
+    agents: &[serde_json::Value],
+    expansion: Rc<RefCell<ProcessExpansion>>,
+    owner: Entity<AzemWindow>,
+    reply_actions: Option<&ReplyActionsSnapshot>,
+) -> gpui::AnyElement {
+    let (palette, locale, reduced_motion, gutter, elapsed_ms) = style;
+    if let Some(range) = process::completed_process_range(blocks, index) {
+        if index != range.start {
+            return div().h(px(0.)).into_any_element();
+        }
+        let key = format!("completed-turn:{}:{index}", blocks[range.end].run_id);
+        // A live accepted answer collapses the process from its visible state;
+        // a restored historical answer starts closed without replaying motion.
+        if blocks[range.end].state.as_ref() == "complete" {
+            expansion
+                .borrow_mut()
+                .disclosures
+                .entry(key.clone())
+                .or_insert(crate::DisclosureMotion {
+                    from: 1.,
+                    target: 1.,
+                    started: std::time::Instant::now(),
+                    height: 0.,
+                    index,
+                });
+        }
+        let expanded = expansion.borrow().is_expanded(&key);
+        let summary =
+            process::run_duration_summary(&blocks[range.clone()], blocks.get(range.end), locale);
+        let header = div().w_full().px(px(gutter)).flex().justify_center().child(
+            process::turn_status_header(
+                index,
+                summary,
+                false,
+                (palette, reduced_motion, (None, 0)),
+                Some((key.clone(), expanded)),
+                expansion.clone(),
+                owner.clone(),
+            ),
+        );
+        return div()
+            .id(("completed-process", index))
+            .w_full()
+            .min_w_0()
+            .child(header)
+            .child(
+                div().w_full().px(px(gutter)).flex().justify_center().child(
+                    div()
+                        .w_full()
+                        .max_w(px(CHAT_COLUMN_MAX_WIDTH))
+                        .h(px(1.))
+                        .bg(palette.border),
+                ),
+            )
+            .child(disclosure_body(
+                key,
+                index,
+                expanded,
+                reduced_motion,
+                div().w_full().children(range.map(|child| {
+                    timeline_entry_unfolded(
+                        child,
+                        blocks,
+                        style,
+                        agents,
+                        expansion.clone(),
+                        owner.clone(),
+                        None,
+                    )
+                })),
+                expansion,
+                owner,
+            ))
+            .into_any_element();
+    }
+    let live_header = elapsed_ms > 0
+        && index > 0
+        && index < blocks.len()
+        && blocks[index - 1].kind.as_ref() == "user"
+        && !blocks[index..]
+            .iter()
+            .any(|block| block.kind.as_ref() == "user");
+    let entry = timeline_entry_unfolded(
+        index,
+        blocks,
+        style,
+        agents,
+        expansion,
+        owner,
+        reply_actions,
+    );
+    if live_header {
+        div()
+            .w_full()
+            .child(
+                div().px(px(gutter)).flex().justify_center().child(
+                    div()
+                        .w_full()
+                        .max_w(px(CHAT_COLUMN_MAX_WIDTH))
+                        .py_2()
+                        .border_b_1()
+                        .border_color(palette.border)
+                        .text_size(px(12.))
+                        .text_color(palette.faint)
+                        .child(process::processing_status(elapsed_ms, locale)),
+                ),
+            )
+            .child(entry)
+            .into_any_element()
+    } else {
+        entry
+    }
+}
+
+pub(super) fn timeline_entry_unfolded(
     index: usize,
     blocks: &[Block],
     style: (ThemePalette, Locale, bool, f32, i64),
@@ -98,6 +218,7 @@ pub(crate) fn timeline_entry(
         == Some(hover_key.as_str());
     let row = if kind == "user" {
         let time = message_time(block);
+        let attachments = user_attachment_previews(index, block, palette);
         let bubble = div()
             .w_full()
             .min_w_0()
@@ -107,22 +228,49 @@ pub(crate) fn timeline_entry(
             .child(
                 div()
                     .min_w_0()
-                    .max_w(px(680.))
+                    .max_w(relative(0.8))
                     .flex()
                     .flex_col()
                     .items_end()
-                    .child(
-                        div()
-                            .px_3()
-                            .py_2()
-                            .rounded(px(16.))
-                            .bg(palette.paper_muted)
-                            .text_color(palette.ink)
-                            .text_size(px(palette.chat_font_size))
-                            .line_height(px(palette.chat_font_size * 1.6))
-                            .whitespace_normal()
-                            .child(block.content.clone()),
-                    )
+                    .gap_2()
+                    .when(!attachments.is_empty(), |column| {
+                        column.child(
+                            div()
+                                .id(("user-attachments", index))
+                                .flex()
+                                .flex_wrap()
+                                .justify_end()
+                                .gap_2()
+                                .children(attachments),
+                        )
+                    })
+                    .when(!block.content.is_empty(), |column| {
+                        column.child(
+                            div()
+                                .px_3()
+                                .py_2()
+                                .rounded(px(16.))
+                                .bg(palette.paper_muted)
+                                .text_color(palette.ink)
+                                .text_size(px(palette.chat_font_size))
+                                .line_height(px(palette.chat_font_size * 1.6))
+                                .whitespace_normal()
+                                .child(crate::selectable_text::selectable(
+                                    ("user-selection", index),
+                                    block.content.clone(),
+                                    {
+                                        let text = block.content.clone();
+                                        move |selection| {
+                                            crate::selectable_text::selection_text(
+                                                gpui::StyledText::new(text),
+                                                selection,
+                                            )
+                                            .into_any_element()
+                                        }
+                                    },
+                                )),
+                        )
+                    })
                     .when_some(time, |bubble, time| {
                         bubble.child(
                             div()
@@ -142,12 +290,11 @@ pub(crate) fn timeline_entry(
             bubble
                 .with_animation(
                     ("user-message-submit", index),
-                    Animation::new(USER_MESSAGE_SUBMIT_TRANSITION)
-                        .with_easing(gpui::ease_out_quint()),
+                    Animation::new(USER_MESSAGE_SUBMIT_TRANSITION).with_easing(crate::css_ease_out),
                     |bubble, progress| {
                         bubble
                             .relative()
-                            .top(px(8. * (1. - progress)))
+                            .top(px(3. * (1. - progress)))
                             .opacity(progress)
                     },
                 )
@@ -188,6 +335,7 @@ pub(crate) fn timeline_entry(
             })
             .text_size(px(palette.chat_font_size))
             .line_height(px(palette.chat_font_size * 1.6))
+            .children(fusion_source_caption(block, palette))
             .child(markdown_view(
                 index,
                 content,
@@ -456,8 +604,14 @@ fn reply_footer(
             },
         ));
     }
-    if show_time && let Some(time) = message_time(block) {
-        footer = footer.child(div().ml_2().text_color(palette.faint).child(time));
+    if let Some(time) = message_time(block) {
+        footer = footer.child(
+            div()
+                .ml_2()
+                .text_color(palette.faint)
+                .opacity(if show_time { 1. } else { 0. })
+                .child(time),
+        );
     }
     if let Some(kind) = popover {
         footer = footer.child(reply_metadata_popover(
@@ -543,6 +697,60 @@ fn reply_key(index: usize, block: &Block) -> String {
 
 pub(super) fn timeline_message_key(index: usize, block: &Block) -> String {
     format!("{}:{}", block.kind, reply_key(index, block))
+}
+
+#[cfg(test)]
+pub(super) fn user_attachment_sources(block: &Block) -> Vec<String> {
+    crate::block_attachments(block)
+        .iter()
+        .filter_map(crate::attachment_preview_path)
+        .map(str::to_owned)
+        .collect()
+}
+
+fn user_attachment_previews(
+    index: usize,
+    block: &Block,
+    palette: ThemePalette,
+) -> Vec<gpui::AnyElement> {
+    crate::block_attachments(block)
+        .iter()
+        .enumerate()
+        .map(|(attachment_index, attachment)| {
+            let path = crate::attachment_preview_path(attachment)
+                .unwrap_or_default()
+                .to_string();
+            let name = attachment
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("image")
+                .to_string();
+            div()
+                .id(format!("user-attachment-{index}-{attachment_index}"))
+                .role(Role::Button)
+                .aria_label(name)
+                .w(px(168.))
+                .h(px(112.))
+                .flex_none()
+                .rounded(px(12.))
+                .border_1()
+                .border_color(palette.border)
+                .bg(palette.paper)
+                .overflow_hidden()
+                .cursor_pointer()
+                .when(!path.is_empty() && !path.starts_with("data:"), |preview| {
+                    preview.on_click(move |_, _, cx| {
+                        cx.open_with_system(std::path::Path::new(&path));
+                    })
+                })
+                .child(crate::attachment_image_preview(
+                    crate::attachment_preview_path(attachment),
+                    palette,
+                    24.,
+                ))
+                .into_any_element()
+        })
+        .collect()
 }
 
 pub(super) fn message_time(block: &Block) -> Option<String> {
@@ -763,4 +971,54 @@ fn reply_metadata_popover(
             )
             .into_any_element()
     }
+}
+
+pub(in crate::surfaces) fn disclosure_body(
+    key: String,
+    index: usize,
+    open: bool,
+    reduced: bool,
+    content: impl IntoElement,
+    expansion: Rc<RefCell<ProcessExpansion>>,
+    owner: Entity<AzemWindow>,
+) -> gpui::AnyElement {
+    let (progress, height, moving) = expansion
+        .borrow_mut()
+        .disclosure(&key, index, open, reduced);
+    if !open && !moving {
+        return div().h(px(0.)).into_any_element();
+    }
+    let measure_key = key;
+    div()
+        .w_full()
+        .min_w_0()
+        .overflow_hidden()
+        .when(moving, |body| body.h(px(height * progress)))
+        .opacity(progress)
+        .on_children_prepainted(move |bounds, window, cx| {
+            if moving {
+                window.request_animation_frame();
+            }
+            let Some(bounds) = bounds.first() else {
+                return;
+            };
+            let measured = f32::from(bounds.size.height);
+            let mut state = expansion.borrow_mut();
+            let Some(motion) = state.disclosures.get_mut(&measure_key) else {
+                return;
+            };
+            if (motion.height - measured).abs() > 0.5 {
+                motion.height = measured;
+                drop(state);
+                let owner = owner.clone();
+                cx.defer(move |cx| {
+                    owner.update(cx, |this, cx| {
+                        this.refresh_transcript_layout(index);
+                        cx.notify();
+                    });
+                });
+            }
+        })
+        .child(div().w_full().flex_shrink_0().child(content))
+        .into_any_element()
 }

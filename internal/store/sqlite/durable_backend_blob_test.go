@@ -226,6 +226,29 @@ func TestDurableBackendOffloadsCheckpointAndResultAcrossReopen(t *testing.T) {
 	if checkpointDigest == "" {
 		t.Fatal("large continuation stayed inline")
 	}
+	concrete, ok := backend.(*DurableBackend)
+	if !ok {
+		t.Fatal("expected sqlite durable backend")
+	}
+	peekStarted := time.Now()
+	status, err := concrete.PeekExecutionStatus(ctx, "checkpoint-result")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != durable.ExecutionStatusRunning {
+		t.Fatalf("peek status=%q", status)
+	}
+	if elapsed := time.Since(peekStarted); elapsed > 50*time.Millisecond {
+		t.Fatalf("status peek loaded checkpoint blob in %s", elapsed)
+	}
+	stateStarted := time.Now()
+	state, err := concrete.LoadExecutionState(ctx, "checkpoint-result")
+	if err != nil || state.Checkpoint == nil || state.Checkpoint.Sequence != 1 {
+		t.Fatalf("execution state=%+v err=%v", state, err)
+	}
+	if elapsed := time.Since(stateStarted); elapsed > time.Second {
+		t.Fatalf("execution state load took %s", elapsed)
+	}
 	result := hyagent.Result{Text: strings.Repeat("terminal result ", 1_000), Valid: true}
 	resultHash, err := durable.HashResult(result)
 	if err != nil {

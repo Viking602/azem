@@ -223,9 +223,10 @@ func sessionBlobReferenced(ctx context.Context, queryer blobReferenceQueryer, di
 		UNION ALL SELECT 1 FROM session_projections
 			WHERE model_history_sha256 = ? OR json_extract(CAST(model_history AS TEXT), '$.blob') = ?
 		UNION ALL SELECT 1 FROM subagent_runs WHERE transcript_sha256 = ? OR output_sha256 = ?
+		UNION ALL SELECT 1 FROM session_prompt_queues WHERE items_digest = ?
 		UNION ALL SELECT 1 FROM events WHERE data_sha256 = ?
 		UNION ALL SELECT 1 FROM records WHERE data_sha256 = ?
-	)`, digest, digest, digest, digest, digest, digest, digest, digest, digest, digest).Scan(&referenced)
+	)`, digest, digest, digest, digest, digest, digest, digest, digest, digest, digest, digest).Scan(&referenced)
 	return referenced, err
 }
 

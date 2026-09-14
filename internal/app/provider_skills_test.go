@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -70,6 +71,40 @@ func TestProviderRuntimeManualSkillActivation(t *testing.T) {
 	waitForProviderRun(t, harness.service, runID)
 	if harness.calls.Load() != 1 {
 		t.Fatalf("provider calls = %d, want 1", harness.calls.Load())
+	}
+}
+
+func TestProviderRuntimeUsesCurrentBundledSkillBody(t *testing.T) {
+	for _, name := range []string{"verify", "simplify", "skill-author"} {
+		t.Run(name, func(t *testing.T) {
+			var harness skillRuntimeHarness
+			harness = newSkillRuntimeHarness(t, "---\nname: demo\ndescription: demo\n---\ndemo\n", nil, func(call int, body string, writer http.ResponseWriter) {
+				current, ok := harness.catalog.Snapshot().Registry.Get(name)
+				if !ok || strings.TrimSpace(current.Body) == "" {
+					t.Error("bundled skill body is missing")
+				} else {
+					encoded, err := json.Marshal(current.Body)
+					if err != nil {
+						t.Error(err)
+					} else if !strings.Contains(body, string(encoded[1:len(encoded)-1])) {
+						t.Error("provider request omitted the current bundled skill body")
+					}
+				}
+				writeProviderText(writer, "response-bundled", "review complete")
+			})
+			runID, err := harness.service.StartConfiguredTurn(TurnRequest{
+				SessionID: "bundled-" + name, Prompt: "Review only; do not change files.",
+				Provider: "chatgpt", Model: "gpt-skill", Reasoning: "minimal",
+				AgentMode: "single", ActiveSkills: []string{name},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			waitForProviderRun(t, harness.service, runID)
+			if harness.calls.Load() != 1 {
+				t.Fatalf("provider calls = %d, want 1", harness.calls.Load())
+			}
+		})
 	}
 }
 

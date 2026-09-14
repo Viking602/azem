@@ -26,6 +26,19 @@ func AcquireRecoveryFence(ctx context.Context, databasePath string) (RecoveryFen
 	return acquireRecoveryFence(ctx, databasePath+".runtime.lock")
 }
 
+// AcquireCatalogReadFence holds only the shared side of the runtime fence.
+// Renderer discovery may inspect catalog rows but can never become recovery or
+// migration owner.
+func AcquireCatalogReadFence(ctx context.Context, databasePath string) (io.Closer, error) {
+	if databasePath == ":memory:" {
+		return noopRecoveryFence{}, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(databasePath), 0o700); err != nil {
+		return nil, err
+	}
+	return acquireCatalogReadFence(ctx, databasePath+".runtime.lock")
+}
+
 type noopRecoveryFence struct{}
 
 func (noopRecoveryFence) FinishRecovery() error { return nil }

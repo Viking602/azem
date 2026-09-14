@@ -128,32 +128,25 @@ pub(super) fn settings_subagents_body(
     div()
         .w_full()
         .flex()
-        .justify_center()
-        .child(
-            div()
-                .w_full()
-                .max_w(px(760.))
-                .flex()
-                .flex_col()
-                .gap_4()
-                .child(settings_unclipped_detail_card(
-                    locale.text("ui.capacityAndIsolation"),
-                    locale.text("ui.subagentsDelegationAndShellCommandsHaveSeparateLimits"),
-                    rows,
-                    palette,
-                ))
-                .child(settings_detail_card(
-                    locale.text("ui.scheduling"),
-                    locale.text("ui.mainAndSubagentsAlwaysDispatchToolsInParallel"),
-                    vec![settings_detail_row(
-                        locale.text("ui.dispatchPolicy"),
-                        locale.text("ui.parallelDispatchIsAProductInvariant"),
-                        locale.text("ui.parallelReadOnly").to_string(),
-                        palette,
-                    )],
-                    palette,
-                )),
-        )
+        .flex_col()
+        .gap_6()
+        .child(settings_detail_card(
+            locale.text("ui.capacityAndIsolation"),
+            locale.text("ui.subagentsDelegationAndShellCommandsHaveSeparateLimits"),
+            rows,
+            palette,
+        ))
+        .child(settings_detail_card(
+            locale.text("ui.scheduling"),
+            locale.text("ui.mainAndSubagentsAlwaysDispatchToolsInParallel"),
+            vec![settings_detail_row(
+                locale.text("ui.dispatchPolicy"),
+                locale.text("ui.parallelDispatchIsAProductInvariant"),
+                locale.text("ui.parallelReadOnly").to_string(),
+                palette,
+            )],
+            palette,
+        ))
         .into_any_element()
 }
 

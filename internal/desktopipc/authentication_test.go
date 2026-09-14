@@ -44,7 +44,7 @@ func TestTokenAndEndpointFilesAreOwnerOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	endpointPath := filepath.Join(directory, "endpoint.json")
-	endpoint := Endpoint{Protocol: ProtocolVersion, WorkspaceID: "workspace", Workspace: directory, Address: filepath.Join(directory, "socket"), TokenFile: tokenPath, PID: os.Getpid()}
+	endpoint := Endpoint{Protocol: ProtocolVersion, WorkspaceID: "workspace", Workspace: directory, DaemonEpoch: "epoch", Address: filepath.Join(directory, "socket"), TokenFile: tokenPath, PID: os.Getpid()}
 	if err := WriteEndpointFile(endpointPath, endpoint); err != nil {
 		t.Fatal(err)
 	}

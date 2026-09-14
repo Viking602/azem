@@ -73,11 +73,9 @@ at Azem storage.
 | Hooks | Cataloged in the Extensions Hooks tab even before trust; executed only when `plugins.trust_hooks: true` and the command is not listed in `hooks.disabled` |
 | `.app.json` | Cataloged as an App requirement; requires separate connector authorization |
 | Interface assets | Validated and cataloged; supported icons up to 1 MiB render from bounded image data |
-| Commands | Markdown commands and extension-registered handlers share the normal slash-command path |
-| Tools and extensions | Loaded in the bounded Bun host with duplicate-name rejection and governed tool definitions |
+| Commands | Markdown commands share the normal slash-command path |
 | Agents and providers | Validated and merged into the existing subagent/provider registries |
 | Themes | Discovered from validated plugin roots and projected as token maps |
-| LSP/DAP descriptors | Copied and resolved through the existing language/debug runtimes |
 
 Directly installed plugins are loaded at desktop startup. Codex plugins first
 appear as available choices; selecting one persists its ID in
@@ -109,12 +107,6 @@ Desktop Settings → Extensions → Marketplace and TUI `/marketplace` expose th
 same application actions. The desktop re-reads the typed catalog after each
 mutation. Neither UI receives a cache path as an executable capability.
 
-Custom extension modules may register file write/delete fallbacks. The Bun host
-runs handlers in registration order, skips a throwing handler, and accepts the
-first explicit `true`. Azem calls this seam only after a local ordinary-file
-mutation fails with `EACCES`, `EPERM`, or `EROFS`; it passes the resolved
-workspace destination and preserves the original error if no handler accepts.
-
 ## Security boundary
 
 - Installation does not imply hook trust.
@@ -142,6 +134,17 @@ configured, and bundled Skills. Stopping one records its Skill name in
 Skill is removed from model context, slash suggestions, eager activation, and
 the runtime registry. The stopped entry remains visible in Extensions for
 restoration.
+
+Bundled `verify` and `simplify` instructions honor read-only requests: they
+report defects without editing unless the current task authorizes repair.
+`skill-author` still shows the proposed content and destination before an
+explicit save request; that approval remains valid across turns unless the
+content or destination materially changes. These instructions do not grant
+tool permissions. Their bodies are embedded in the binary, so updated bundled
+instructions require a rebuilt runtime. Names and catalog descriptions remain
+stable; this change affects activated Skill bodies, not the base system
+prompt or provider message ordering. Updated bodies and repository instructions
+change their context content once; subsequent turns can reuse the stable text.
 
 Plugin hook files are always copied into the catalog so the Hooks tab can
 show name, source, and event before trust. Execution still requires

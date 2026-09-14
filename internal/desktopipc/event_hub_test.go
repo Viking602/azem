@@ -1,6 +1,7 @@
 package desktopipc
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -46,6 +47,76 @@ func TestClientQueueCoalescesPendingReplaceableSnapshots(t *testing.T) {
 	third := receiveRecord(t, subscription.Events)
 	if first.Sequence != 1 || second.Sequence != 2 || third.Sequence != 4 || !strings.Contains(string(third.Payload), "new") {
 		t.Fatalf("records = %#v %#v %#v", first, second, third)
+	}
+}
+
+func TestClientQueueCoalescingPreservesInterveningLosslessEvents(t *testing.T) {
+	client := &clientEventQueue{
+		maxBytes:  1 << 20,
+		replaceAt: make(map[string]int),
+		notify:    make(chan struct{}, 1),
+	}
+	events := []desktop.Event{
+		{Kind: "run_state", SessionID: "session", RunID: "run", State: "running"},
+		{Kind: "text_delta", SessionID: "session", RunID: "run", Text: "你好，"},
+		{Kind: "context_usage", SessionID: "session", RunID: "run"},
+		{Kind: "text_delta", SessionID: "session", RunID: "run", Text: "我是 Azem。"},
+		{Kind: "run_state", SessionID: "session", RunID: "run", State: "running"},
+		{Kind: "context_usage", SessionID: "session", RunID: "run"},
+		{Kind: "run_finished", SessionID: "session", RunID: "run", State: "completed"},
+	}
+	for index, event := range events {
+		payload, err := json.Marshal(event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		key, lossless := runtimeEventPolicy(event)
+		client.enqueue(EventRecord{
+			Sequence: uint64(index + 1), Channel: ChannelRuntime,
+			Payload: payload, ReplaceKey: key, Lossless: lossless,
+			bytes: len(payload) + len(key) + 64,
+		})
+	}
+	var cursor uint64
+	var text strings.Builder
+	var terminal bool
+	for {
+		record, ok := client.dequeue()
+		if !ok {
+			break
+		}
+		if record.Sequence <= cursor {
+			t.Fatalf("queued sequence %d followed %d; the client would discard this event: %s", record.Sequence, cursor, record.Payload)
+		}
+		cursor = record.Sequence
+		var event desktop.Event
+		if err := json.Unmarshal(record.Payload, &event); err != nil {
+			t.Fatal(err)
+		}
+		if event.Kind == "text_delta" {
+			text.WriteString(event.Text)
+		}
+		terminal = terminal || event.Kind == "run_finished"
+	}
+	if text.String() != "你好，我是 Azem。" || !terminal {
+		t.Fatalf("delivered text %q, terminal %t", text.String(), terminal)
+	}
+}
+
+func TestClientQueueOversizedReplacementRequestsResync(t *testing.T) {
+	client := &clientEventQueue{
+		maxBytes:  128,
+		replaceAt: make(map[string]int),
+		notify:    make(chan struct{}, 1),
+	}
+	client.enqueue(EventRecord{Sequence: 1, Channel: ChannelRuntime, ReplaceKey: "session", Payload: []byte(`{"state":"old"}`), bytes: 32})
+	client.enqueue(EventRecord{Sequence: 2, Channel: ChannelRuntime, ReplaceKey: "session", Payload: []byte(strings.Repeat("x", 256)), bytes: 256})
+	record, ok := client.dequeue()
+	if !ok || record.Channel != ChannelDaemon || !strings.Contains(string(record.Payload), "client_queue_overflow") {
+		t.Fatalf("oversized replacement did not request resync: %#v", record)
+	}
+	if record, ok := client.dequeue(); ok {
+		t.Fatalf("overflow retained an event: %#v", record)
 	}
 }
 

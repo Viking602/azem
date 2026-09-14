@@ -121,6 +121,7 @@ func (r *ProviderRuntime) EstimateContextProfile(ctx context.Context, sessionID 
 	if host != nil && host.Sessions() != nil {
 		profile.Contributions = appendToolContribution(profile.Contributions, ContextCategoryBuiltinTools, (&todoDriver{}).Definition())
 		profile.Contributions = appendToolContribution(profile.Contributions, ContextCategoryBuiltinTools, (&contextArtifactDriver{}).Definition())
+		profile.Contributions = appendToolContribution(profile.Contributions, ContextCategoryBuiltinTools, (&historyDriver{}).Definition())
 	}
 	if subagents != nil && r.cfg.Agents.Subagents.Enabled {
 		profile.Contributions = appendToolContribution(profile.Contributions, ContextCategoryBuiltinTools, (&subagentSpawnDriver{runtime: subagents}).Definition())

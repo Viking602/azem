@@ -89,3 +89,10 @@ func TestSummaryWireRoundTrip(t *testing.T) {
 		t.Fatal("malformed payload must not decode")
 	}
 }
+
+func TestCompactEditSourceContextIsNotPartOfDiff(t *testing.T) {
+	files := ParseCompactEditOutput("[a.go#ABCD]\nupdated a.go\nfirstChangedLine: 2\n\n--- compact diff ---\n-old\n+new\n\n--- current source ---\n1:package main\n2:new")
+	if len(files) != 1 || files[0].Diff != "-old\n+new" {
+		t.Fatalf("unexpected diff: %+v", files)
+	}
+}

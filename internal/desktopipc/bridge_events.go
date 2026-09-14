@@ -54,6 +54,10 @@ func runtimeEventPolicy(event desktop.Event) (string, bool) {
 	case "context_usage", "context_profile", "tool_update", "agent_state", "background_logs":
 		parts := []string{event.Kind, event.SessionID, event.RunID, event.AgentID, event.ToolCallID, event.State}
 		return strings.Join(parts, ":"), false
+	case "run_state":
+		return strings.Join([]string{event.Kind, event.SessionID, event.RunID}, ":"), false
+	case "session_projection", "prompt_queue_state":
+		return strings.Join([]string{event.Kind, event.SessionID}, ":"), false
 	default:
 		return "", true
 	}

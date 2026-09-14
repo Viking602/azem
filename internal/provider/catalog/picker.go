@@ -2,7 +2,6 @@ package catalog
 
 import (
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -58,21 +57,13 @@ var (
 	standardReasoningLevels = []string{"minimal", "low", "medium", "high", "xhigh"}
 	grokReasoningLevels     = []string{"low", "medium", "high"}
 	grokMultiAgentLevels    = []string{"low", "medium", "high", "xhigh"}
-	grokOAuthCuratedModels  = []Model{
-		{ID: "grok-build", Name: "Grok Build", ContextWindow: 512_000, MaxOutputTokens: 512_000, SupportsTools: true, SupportsReasoning: true, InputModalities: []string{"text", "image"}, OutputModalities: []string{"text"}},
-		{ID: "grok-build-0.1", Name: "Grok Build 0.1", ContextWindow: 256_000, MaxOutputTokens: 256_000, SupportsTools: true, SupportsReasoning: true, InputModalities: []string{"text", "image"}, OutputModalities: []string{"text"}},
-		{ID: "grok-4.3", Name: "Grok 4.3", ContextWindow: 1_000_000, MaxOutputTokens: 1_000_000, ReasoningLevels: []string{"low", "medium", "high"}, DefaultReasoning: "high", SupportsTools: true, SupportsReasoning: true, InputModalities: []string{"text", "image"}, OutputModalities: []string{"text"}},
-		{ID: "grok-4.5", Name: "Grok 4.5", ContextWindow: 500_000, MaxOutputTokens: 500_000, ReasoningLevels: []string{"low", "medium", "high"}, DefaultReasoning: "high", SupportsTools: true, SupportsReasoning: true, InputModalities: []string{"text", "image"}, OutputModalities: []string{"text"}},
-		{ID: "grok-4.6", Name: "Grok 4.6", ContextWindow: 500_000, MaxOutputTokens: 500_000, ReasoningLevels: []string{"low", "medium", "high", "xhigh"}, DefaultReasoning: "high", SupportsTools: true, SupportsReasoning: true, InputModalities: []string{"text", "image"}, OutputModalities: []string{"text"}},
-		{ID: "grok-4.20-multi-agent-0309", Name: "Grok 4.20 (Multi-Agent)", ContextWindow: 2_000_000, MaxOutputTokens: 2_000_000, ReasoningLevels: []string{"low", "medium", "high", "xhigh"}, DefaultReasoning: "high", SupportsTools: true, SupportsReasoning: true, InputModalities: []string{"text"}, OutputModalities: []string{"text"}},
-		{ID: "grok-4.20-0309-reasoning", Name: "Grok 4.20 (Reasoning)", ContextWindow: 2_000_000, MaxOutputTokens: 2_000_000, SupportsTools: true, SupportsReasoning: true, InputModalities: []string{"text", "image"}, OutputModalities: []string{"text"}},
-		{ID: "grok-4.20-0309-non-reasoning", Name: "Grok 4.20 (Non-Reasoning)", ContextWindow: 2_000_000, MaxOutputTokens: 2_000_000, SupportsTools: true, InputModalities: []string{"text", "image"}, OutputModalities: []string{"text"}},
-		{ID: "grok-composer-2.5-fast", Name: "Grok Composer 2.5 Fast", ContextWindow: 200_000, MaxOutputTokens: 200_000, SupportsTools: true, InputModalities: []string{"text"}, OutputModalities: []string{"text"}},
-	}
 )
 
 func AvailableReasoningLevels(provider string, model Model) []string {
 	switch provider {
+	case "devin":
+		// Devin exposes exact effort variants as model IDs, not a wire effort flag.
+		return nil
 	case "grok":
 		if levels := grokReasoningLevelsForID(model.ID); len(levels) > 0 {
 			return levels
@@ -152,33 +143,14 @@ func normalizeProviderModels(provider string, models []Model) []Model {
 }
 
 func normalizeGrokModels(models []Model) []Model {
-	if len(models) == 0 {
-		return models
-	}
 	filtered := models[:0]
-	indexByID := make(map[string]int, len(models)+len(grokOAuthCuratedModels))
 	for _, model := range models {
 		id := strings.ToLower(strings.TrimSpace(model.ID))
 		if strings.HasPrefix(id, "grok-imagine-") || strings.HasPrefix(id, "grok-stt-") || strings.HasPrefix(id, "grok-voice-") {
 			continue
 		}
-		model = normalizeGrokModel(model)
-		indexByID[id] = len(filtered)
-		filtered = append(filtered, model)
+		filtered = append(filtered, normalizeGrokModel(model))
 	}
-	if len(filtered) == 0 {
-		return filtered
-	}
-	for _, template := range grokOAuthCuratedModels {
-		id := strings.ToLower(template.ID)
-		if index, ok := indexByID[id]; ok {
-			filtered[index] = overlayCuratedModel(filtered[index], template)
-			continue
-		}
-		indexByID[id] = len(filtered)
-		filtered = append(filtered, cloneModel(template))
-	}
-	sort.SliceStable(filtered, func(i, j int) bool { return filtered[i].ID < filtered[j].ID })
 	return filtered
 }
 
@@ -220,29 +192,6 @@ func grokOmitsReasoningEffort(modelID string) bool {
 		strings.HasPrefix(id, "grok-composer-") ||
 		strings.Contains(id, "grok-4.20-0309-reasoning") ||
 		strings.Contains(id, "grok-4.20-0309-non-reasoning")
-}
-
-func overlayCuratedModel(base, curated Model) Model {
-	base.Name = curated.Name
-	base.ContextWindow = curated.ContextWindow
-	base.MaxOutputTokens = curated.MaxOutputTokens
-	base.ReasoningLevels = append(base.ReasoningLevels[:0], curated.ReasoningLevels...)
-	base.DefaultReasoning = curated.DefaultReasoning
-	base.SupportsTools = curated.SupportsTools
-	base.SupportsReasoning = curated.SupportsReasoning
-	base.InputModalities = append(base.InputModalities[:0], curated.InputModalities...)
-	base.OutputModalities = append(base.OutputModalities[:0], curated.OutputModalities...)
-	return base
-}
-
-func cloneModel(model Model) Model {
-	model.Aliases = append([]string(nil), model.Aliases...)
-	model.ReasoningLevels = append([]string(nil), model.ReasoningLevels...)
-	model.InputModalities = append([]string(nil), model.InputModalities...)
-	model.OutputModalities = append([]string(nil), model.OutputModalities...)
-	model.ServiceTiers = append([]ServiceTier(nil), model.ServiceTiers...)
-	model.AdditionalSpeedTiers = append([]string(nil), model.AdditionalSpeedTiers...)
-	return model
 }
 
 // NormalizeCursorModel derives the stable Cursor tier and effective context

@@ -5,6 +5,7 @@ mod localization;
 mod markdown;
 mod model_selection;
 mod runtime_connection;
+mod selectable_text;
 mod state;
 mod surfaces;
 mod terminal_emulator;
@@ -71,15 +72,16 @@ use azem_ipc::{ClientEvent, Method};
 use composer_completion::{ComposerCompletion, prepare_prompt, turn_payload};
 use fast_particles::FastParticles;
 use gpui::{
-    App, Bounds, BoxShadow, ClickEvent, Context, Entity, FocusHandle, Focusable, FollowMode,
-    KeyBinding, ListAlignment, ListState, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ObjectFit, Pixels, PromptButton, PromptLevel, Role, ScrollHandle, Size,
-    StyledImage, Task, UniformListScrollHandle, Window, WindowBounds, WindowHandle, WindowOptions,
-    div, hsla, img, list, prelude::*, px, relative, rgb, rgba, size, svg,
+    App, Bounds, BoxShadow, ClickEvent, ClipboardEntry, ClipboardItem, Context, Entity,
+    ExternalPaths, FocusHandle, Focusable, FollowMode, ImageFormat, KeyBinding, ListAlignment,
+    ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
+    PathPromptOptions, Pixels, PromptButton, PromptLevel, Role, ScrollHandle, Size, StyledImage,
+    Task, UniformListScrollHandle, Window, WindowBounds, WindowHandle, WindowOptions, div, hsla,
+    img, list, prelude::*, px, relative, rgb, rgba, size, svg,
 };
 use gpui_platform::application;
 use localization::{Labels, Locale, labels};
-use model_selection::{ModelModes, cursor_selection, model_choices, model_modes};
+use model_selection::{ModelModes, model_choices, model_modes, variant_selection};
 use runtime_connection::{
     RuntimeConnection, RuntimeMessage, RuntimeOptions, restore_desktop_workspace,
 };
@@ -98,7 +100,8 @@ gpui::actions!(
         ToggleSettings,
         FindSettings,
         ToggleTerminal,
-        CloseOverlay
+        CloseOverlay,
+        Quit
     ]
 );
 
@@ -112,9 +115,105 @@ const CHAT_COLUMN_MAX_WIDTH: f32 = 736.;
 const CHAT_COLUMN_GUTTER: f32 = 12.;
 const CHAT_COLUMN_GUTTER_WIDE: f32 = 20.;
 
+// Synara changes only opacity when entering a conversation; keep transcript
+// geometry and scroll anchoring stable throughout the transition.
+#[derive(Default)]
+struct SurfaceMotion {
+    key: Option<(Surface, String)>,
+    started: Option<Instant>,
+}
+impl SurfaceMotion {
+    fn opacity(&mut self, surface: Surface, session: &str, reduced: bool, now: Instant) -> f32 {
+        let changed = self
+            .key
+            .as_ref()
+            .is_none_or(|key| key.0 != surface || key.1 != session);
+        if changed {
+            self.started = self.key.as_ref().map(|_| now);
+            self.key = Some((surface, session.to_string()));
+        }
+        if reduced {
+            self.started = None;
+        }
+        let Some(started) = self.started else {
+            return 1.;
+        };
+        let progress = now.saturating_duration_since(started).as_secs_f32() / 0.140;
+        if progress >= 1. {
+            self.started = None;
+            return 1.;
+        }
+        css_ease_out(progress)
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct PopupMotion {
+    opacity: f32,
+    from: f32,
+    open: bool,
+    started: Option<Instant>,
+}
+impl PopupMotion {
+    fn update(&mut self, open: bool, reduced: bool, now: Instant) -> bool {
+        self.advance(now);
+        if self.open != open {
+            self.from = self.opacity;
+            self.open = open;
+            self.started = Some(now);
+        }
+        if reduced {
+            self.opacity = if open { 1. } else { 0. };
+            self.started = None;
+        }
+        self.started.is_some()
+    }
+    fn advance(&mut self, now: Instant) {
+        let Some(started) = self.started else {
+            return;
+        };
+        let progress = (now.saturating_duration_since(started).as_secs_f32() / 0.2).min(1.);
+        let target = if self.open { 1. } else { 0. };
+        self.opacity = self.from + (target - self.from) * css_bezier(progress, 0.42, 0., 0.58, 1.);
+        if progress >= 1. {
+            self.opacity = target;
+            self.started = None;
+        }
+    }
+    fn visible(self) -> bool {
+        self.open || self.opacity > 0.
+    }
+}
+
+fn css_ease_out(progress: f32) -> f32 {
+    css_bezier(progress, 0., 0., 0.58, 1.)
+}
+
+fn css_bezier(progress: f32, x1: f32, y1: f32, x2: f32, y2: f32) -> f32 {
+    if progress <= 0. {
+        return 0.;
+    }
+    if progress >= 1. {
+        return 1.;
+    }
+    let coordinate = |t: f32, a: f32, b: f32| {
+        3. * (1. - t).powi(2) * t * a + 3. * (1. - t) * t * t * b + t.powi(3)
+    };
+    let (mut low, mut high) = (0., 1.);
+    for _ in 0..16 {
+        let t = (low + high) / 2.;
+        if coordinate(t, x1, x2) < progress {
+            low = t;
+        } else {
+            high = t;
+        }
+    }
+    coordinate((low + high) / 2., y1, y2)
+}
+
 fn eased_side_panel_width(from: f32, to: f32, elapsed: Duration) -> f32 {
     let progress = (elapsed.as_secs_f32() / SIDE_PANEL_TRANSITION.as_secs_f32()).clamp(0., 1.);
-    let eased = 1. - (1. - progress).powi(5);
+    let eased = css_bezier(progress, 0.32, 0.72, 0., 1.);
     from + (to - from) * eased
 }
 
@@ -127,13 +226,52 @@ fn side_panel_max_width(workspace_width: f32) -> Option<f32> {
     (available >= SIDE_PANEL_MIN_WIDTH).then_some(available)
 }
 
-fn side_panel_width_for_workspace(workspace_width: f32) -> Option<f32> {
+fn side_panel_width_for_workspace(workspace_width: f32, preferred: Option<f32>) -> Option<f32> {
+    let desired = preferred
+        .filter(|width| width.is_finite() && *width > 0.)
+        .unwrap_or(workspace_width / 2.);
     side_panel_max_width(workspace_width)
-        .map(|maximum| (workspace_width / 2.).clamp(SIDE_PANEL_MIN_WIDTH, maximum))
+        .map(|maximum| desired.clamp(SIDE_PANEL_MIN_WIDTH, maximum))
 }
 
 fn environment_panel_fits(workspace_width: f32, side_panel_width: f32) -> bool {
     workspace_width - side_panel_width - ENVIRONMENT_PANEL_RESERVED_WIDTH >= MAIN_TEXT_MIN_WIDTH
+}
+
+struct EnvironmentPanelLayout {
+    right_inset: f32,
+    tuck_progress: f32,
+    opacity: f32,
+    reserved_width: f32,
+}
+
+fn environment_panel_layout(
+    workspace_width: f32,
+    panel_width: f32,
+    visible_width: f32,
+    alongside_visibility: f32,
+    environment_visibility: f32,
+) -> Option<EnvironmentPanelLayout> {
+    if environment_visibility <= 0. || !environment_panel_fits(workspace_width, 0.) {
+        return None;
+    }
+    let visible_width = visible_width.clamp(0., panel_width);
+    let visibility = environment_visibility.clamp(0., 1.)
+        * if panel_width == 0. {
+            1.
+        } else {
+            1. - (visible_width / panel_width) * (1. - alongside_visibility.clamp(0., 1.))
+        };
+    let tuck_progress = 1. - visibility;
+    Some(EnvironmentPanelLayout {
+        right_inset: visible_width,
+        tuck_progress,
+        // Keep the card readable as it slips under the foreground panel; fade at the end.
+        opacity: 1. - tuck_progress.powi(3),
+        // Use the same progress in both directions, including a reversed close.
+        reserved_width: (visible_width + ENVIRONMENT_PANEL_RESERVED_WIDTH * visibility)
+            .min(workspace_width - MAIN_TEXT_MIN_WIDTH),
+    })
 }
 
 fn chat_column_gutter(content_width: f32) -> f32 {
@@ -158,6 +296,17 @@ const APPROVAL_MODES: [(&str, &str, &str); 3] = [
 ];
 
 enum PendingRequest {
+    OpenProject,
+    WorkflowMode(String),
+    ApprovalDecision {
+        approval_id: String,
+    },
+    PromptQueueRefresh,
+    PromptQueue {
+        session_id: String,
+        submission: Option<QueuedPrompt>,
+        source_text: Option<String>,
+    },
     ResumeSession {
         sequence: Option<i64>,
     },
@@ -224,11 +373,6 @@ enum PendingRequest {
         attachments: Vec<serde_json::Value>,
         queued_id: Option<String>,
     },
-    QueuedGuide {
-        queued_id: String,
-        prompt: String,
-        attachments: Vec<serde_json::Value>,
-    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -293,6 +437,8 @@ struct QueuedPrompt {
     selected_skills: Vec<String>,
     attachments: Vec<serde_json::Value>,
     failed: bool,
+    pending: bool,
+    dispatching: bool,
 }
 
 #[derive(Clone)]
@@ -388,7 +534,50 @@ impl SubagentSettingKind {
 #[derive(Default)]
 struct ProcessExpansion {
     open: HashSet<String>,
+    live_groups: HashMap<String, bool>,
+    disclosures: HashMap<String, DisclosureMotion>,
     activity: HashMap<String, ProcessActivityRoll>,
+}
+
+struct DisclosureMotion {
+    from: f32,
+    target: f32,
+    started: Instant,
+    height: f32,
+    index: usize,
+}
+
+impl DisclosureMotion {
+    fn progress(&self, now: Instant) -> f32 {
+        let elapsed = now.saturating_duration_since(self.started).as_secs_f32() / 0.220;
+        self.from + (self.target - self.from) * disclosure_ease(elapsed)
+    }
+    fn active(&self, now: Instant) -> bool {
+        self.from != self.target
+            && now.saturating_duration_since(self.started) < Duration::from_millis(220)
+    }
+}
+
+fn disclosure_ease(progress: f32) -> f32 {
+    if progress <= 0. {
+        return 0.;
+    }
+    if progress >= 1. {
+        return 1.;
+    }
+    // CSS ease-out: solve x for cubic-bezier(0, 0, .58, 1).
+    let (mut low, mut high) = (0., 1.);
+    for _ in 0..16 {
+        let t = (low + high) / 2.;
+        let x = 1.74 * (1. - t) * t * t + t * t * t;
+        if x < progress {
+            low = t;
+        } else {
+            high = t;
+        }
+    }
+    let t = (low + high) / 2.;
+    3. * (1. - t) * t * t + t * t * t
 }
 
 #[derive(Default)]
@@ -408,6 +597,48 @@ impl ProcessExpansion {
         if !self.open.remove(key) {
             self.open.insert(key.to_string());
         }
+    }
+
+    fn group_is_expanded(&mut self, key: &str, running: bool) -> bool {
+        if self.live_groups.insert(key.to_string(), running) != Some(running) {
+            if running {
+                self.open.insert(key.to_string());
+            } else {
+                self.open.remove(key);
+            }
+        }
+        self.is_expanded(key)
+    }
+
+    fn disclosure(
+        &mut self,
+        key: &str,
+        index: usize,
+        open: bool,
+        reduced: bool,
+    ) -> (f32, f32, bool) {
+        let now = Instant::now();
+        let target = if open { 1. } else { 0. };
+        let motion = self
+            .disclosures
+            .entry(key.to_string())
+            .or_insert(DisclosureMotion {
+                from: target,
+                target,
+                started: now,
+                height: 0.,
+                index,
+            });
+        if motion.target != target {
+            motion.from = motion.progress(now);
+            motion.target = target;
+            motion.started = now;
+        }
+        if reduced {
+            motion.from = target;
+        }
+        motion.index = index;
+        (motion.progress(now), motion.height, motion.active(now))
     }
 
     fn activity_transition(&mut self, key: &str, label: &str) -> (Option<String>, usize) {
@@ -484,6 +715,10 @@ struct NativeSettings {
     security_baseline: serde_json::Value,
     security_busy: bool,
     security_saved: bool,
+    provider_base_url: Entity<TextInput>,
+    provider_api_key: Entity<TextInput>,
+    catalog_loaded_id: Option<String>,
+    catalog_enabled: bool,
 }
 
 impl NativeSettings {
@@ -580,6 +815,14 @@ fn security_settings_payload<'a>(
 struct AzemWindow {
     focus: FocusHandle,
     state: AppState,
+    surface_motion: SurfaceMotion,
+    popup_motions: HashMap<&'static str, PopupMotion>,
+    sidebar_open: bool,
+    sidebar_width: f32,
+    sidebar_visible_width: f32,
+    sidebar_animation: Option<(Instant, f32)>,
+    sidebar_resize_drag: Option<SidePanelResizeDrag>,
+    sidebar_resize_focus: FocusHandle,
     runtime: RuntimeConnection,
     runtime_options: Rc<RefCell<RuntimeOptions>>,
     runtime_generation: u64,
@@ -602,6 +845,7 @@ struct AzemWindow {
     model_picker_open: bool,
     model_picker_error: String,
     route_picker_target: Option<RoutePickerTarget>,
+    model_picker_render_target: Option<RoutePickerTarget>,
     subagent_setting_menu: Option<SubagentSettingKind>,
     context_popover_open: bool,
     reply_popover: Option<(String, ReplyPopoverKind)>,
@@ -619,12 +863,12 @@ struct AzemWindow {
     archive_days_menu_open: bool,
     usage_hover: Option<(String, i64)>,
     environment_open: bool,
-    environment_expanded: Option<String>,
     side_panel_open: bool,
     side_panel_agents_open: bool,
     side_panel_add_menu_open: bool,
     side_panel_closing: bool,
     side_panel_width: f32,
+    session_side_panel_widths: HashMap<String, f32>,
     side_panel_visible_width: f32,
     side_panel_animation_started: Option<Instant>,
     side_panel_animation_from: f32,
@@ -632,6 +876,12 @@ struct AzemWindow {
     terminal_open: bool,
     terminal_input: Entity<TextInput>,
     terminal_scroll: ScrollHandle,
+    workspace_changes_scroll: gpui::UniformListScrollHandle,
+    workspace_source: surfaces::WorkspaceSource,
+    workspace_overview_scroll: gpui::UniformListScrollHandle,
+    workspace_tree_scroll: ScrollHandle,
+    workspace_preview_scroll: ScrollHandle,
+    workspace_image: Option<std::sync::Arc<gpui::Image>>,
     terminal_emulators: HashMap<String, TerminalEmulator>,
     process_expansion: Rc<RefCell<ProcessExpansion>>,
     transcript_list: ListState,
@@ -642,9 +892,10 @@ struct AzemWindow {
     startup_started: Instant,
     snapshot_ready_logged: bool,
     provider_catalog_logged: bool,
-    show_all_sessions: bool,
+    sidebar_tree: SidebarTreeState,
     window_state_path: Option<PathBuf>,
     window_size: Size<Pixels>,
+    window_placement: Option<WindowPlacement>,
     _connection_task: Task<()>,
 }
 
@@ -738,13 +989,26 @@ fn transcript_layout_changed(
 
 impl Drop for AzemWindow {
     fn drop(&mut self) {
+        self.persist_window_state();
+        self.runtime.detach();
+    }
+}
+
+impl AzemWindow {
+    fn persist_window_state(&self) {
         let _ = self
             .window_state_path
             .as_deref()
-            .map(|path| save_window_size(path, self.window_size))
+            .map(|path| {
+                save_window_size(
+                    path,
+                    self.window_size,
+                    self.window_placement.as_ref(),
+                    &self.session_side_panel_widths,
+                )
+            })
             .transpose()
-            .inspect_err(|error| tracing::warn!(%error, "persist GPUI window size"));
-        self.runtime.detach();
+            .inspect_err(|error| tracing::warn!(%error, "persist GPUI window placement"));
     }
 }
 
@@ -761,6 +1025,70 @@ fn composer_input_height(rows: usize, expanded: bool, attachment_count: usize) -
         60.
     };
     (20. + rows as f32 * 24.).max(minimum)
+}
+
+fn image_mime_from_extension(path: &std::path::Path) -> Option<&'static str> {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        _ => None,
+    }
+}
+
+fn image_mime_from_format(format: ImageFormat) -> Option<&'static str> {
+    match format {
+        ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::Gif | ImageFormat::Webp => {
+            Some(format.mime_type())
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn block_attachments(block: &state::Block) -> &[serde_json::Value] {
+    match block.extra.get("attachments") {
+        Some(serde_json::Value::Array(items)) => items,
+        _ => &[],
+    }
+}
+
+pub(crate) fn attachment_preview_path(attachment: &serde_json::Value) -> Option<&str> {
+    attachment
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+}
+
+pub(crate) fn attachment_image_preview(
+    path: Option<&str>,
+    palette: ThemePalette,
+    icon_size: f32,
+) -> gpui::AnyElement {
+    match path {
+        Some(path) if path.starts_with("data:image/") => img(path.to_string())
+            .size_full()
+            .object_fit(ObjectFit::Contain)
+            .into_any_element(),
+        Some(path) => img(PathBuf::from(path))
+            .size_full()
+            .object_fit(ObjectFit::Contain)
+            .into_any_element(),
+        None => div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(icon("image", icon_size, palette.faint))
+            .into_any_element(),
+    }
 }
 
 fn runtime_busy(state: &AppState) -> bool {
@@ -882,6 +1210,7 @@ fn visible_git_branches(branches: &[serde_json::Value], current: &str, query: &s
     names
 }
 
+#[cfg(test)]
 fn reorder_session_queue(
     prompts: &mut [QueuedPrompt],
     session_id: &str,
@@ -912,10 +1241,6 @@ fn reorder_session_queue(
         prompts[slot] = item;
     }
     true
-}
-
-fn should_start_next_queued(old_busy: bool, session_changed: bool, state: &AppState) -> bool {
-    !runtime_busy(state) && (old_busy || session_changed)
 }
 
 #[derive(Debug, PartialEq)]
@@ -1061,6 +1386,10 @@ fn context_segment_color(index: usize, category: &str, palette: ThemePalette) ->
 
 fn format_context_tokens(tokens: i64) -> String {
     let tokens = tokens.max(0);
+    if tokens >= 1_000_000 {
+        let millions = format!("{:.2}", tokens as f64 / 1_000_000.);
+        return format!("{}M", millions.trim_end_matches('0').trim_end_matches('.'));
+    }
     if tokens < 1_000 {
         return tokens.to_string();
     }
@@ -1099,6 +1428,27 @@ fn context_ring_svg(fraction: f32, palette: ThemePalette) -> gpui::Svg {
         } else {
             palette.ink
         })
+}
+
+fn selected_model_display_name(
+    providers: &[serde_json::Value],
+    provider_id: &str,
+    model_id: &str,
+) -> String {
+    providers
+        .iter()
+        .find(|provider| provider["id"].as_str() == Some(provider_id))
+        .and_then(|provider| {
+            model_choices(provider, model_id, "")
+                .into_iter()
+                .find(|choice| choice.selected)
+        })
+        .map(|choice| {
+            choice
+                .family_name
+                .unwrap_or_else(|| catalog_model_name(choice.model, model_id))
+        })
+        .unwrap_or_else(|| humanize_model_id(model_id))
 }
 
 fn catalog_model_name(model: &serde_json::Value, model_id: &str) -> String {
@@ -1259,6 +1609,22 @@ fn reasoning_index_from_position(
     (ratio * (count - 1) as f32).round() as usize
 }
 
+fn model_reasoning_display_name(modes: &ModelModes, fallback: &str, locale: Locale) -> String {
+    let mut label = reasoning_display_name(
+        if modes.reasoning.is_empty() {
+            fallback
+        } else {
+            &modes.reasoning
+        },
+        locale,
+    );
+    if modes.fast {
+        label.push_str(" · ");
+        label.push_str(locale.text("model.fast"));
+    }
+    label
+}
+
 fn reasoning_display_name(reasoning: &str, locale: Locale) -> String {
     const LABELS: [(&str, &str); 10] = [
         ("none", "reasoning.off"),
@@ -1303,6 +1669,38 @@ fn window_state_path(options: &RuntimeOptions) -> Option<PathBuf> {
         .map(|directory| directory.join("gpui-window.json"))
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct WindowPlacement {
+    uuid: String,
+    x: f32,
+    y: f32,
+}
+
+fn current_window_placement(window: &Window, cx: &App) -> Option<WindowPlacement> {
+    let display = window.display(cx)?;
+    let origin = window.window_bounds().get_bounds().origin - display.bounds().origin;
+    Some(WindowPlacement {
+        uuid: display.uuid().ok()?.to_string(),
+        x: origin.x.into(),
+        y: origin.y.into(),
+    })
+}
+
+fn restored_window_bounds(
+    screen: Bounds<Pixels>,
+    window_size: Size<Pixels>,
+    placement: Option<&WindowPlacement>,
+) -> Bounds<Pixels> {
+    let fitted = window_size.min(&screen.size);
+    let max_x = f32::from(screen.size.width - fitted.width).max(0.);
+    let max_y = f32::from(screen.size.height - fitted.height).max(0.);
+    let (x, y) = placement
+        .filter(|saved| saved.x.is_finite() && saved.y.is_finite())
+        .map(|saved| (saved.x.clamp(0., max_x), saved.y.clamp(0., max_y)))
+        .unwrap_or((max_x / 2., max_y / 2.));
+    Bounds::new(screen.origin + gpui::point(px(x), px(y)), fitted)
+}
+
 fn decode_window_size(content: &str) -> Option<Size<Pixels>> {
     let value: serde_json::Value = serde_json::from_str(content).ok()?;
     let width = value.get("width")?.as_f64()? as f32;
@@ -1322,7 +1720,34 @@ fn load_window_size(path: &std::path::Path) -> Option<Size<Pixels>> {
     decode_window_size(&fs::read_to_string(path).ok()?)
 }
 
-fn save_window_size(path: &std::path::Path, window_size: Size<Pixels>) -> std::io::Result<()> {
+fn load_session_side_panel_widths(path: &std::path::Path) -> HashMap<String, f32> {
+    let widths = (|| -> anyhow::Result<HashMap<String, f32>> {
+        let value: serde_json::Value = serde_json::from_slice(&fs::read(path)?)?;
+        Ok(value["sessionSidePanelWidths"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter_map(|(session, value)| {
+                let width = value.as_f64()? as f32;
+                (!session.is_empty() && width.is_finite() && width > 0.)
+                    .then(|| (session.clone(), width))
+            })
+            .collect())
+    })();
+    widths.unwrap_or_else(|error| {
+        if path.exists() {
+            tracing::warn!(%error, "load GPUI session panel widths");
+        }
+        HashMap::new()
+    })
+}
+
+fn save_window_size(
+    path: &std::path::Path,
+    window_size: Size<Pixels>,
+    placement: Option<&WindowPlacement>,
+    session_side_panel_widths: &HashMap<String, f32>,
+) -> std::io::Result<()> {
     fs::create_dir_all(path.parent().unwrap_or_else(|| std::path::Path::new(".")))?;
     let temporary = path.with_extension("json.tmp");
     fs::write(
@@ -1330,6 +1755,8 @@ fn save_window_size(path: &std::path::Path, window_size: Size<Pixels>) -> std::i
         serde_json::to_vec(&json!({
             "width": f32::from(window_size.width),
             "height": f32::from(window_size.height),
+            "display": placement,
+            "sessionSidePanelWidths": session_side_panel_widths,
         }))?,
     )?;
     fs::rename(temporary, path)
@@ -1346,10 +1773,28 @@ fn open_main_window(
         .as_deref()
         .and_then(load_window_size)
         .unwrap_or_else(|| size(px(1440.), px(920.)));
-    let bounds = Bounds::centered(None, window_size, cx);
+    let placement = state_path
+        .as_deref()
+        .and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|value| serde_json::from_value::<WindowPlacement>(value["display"].clone()).ok());
+    let saved_display = placement.as_ref().and_then(|saved| {
+        cx.displays().into_iter().find(|display| {
+            display
+                .uuid()
+                .is_ok_and(|uuid| uuid.to_string() == saved.uuid)
+        })
+    });
+    let restored_placement = saved_display.as_ref().and(placement.as_ref());
+    let display = saved_display.or_else(|| cx.primary_display());
+    let bounds = display.as_ref().map_or_else(
+        || Bounds::centered(None, window_size, cx),
+        |display| restored_window_bounds(display.bounds(), window_size, restored_placement),
+    );
     cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
+            display_id: display.as_ref().map(|display| display.id()),
             window_min_size: Some(size(px(880.), px(640.))),
             titlebar: Some(gpui::TitlebarOptions {
                 title: None,
@@ -1361,15 +1806,17 @@ fn open_main_window(
         move |window, cx| {
             runtime.wait_for_startup(Duration::from_secs(2));
             cx.new(|cx| {
-                cx.observe_window_bounds(window, |this: &mut AzemWindow, window, _| {
+                cx.observe_window_bounds(window, |this: &mut AzemWindow, window, cx| {
                     let size = window.window_bounds().get_bounds().size;
                     this.window_size = size;
+                    this.window_placement = current_window_placement(window, cx);
                 })
                 .detach();
                 cx.observe_window_activation(window, |this: &mut AzemWindow, window, cx| {
                     if !window.is_window_active() {
                         this.reasoning_drag = None;
-                        this.side_panel_resize_drag = None;
+                        this.finish_side_panel_resize();
+                        this.finish_sidebar_resize(cx);
                     }
                     cx.notify();
                 })
@@ -1435,7 +1882,7 @@ fn main() {
     let reopen_options = options.clone();
     let application = application()
         .with_assets(Assets::discover())
-        .with_quit_mode(gpui::QuitMode::Explicit);
+        .with_quit_mode(gpui::QuitMode::LastWindowClosed);
     application.on_reopen(move |cx| {
         if let Some(handle) = *reopen_window.borrow()
             && handle
@@ -1451,7 +1898,10 @@ fn main() {
     application.run(move |cx| {
         cx.set_app_identity("dev.azem.gpui", "Azem GPUI");
         text_input::init(cx);
+        selectable_text::init(cx);
+        cx.on_action(|_: &Quit, cx| cx.quit());
         cx.bind_keys([
+            KeyBinding::new("cmd-q", Quit, None),
             KeyBinding::new("enter", Submit, Some("TextInput")),
             KeyBinding::new("cmd-k", ToggleSearch, None),
             KeyBinding::new("cmd-f", FindSettings, None),

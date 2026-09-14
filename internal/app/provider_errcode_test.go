@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -27,6 +28,11 @@ func TestProviderFailureDataCarriesStableErrorCode(t *testing.T) {
 			name: "rate limit API error",
 			err:  &responses.APIError{Kind: responses.ErrorRateLimit, Message: "slow down"},
 			want: errcode.CodeRateLimit,
+		},
+		{
+			name: "deadline exceeded is a timeout, not cancellation",
+			err:  fmt.Errorf("engine: %w", context.DeadlineExceeded),
+			want: errcode.CodeTimeout,
 		},
 		{
 			name: "unclassified error",

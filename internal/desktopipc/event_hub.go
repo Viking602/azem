@@ -201,10 +201,13 @@ func (client *clientEventQueue) enqueue(record EventRecord) {
 	if record.ReplaceKey != "" && !record.Lossless {
 		if index, exists := client.replaceAt[record.ReplaceKey]; exists && index < len(client.pending) {
 			client.bytes -= client.pending[index].bytes
-			client.pending[index] = cloneEventRecord(record)
-			client.bytes += record.bytes
-			client.signal()
-			return
+			// A replacement has a newer wire sequence. Remove the obsolete
+			// snapshot and append the new one after intervening events; replacing
+			// it in place would make clients discard those lossless events.
+			copy(client.pending[index:], client.pending[index+1:])
+			client.pending[len(client.pending)-1] = EventRecord{}
+			client.pending = client.pending[:len(client.pending)-1]
+			client.rebuildReplaceIndexes()
 		}
 	}
 	if client.bytes+record.bytes > client.maxBytes {

@@ -23,6 +23,25 @@ type ProviderRequestFact struct {
 	StartedAt, CompletedAt                                      time.Time
 }
 
+type ProviderMeteringState struct {
+	CacheEpoch, CheckpointGeneration int64
+	Usage                            Usage
+}
+
+// LoadProviderMeteringState reads only the counters needed on the request path.
+// History, transcript blocks and tool payloads belong to separate readers.
+func (s *Service) LoadProviderMeteringState(ctx context.Context, sessionID string) (ProviderMeteringState, error) {
+	row, err := dbgen.New(s.db).GetProviderMeteringState(ctx, sessionID)
+	if err != nil {
+		return ProviderMeteringState{}, err
+	}
+	usage, err := DecodeUsage(row.Usage)
+	if err != nil {
+		return ProviderMeteringState{}, err
+	}
+	return ProviderMeteringState{CacheEpoch: row.CacheEpoch, CheckpointGeneration: row.CheckpointGeneration, Usage: usage}, nil
+}
+
 // UpsertProviderRequest replaces a fact rather than adding counters. This
 // makes repeated terminal delivery for the same request exactly idempotent.
 func (s *Service) UpsertProviderRequest(ctx context.Context, f ProviderRequestFact) error {
@@ -129,7 +148,7 @@ func (s *Service) GoalTokenUsageSnapshot(ctx context.Context, sessionID, runID s
 
 // ProviderUsageSnapshot derives all cache KPIs from persisted facts.
 func (s *Service) ProviderUsageSnapshot(ctx context.Context, sessionID, runID string) (Usage, error) {
-	p, err := s.LoadProjection(ctx, sessionID)
+	p, err := s.LoadProviderMeteringState(ctx, sessionID)
 	if err != nil {
 		return Usage{}, err
 	}

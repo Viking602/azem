@@ -5,18 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/Viking602/azem/internal/app"
 	"github.com/Viking602/azem/internal/collab"
+	"github.com/Viking602/azem/internal/desktop"
+	"github.com/Viking602/azem/internal/desktopipc"
 	"github.com/Viking602/azem/internal/session"
-	"github.com/Viking602/azem/internal/sessionexport"
-	"github.com/Viking602/azem/internal/sessionimport"
-	"github.com/Viking602/azem/internal/sessionshare"
 	"github.com/Viking602/azem/internal/usageview"
 )
 
@@ -40,37 +37,13 @@ type collabGuestEventMsg struct {
 	OK    bool
 }
 
-type sessionRuntime interface {
-	Sessions() *session.Service
-}
-
-type attachmentImportRuntime interface {
-	ImportImageBytes(sessionID, name, mimeType string, data []byte) (session.Attachment, error)
-}
-
-type runtimeAttachmentImporter struct{ runtime attachmentImportRuntime }
-
-func (adapter runtimeAttachmentImporter) ImportBytes(sessionID, name, mimeType string, data []byte) (session.Attachment, error) {
-	return adapter.runtime.ImportImageBytes(sessionID, name, mimeType, data)
-}
-
-func runSessionOperation(runtime Runtime, sessionID string, command Command, workspace string) tea.Cmd {
+func runSessionOperation(runtime Runtime, sessionID string, command Command, _ string) tea.Cmd {
 	return func() tea.Msg {
-		owner, ok := runtime.(sessionRuntime)
-		if !ok || owner.Sessions() == nil {
-			return sessionOperationResultMsg{Err: errors.New("session operations are unavailable")}
-		}
-		sessions := owner.Sessions()
 		ctx := context.Background()
-		if _, err := sessions.LoadSession(ctx, sessionID); err != nil {
-			if _, ensureErr := sessions.Ensure(ctx, session.Session{ID: sessionID, Title: "New session", AgentMode: "single"}); ensureErr != nil {
-				return sessionOperationResultMsg{Err: ensureErr}
-			}
-		}
 		switch command.Name {
 		case "tree":
-			tree, err := sessions.LoadSessionTree(ctx, sessionID)
-			if err != nil {
+			var tree session.SessionTree
+			if err := runtime.Request(ctx, desktopipc.MethodSessionTree, map[string]string{"sessionId": sessionID}, &tree); err != nil {
 				return sessionOperationResultMsg{Err: err}
 			}
 			encoded, _ := json.MarshalIndent(tree, "", "  ")
@@ -79,22 +52,25 @@ func runSessionOperation(runtime Runtime, sessionID string, command Command, wor
 			if len(command.Args) != 1 {
 				return sessionOperationResultMsg{Err: errors.New("usage: /branch <entry-id>")}
 			}
-			navigation, err := sessions.NavigateSessionTree(ctx, sessionID, command.Args[0])
-			if err != nil {
+			var event desktop.Event
+			if err := runtime.Request(ctx, desktopipc.MethodNavigateSessionTree, map[string]string{
+				"sessionId": sessionID, "entryId": command.Args[0],
+			}, &event); err != nil {
 				return sessionOperationResultMsg{Err: err}
 			}
-			return sessionOperationResultMsg{Title: "Session branch", Content: fmt.Sprintf("Moved %s → %s", navigation.OldLeaf, navigation.NewLeaf), Refresh: true}
+			return sessionOperationResultMsg{Title: "Session branch", Content: "Moved to " + command.Args[0], Refresh: true}
 		case "fork":
 			if len(command.Args) < 1 || len(command.Args) > 2 {
 				return sessionOperationResultMsg{Err: errors.New("usage: /fork <target-session-id> [entry-id]")}
 			}
-			var err error
+			entryID := ""
 			if len(command.Args) == 2 {
-				err = sessions.ForkAt(ctx, sessionID, command.Args[0], command.Args[1])
-			} else {
-				err = sessions.Fork(ctx, sessionID, command.Args[0])
+				entryID = command.Args[1]
 			}
-			if err != nil {
+			var tree session.SessionTree
+			if err := runtime.Request(ctx, desktopipc.MethodCreateSessionFork, map[string]string{
+				"sessionId": sessionID, "targetId": command.Args[0], "entryId": entryID,
+			}, &tree); err != nil {
 				return sessionOperationResultMsg{Err: err}
 			}
 			return sessionOperationResultMsg{Title: "Session fork", Content: "Created " + command.Args[0]}
@@ -103,7 +79,10 @@ func runSessionOperation(runtime Runtime, sessionID string, command Command, wor
 				return sessionOperationResultMsg{Err: errors.New("usage: /label <entry-id> [label]")}
 			}
 			label := strings.Join(command.Args[1:], " ")
-			if err := sessions.SetSessionEntryLabel(ctx, sessionID, command.Args[0], label); err != nil {
+			var tree session.SessionTree
+			if err := runtime.Request(ctx, desktopipc.MethodSetSessionEntryLabel, map[string]string{
+				"sessionId": sessionID, "entryId": command.Args[0], "label": label,
+			}, &tree); err != nil {
 				return sessionOperationResultMsg{Err: err}
 			}
 			return sessionOperationResultMsg{Title: "Session label", Content: first(label, "Label cleared")}
@@ -111,37 +90,43 @@ func runSessionOperation(runtime Runtime, sessionID string, command Command, wor
 			if len(command.Args) < 1 || len(command.Args) > 2 {
 				return sessionOperationResultMsg{Err: errors.New("usage: /export <path> [html|text|json]")}
 			}
-			format := sessionexport.FormatHTML
+			format := "html"
 			if len(command.Args) == 2 {
-				format = sessionexport.Format(command.Args[1])
+				format = command.Args[1]
 			}
-			path, err := sessionexport.New(sessions).ExportFile(ctx, command.Args[0], sessionID, format, sessionexport.Options{})
-			if err != nil {
+			var outputPath string
+			if err := runtime.Request(ctx, desktopipc.MethodExportSession, map[string]any{
+				"sessionId": sessionID, "outputPath": command.Args[0], "format": format, "allBranches": false,
+			}, &outputPath); err != nil {
 				return sessionOperationResultMsg{Err: err}
 			}
-			return sessionOperationResultMsg{Title: "Session export", Content: path}
+			return sessionOperationResultMsg{Title: "Session export", Content: outputPath}
 		case "share":
 			if len(command.Args) < 1 || len(command.Args) > 2 {
 				return sessionOperationResultMsg{Err: errors.New("usage: /share <server-url> [blob|gist]")}
 			}
-			store := sessionshare.StoreBlob
+			store := "blob"
 			if len(command.Args) == 2 {
-				store = sessionshare.Store(command.Args[1])
+				store = command.Args[1]
 			}
-			result, err := sessionshare.New(sessions).Share(ctx, sessionID, sessionshare.Options{ServerURL: command.Args[0], Store: store})
-			if err != nil {
+			var result struct {
+				URL string `json:"url"`
+			}
+			if err := runtime.Request(ctx, desktopipc.MethodShareSession, map[string]any{
+				"sessionId": sessionID, "serverUrl": command.Args[0], "store": store, "allBranches": false,
+			}, &result); err != nil {
 				return sessionOperationResultMsg{Err: err}
 			}
 			return sessionOperationResultMsg{Title: "Encrypted share", Content: result.URL}
 		case "usage":
-			scope := session.UsageScopeProject
+			scope := string(session.UsageScopeProject)
 			if len(command.Args) == 1 && command.Args[0] == "all" {
-				scope = session.UsageScopeAll
+				scope = string(session.UsageScopeAll)
 			} else if len(command.Args) > 0 {
 				return sessionOperationResultMsg{Err: errors.New("usage: /usage [all]")}
 			}
-			report, err := sessions.UsageReport(ctx, session.UsageReportQuery{Scope: scope, Workspace: workspace})
-			if err != nil {
+			var report session.UsageReport
+			if err := runtime.Request(ctx, desktopipc.MethodUsageReport, map[string]string{"scope": scope}, &report); err != nil {
 				return sessionOperationResultMsg{Err: err}
 			}
 			return sessionOperationResultMsg{Title: "Usage", Content: usageview.Text(report)}
@@ -149,79 +134,30 @@ func runSessionOperation(runtime Runtime, sessionID string, command Command, wor
 			if len(command.Args) != 3 || (command.Args[0] != "claude" && command.Args[0] != "codex") {
 				return sessionOperationResultMsg{Err: errors.New("usage: /import <claude|codex> <jsonl-path> <target-session-id>")}
 			}
-			absolute, err := filepath.Abs(command.Args[1])
-			if err != nil {
-				return sessionOperationResultMsg{Err: err}
-			}
-			stat, err := os.Stat(absolute)
-			if err != nil {
-				return sessionOperationResultMsg{Err: err}
-			}
-			attachmentRuntime, ok := runtime.(attachmentImportRuntime)
-			if !ok {
-				return sessionOperationResultMsg{Err: errors.New("attachment import is unavailable")}
-			}
-			info := sessionimport.Info{Source: sessionimport.Source(command.Args[0]), ID: strings.TrimSuffix(filepath.Base(absolute), filepath.Ext(absolute)), Path: absolute, Workspace: workspace, CreatedAt: stat.ModTime(), UpdatedAt: stat.ModTime()}
-			loaded, err := sessionimport.New(sessions, runtimeAttachmentImporter{runtime: attachmentRuntime}).Import(ctx, info, command.Args[2], workspace)
-			if err != nil {
+			var loaded session.Session
+			if err := runtime.Request(ctx, desktopipc.MethodImportSession, map[string]string{
+				"source": command.Args[0], "path": command.Args[1], "targetSessionId": command.Args[2],
+			}, &loaded); err != nil {
 				return sessionOperationResultMsg{Err: err}
 			}
 			return sessionOperationResultMsg{Title: "Session import", Content: "Imported " + loaded.ID}
+		default:
+			return sessionOperationResultMsg{Err: errors.New("unknown session operation")}
 		}
-		return sessionOperationResultMsg{Err: errors.New("unknown session operation")}
 	}
 }
 
 func runCollabOperation(runtime Runtime, sessionID string, command Command, currentHost *collab.Host, currentGuest *collab.Guest) tea.Cmd {
 	return func() tea.Msg {
-		if len(command.Args) == 0 || command.Args[0] == "status" {
-			switch {
-			case currentHost != nil:
-				return collabOperationResultMsg{Host: currentHost, Content: fmt.Sprintf("Writable: %s\nView: %s\nParticipants: %d", currentHost.Link(), currentHost.ViewLink(), len(currentHost.Participants()))}
-			case currentGuest != nil:
-				replica := currentGuest.Snapshot()
-				return collabOperationResultMsg{Guest: currentGuest, Replica: &replica, Content: fmt.Sprintf("Joined %s · read-only: %t", replica.Session.Title, replica.ReadOnly)}
-			default:
-				return collabOperationResultMsg{Content: "Collaboration is inactive."}
-			}
+		action := "status"
+		if len(command.Args) > 0 {
+			action = command.Args[0]
 		}
-		switch command.Args[0] {
-		case "host":
-			if currentHost != nil || currentGuest != nil {
-				return collabOperationResultMsg{Err: errors.New("collaboration is already active")}
-			}
-			relayURL := collab.DefaultRelayURL
-			if len(command.Args) > 1 {
-				relayURL = command.Args[1]
-			}
-			owner, ok := runtime.(sessionRuntime)
-			if !ok || owner.Sessions() == nil {
-				return collabOperationResultMsg{Err: errors.New("session operations are unavailable")}
-			}
-			if _, err := owner.Sessions().LoadSession(context.Background(), sessionID); err != nil {
-				if _, ensureErr := owner.Sessions().Ensure(context.Background(), session.Session{ID: sessionID, Title: "New session", AgentMode: "single"}); ensureErr != nil {
-					return collabOperationResultMsg{Err: ensureErr}
-				}
-			}
-			host, err := collab.NewHost(collab.HostOptions{
-				RelayURL: relayURL, SessionID: sessionID, Sessions: owner.Sessions(),
-				OnPrompt: func(_ context.Context, _ collab.Participant, text string) error {
-					_, err := runtime.StartTurn(text)
-					return err
-				},
-				OnAbort: func(context.Context, collab.Participant) error {
-					runtime.CancelActive()
-					return nil
-				},
-			})
-			if err != nil {
-				return collabOperationResultMsg{Err: err}
-			}
-			if err := host.Start(context.Background()); err != nil {
-				return collabOperationResultMsg{Err: err}
-			}
-			return collabOperationResultMsg{Host: host, Content: "Writable: " + host.Link() + "\nView: " + host.ViewLink()}
-		case "join":
+		if action == "status" && currentGuest != nil {
+			replica := currentGuest.Snapshot()
+			return collabOperationResultMsg{Guest: currentGuest, Replica: &replica, Content: fmt.Sprintf("Joined %s · read-only: %t", replica.Session.Title, replica.ReadOnly)}
+		}
+		if action == "join" {
 			if len(command.Args) != 2 || currentHost != nil || currentGuest != nil {
 				return collabOperationResultMsg{Err: errors.New("usage: /collab join <link>")}
 			}
@@ -231,8 +167,27 @@ func runCollabOperation(runtime Runtime, sessionID string, command Command, curr
 			}
 			replica := guest.Snapshot()
 			return collabOperationResultMsg{Guest: guest, Replica: &replica, Content: fmt.Sprintf("Joined %s · read-only: %t", replica.Session.Title, replica.ReadOnly)}
-		default:
+		}
+		if action != "status" && action != "host" && action != "stop" {
 			return collabOperationResultMsg{Err: errors.New("usage: /collab [host [relay-url] | join <link> | stop | status]")}
+		}
+		relayURL := ""
+		if action == "host" && len(command.Args) > 1 {
+			relayURL = command.Args[1]
+		}
+		var state desktop.CollaborationState
+		if err := runtime.Request(context.Background(), desktopipc.MethodCollaboration, desktop.CollaborationRequest{
+			Action: action, SessionID: sessionID, RelayURL: relayURL,
+		}, &state); err != nil {
+			return collabOperationResultMsg{Err: err}
+		}
+		switch state.State {
+		case "hosting":
+			return collabOperationResultMsg{Content: fmt.Sprintf("Writable: %s\nView: %s\nParticipants: %d", state.Link, state.ViewLink, state.Participants)}
+		case "starting":
+			return collabOperationResultMsg{Content: "Collaboration is starting."}
+		default:
+			return collabOperationResultMsg{Content: "Collaboration is inactive."}
 		}
 	}
 }

@@ -91,6 +91,7 @@ func TestEnterSubmitsGuidanceWhileRunIsActive(t *testing.T) {
 	model := NewModel(runtime, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	model.status = "Running"
 	model.runID = "run-active"
+	model.deliveryMode = "guide"
 	model.composer.SetValue("先修复滚动，再处理样式")
 
 	updated, cmd := model.updateKey(tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -107,8 +108,10 @@ func TestEnterSubmitsGuidanceWhileRunIsActive(t *testing.T) {
 	if len(runtime.guidance) != 1 || runtime.guidance[0] != "先修复滚动，再处理样式" {
 		t.Fatalf("runtime guidance = %#v", runtime.guidance)
 	}
-	if last := model.transcript[len(model.transcript)-1]; last.Kind != BlockUser || last.State != "guidance" || last.RunID != "run-active" {
-		t.Fatalf("guidance transcript block = %#v", last)
+	for _, block := range model.transcript {
+		if block.Kind == BlockUser {
+			t.Fatalf("guidance was rendered before the server projection: %#v", model.transcript)
+		}
 	}
 }
 
@@ -126,6 +129,7 @@ func TestGuidanceIsNotSubmittedBeforeRunStartsOrInTeamMode(t *testing.T) {
 			runtime := &configuredTurnRuntime{}
 			model := NewModel(runtime, "/tmp/workspace", "chatgpt", "model", "high", test.mode)
 			model.status, model.runID = test.status, test.runID
+			model.deliveryMode = "guide"
 			model.composer.SetValue("do not lose this")
 			updated, cmd := model.updateKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 			model = updated.(AppModel)
@@ -140,6 +144,7 @@ func TestRejectedGuidanceRestoresComposerWithoutAddingUserBlock(t *testing.T) {
 	runtime := &configuredTurnRuntime{guidanceErr: errors.New("run is finishing")}
 	model := NewModel(runtime, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	model.status, model.runID = "Running", "run-active"
+	model.deliveryMode = "guide"
 	model.composer.SetValue("keep this guidance")
 
 	updated, cmd := model.updateKey(tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -432,7 +437,7 @@ func TestSkillSnapshotPopulatesSlashSuggestionsWithoutContextRail(t *testing.T) 
 	if err := os.WriteFile(verifyPath, []byte("---\nname: verify\ndescription: Verify the current changes\n---\nVERIFY_SKILL_BODY\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	runtime := &skillCommandRuntime{}
+	runtime := &skillCommandRuntime{expandedPrompt: `The user has invoked the "verify" skill` + "\nVERIFY_SKILL_BODY\n[Skill directory: " + verifyDir + "]\nUser: inspect the current changes"}
 	model := NewModel(runtime, "/tmp/workspace", "chatgpt", "model", "high", "single")
 	model.applyEvent(app.Event{Kind: app.EventSkillCatalog, State: "snapshot", SkillCatalog: []app.SkillCatalogEntry{
 		{Name: "verify", Description: "Verify the current changes", SourcePath: verifyPath, ModelVisible: true},
@@ -740,8 +745,8 @@ func TestClipboardImagePasteAttachesAndSubmits(t *testing.T) {
 	if len(model.pendingImages) != 0 {
 		t.Fatalf("pending images not cleared: %#v", model.pendingImages)
 	}
-	if len(model.transcript) != 1 || !strings.Contains(model.transcript[0].Content, "a.png") {
-		t.Fatalf("transcript = %#v", model.transcript)
+	if len(model.transcript) != 0 {
+		t.Fatalf("submission rendered before canonical projection: %#v", model.transcript)
 	}
 	if runtime.request.Prompt != "what is in the image?" || len(runtime.request.Images) != 1 || runtime.request.Images[0].Name != "a.png" {
 		t.Fatalf("turn request = %#v", runtime.request)

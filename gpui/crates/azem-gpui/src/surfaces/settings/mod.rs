@@ -22,7 +22,7 @@ use usage::settings_usage_body;
 pub(crate) use catalog::ModelCapabilityTooltip;
 pub(super) use catalog::pick;
 #[cfg(test)]
-pub(super) use catalog::provider_quota_remaining;
+pub(super) use catalog::{provider_quota_remaining, provider_quota_windows};
 pub(crate) use extensions::extension_confirmation;
 #[cfg(test)]
 pub(super) use extensions::{extension_safe_target, plugin_logo};
@@ -34,6 +34,7 @@ pub(super) use archive::archived_session_groups;
 #[cfg(test)]
 pub(super) use catalog::{
     model_capability_label, model_discovery_request, model_matches_query, model_provider_action,
+    model_provider_save_request, provider_base_url, provider_detail_subtitle,
     provider_matches_query,
 };
 #[cfg(test)]
@@ -64,7 +65,12 @@ pub(crate) fn settings_surface(
     native: &NativeSettings,
     cx: &mut Context<AzemWindow>,
 ) -> gpui::AnyElement {
+    let scroll_id = format!("settings-content-{section}");
     let (section, extension_tab) = settings_section_parts(section);
+    let reading_column = matches!(
+        section,
+        "appearance" | "governance" | "agents" | "security" | "extensions" | "archive" | "routes"
+    );
     let (provider_scroll, model_scroll) = scrolls;
     let (route_picker_target, route_picker) = route_picker;
     let locale = Locale::resolve(&state.settings.language);
@@ -158,6 +164,7 @@ pub(crate) fn settings_surface(
             selected_provider,
             catalog_searches,
             (provider_scroll, model_scroll),
+            native,
             cx,
         ),
     };
@@ -170,7 +177,6 @@ pub(crate) fn settings_surface(
         .min_w_0()
         .min_h_0()
         .h_full()
-        .rounded(px(17.))
         .overflow_hidden()
         .flex()
         .child(
@@ -178,16 +184,15 @@ pub(crate) fn settings_surface(
                 .id("settings-navigation")
                 .role(Role::Navigation)
                 .aria_label(locale.text("ui.settingsCategories"))
-                .w(px(220.))
+                .w(px(SIDEBAR_WIDTH))
+                .flex_shrink_0()
                 .h_full()
                 .min_h_0()
                 .border_r_1()
                 .border_color(palette.border)
                 .bg(palette.sidebar)
-                .rounded_tl(px(13.))
-                .rounded_bl(px(13.))
                 .px_3()
-                .pt(px(16.))
+                .pt(px(46.))
                 .pb(px(14.))
                 .flex()
                 .flex_col()
@@ -284,21 +289,18 @@ pub(crate) fn settings_surface(
                         .text_size(px(9.))
                         .flex()
                         .items_center()
-                        .child(locale.text("ui.settingsStoredLocally"))
-                        .child(div().flex_1())
-                        .child(format!("Azem v{}", env!("CARGO_PKG_VERSION"))),
+                        .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
                 ),
         )
         .child(
             div()
-                .id("settings-content")
+                .id(scroll_id)
                 .flex_1()
                 .min_w_0()
                 .min_h_0()
                 .h_full()
                 .bg(palette.paper)
-                .rounded_tr(px(13.))
-                .rounded_br(px(13.))
+                .when(reading_column, |content| content.bg(palette.paper_muted))
                 .when(section == "catalog", |content| content.overflow_hidden())
                 .when(section != "catalog", |content| content.overflow_y_scroll())
                 .px(px(34.))
@@ -309,6 +311,8 @@ pub(crate) fn settings_surface(
                 .gap_5()
                 .child(
                     div()
+                        .w_full()
+                        .when(reading_column, |header| header.max_w(px(800.)).mx_auto())
                         .flex()
                         .items_start()
                         .gap_4()
@@ -377,7 +381,17 @@ pub(crate) fn settings_surface(
                             )
                         }),
                 )
-                .child(body),
+                .child(
+                    div()
+                        .w_full()
+                        .min_h_0()
+                        .flex()
+                        .flex_col()
+                        .when(section == "catalog", |body| body.flex_1())
+                        .when(section != "catalog", |body| body.flex_shrink_0())
+                        .when(reading_column, |body| body.max_w(px(800.)).mx_auto())
+                        .child(body),
+                ),
         )
         .when(!state.settings.error.is_empty(), |root| {
             root.child(
@@ -496,6 +510,7 @@ fn settings_navigation_item(
             pick(selected, palette.accent, palette.faint),
         ))
         .child(label)
+        .animate_selection(selected, palette.sidebar, palette.hover, cx)
         .into_any_element()
 }
 
@@ -505,32 +520,88 @@ fn settings_detail_card(
     rows: Vec<gpui::AnyElement>,
     palette: ThemePalette,
 ) -> gpui::AnyElement {
-    div()
-        .rounded(px(12.))
-        .border_1()
-        .border_color(palette.border)
-        .bg(palette.paper)
-        .overflow_hidden()
-        .child(settings_card_header(title, description, palette))
-        .children(rows)
-        .into_any_element()
+    settings_group(title, description, settings_rows(rows, palette), palette).into_any_element()
 }
 
-fn settings_unclipped_detail_card(
+fn settings_rows(rows: Vec<gpui::AnyElement>, palette: ThemePalette) -> gpui::Div {
+    div()
+        .flex()
+        .flex_col()
+        .children(rows.into_iter().enumerate().map(|(index, row)| {
+            div()
+                .flex_shrink_0()
+                .min_w_0()
+                .when(index > 0, |row| {
+                    row.border_t_1().border_color(palette.border)
+                })
+                .child(row)
+        }))
+}
+
+fn settings_group(
     title: &'static str,
     description: &'static str,
-    rows: Vec<gpui::AnyElement>,
+    body: gpui::Div,
     palette: ThemePalette,
-) -> gpui::AnyElement {
+) -> gpui::Stateful<gpui::Div> {
+    settings_section(
+        title,
+        description,
+        body.relative()
+            .flex_shrink_0()
+            .overflow_hidden()
+            .w_full()
+            .min_w_0()
+            .rounded(px(12.))
+            .border_1()
+            .border_color(palette.border)
+            .bg(palette.paper),
+        palette,
+    )
+}
+
+fn settings_section(
+    title: &'static str,
+    description: &'static str,
+    body: gpui::Div,
+    palette: ThemePalette,
+) -> gpui::Stateful<gpui::Div> {
     div()
-        .relative()
-        .rounded(px(12.))
-        .border_1()
-        .border_color(palette.border)
-        .bg(palette.paper)
-        .child(settings_card_header(title, description, palette))
-        .children(rows)
-        .into_any_element()
+        .id(format!("settings-group-{title}"))
+        .role(Role::Group)
+        .aria_label(title)
+        .flex_shrink_0()
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(
+            div()
+                .flex_shrink_0()
+                .px_2()
+                .py_1()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(palette.muted)
+                        .child(title),
+                )
+                .when(!description.is_empty(), |header| {
+                    header.child(
+                        div()
+                            .text_xs()
+                            .line_height(px(18.))
+                            .text_color(palette.faint)
+                            .child(description),
+                    )
+                }),
+        )
+        .child(body)
 }
 
 fn settings_detail_row(
@@ -568,63 +639,39 @@ fn settings_control_detail_row(
     control: gpui::AnyElement,
     palette: ThemePalette,
 ) -> gpui::AnyElement {
-    div()
-        .min_h(px(66.))
-        .px_4()
-        .py_2()
-        .border_t_1()
-        .border_color(palette.border)
-        .flex()
-        .items_center()
-        .gap_4()
-        .child(
-            div()
-                .min_w_0()
-                .flex_1()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(
-                    div()
-                        .text_color(palette.ink)
-                        .text_sm()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .child(title),
-                )
-                .child(
-                    div()
-                        .text_color(palette.muted)
-                        .text_xs()
-                        .line_height(px(18.))
-                        .child(description),
-                ),
-        )
-        .child(control)
-        .into_any_element()
+    settings_children_row(title, description, control, palette).into_any_element()
 }
 
-fn settings_switch(on: bool, palette: ThemePalette) -> gpui::Div {
+fn settings_switch(on: bool, palette: ThemePalette, cx: &gpui::App) -> impl IntoElement {
+    use gpui::Interpolate;
     div()
         .w(px(34.))
         .h(px(20.))
-        .p(px(2.))
+        .relative()
         .rounded_full()
-        .bg(if on {
-            palette.positive
-        } else {
-            palette.border_strong
-        })
-        .flex()
-        .justify_end()
-        .when(!on, |switch| switch.justify_start())
-        .child(
-            div()
-                .size(px(16.))
-                .rounded_full()
-                .bg(rgb(0xffffff))
-                .shadow(vec![
-                    BoxShadow::new(px(0.), px(1.), hsla(0., 0., 0., 0.18)).blur_radius(px(2.)),
-                ]),
+        .with_spring(
+            "switch-motion",
+            control_animation(if on { 1. } else { 0. }, cx),
+            move |rail, phase| {
+                rail.bg(Rgba::interpolate(
+                    palette.border_strong,
+                    palette.positive,
+                    phase,
+                ))
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(2. + 14. * phase))
+                        .top(px(2.))
+                        .size(px(16.))
+                        .rounded_full()
+                        .bg(rgb(0xffffff))
+                        .shadow(vec![
+                            BoxShadow::new(px(0.), px(1.), hsla(0., 0., 0., 0.18))
+                                .blur_radius(px(2.)),
+                        ]),
+                )
+            },
         )
 }
 
@@ -748,5 +795,6 @@ fn settings_action_button(
             }
         }))
         .child(label)
+        .animate_selection(selected, palette.paper, palette.paper_muted, cx)
         .into_any_element()
 }

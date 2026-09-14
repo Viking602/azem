@@ -51,6 +51,12 @@ func TestClassifyCancellationAndTransport(t *testing.T) {
 	if got := Classify(context.Canceled); got != CodeCancelled {
 		t.Errorf("context.Canceled classified as %s", got)
 	}
+	if got := Classify(context.DeadlineExceeded); got != CodeTimeout {
+		t.Errorf("context.DeadlineExceeded classified as %s, want timeout", got)
+	}
+	if got := Classify(headerTimeoutError{}); got != CodeTimeout {
+		t.Errorf("HTTP header timeout classified as %s, want timeout", got)
+	}
 	if got := Classify(fmt.Errorf("read: %w", io.ErrUnexpectedEOF)); got != CodeTransport {
 		t.Errorf("unexpected EOF classified as %s", got)
 	}
@@ -62,8 +68,29 @@ func TestClassifyCancellationAndTransport(t *testing.T) {
 	}
 }
 
+func TestDisplayHidesDeadlineSentinel(t *testing.T) {
+	if got := Display(context.DeadlineExceeded); got != TimeoutMessage {
+		t.Errorf("DeadlineExceeded display = %q, want product timeout copy", got)
+	}
+	if got := Display(fmt.Errorf("finish attempt: %w", context.DeadlineExceeded)); got != TimeoutMessage {
+		t.Errorf("wrapped deadline display = %q, want product timeout copy", got)
+	}
+	if got := Display(errors.New("provider unavailable")); got != "provider unavailable" {
+		t.Errorf("ordinary display = %q", got)
+	}
+}
+
+type headerTimeoutError struct{}
+
+func (headerTimeoutError) Error() string   { return "net/http: timeout awaiting response headers" }
+func (headerTimeoutError) Timeout() bool   { return true }
+func (headerTimeoutError) Temporary() bool { return true }
+func (headerTimeoutError) Is(err error) bool {
+	return err == context.DeadlineExceeded
+}
+
 func TestRetryableGuidance(t *testing.T) {
-	retryable := []Code{CodeRateLimit, CodeServer, CodeTransport}
+	retryable := []Code{CodeRateLimit, CodeServer, CodeTransport, CodeTimeout}
 	terminal := []Code{CodeAuth, CodeQuota, CodeContextOverflow, CodeEmptyResponse, CodeInvalidRequest, CodeCancelled, CodeUnknown}
 	for _, code := range retryable {
 		if !Retryable(code) {

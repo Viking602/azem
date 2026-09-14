@@ -9,7 +9,6 @@ import (
 	"regexp"
 	"strings"
 
-	agentservice "github.com/Viking602/azem/internal/agent"
 	"github.com/Viking602/azem/internal/agentruntime"
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/session"
@@ -44,19 +43,17 @@ type ttsrMatchContext struct {
 }
 
 type ttsrHook struct {
-	cfg             config.TTSRConfig
-	rules           []compiledTTSRRule
-	coding          *agentservice.Service
-	store           *session.Service
-	sessionID       string
-	runID           string
-	control         *turnControlQueue
-	buffers         map[string]string
-	toolNames       map[string]string
-	toolArguments   map[string]string
-	lastASTSnapshot map[string]string
-	injectedAt      map[string]int
-	messageCount    int
+	cfg           config.TTSRConfig
+	rules         []compiledTTSRRule
+	store         *session.Service
+	sessionID     string
+	runID         string
+	control       *turnControlQueue
+	buffers       map[string]string
+	toolNames     map[string]string
+	toolArguments map[string]string
+	injectedAt    map[string]int
+	messageCount  int
 }
 
 func cloneTTSRConfig(source config.TTSRConfig) config.TTSRConfig {
@@ -72,17 +69,17 @@ func cloneTTSRConfig(source config.TTSRConfig) config.TTSRConfig {
 	return cloned
 }
 
-func newTTSRHook(cfg config.TTSRConfig, coding *agentservice.Service, store *session.Service, sessionID, runID string, control *turnControlQueue) (*ttsrHook, error) {
+func newTTSRHook(cfg config.TTSRConfig, store *session.Service, sessionID, runID string, control *turnControlQueue) (*ttsrHook, error) {
 	if !cfg.Enabled || len(cfg.Rules) == 0 {
 		return nil, nil
 	}
-	if coding == nil || control == nil {
-		return nil, fmt.Errorf("TTSR requires coding and turn-control runtimes")
+	if control == nil {
+		return nil, fmt.Errorf("TTSR requires a turn-control runtime")
 	}
 	runtime := &ttsrHook{
-		cfg: cfg, coding: coding, store: store, sessionID: sessionID, runID: runID, control: control,
+		cfg: cfg, store: store, sessionID: sessionID, runID: runID, control: control,
 		buffers: make(map[string]string), toolNames: make(map[string]string), toolArguments: make(map[string]string),
-		lastASTSnapshot: make(map[string]string), injectedAt: make(map[string]int),
+		injectedAt: make(map[string]int),
 	}
 	for _, rule := range cfg.Rules {
 		compiled := compiledTTSRRule{StreamRuleConfig: rule}
@@ -113,21 +110,13 @@ func (runtime *ttsrHook) OnEvent(ctx context.Context, event hyprovider.Event) er
 		runtime.messageCount++
 		return nil
 	}
-	matchContext, delta, source, err := runtime.eventSnapshot(event)
+	matchContext, delta, _, err := runtime.eventSnapshot(event)
 	if err != nil || matchContext == nil {
 		return err
 	}
 	buffer := appendTTSRBuffer(runtime.buffers[matchContext.streamKey], delta)
 	runtime.buffers[matchContext.streamKey] = buffer
 	matches := runtime.regexMatches(buffer, *matchContext)
-	if source != "" && len(runtime.astRules(*matchContext)) > 0 && source != runtime.lastASTSnapshot[matchContext.streamKey] {
-		runtime.lastASTSnapshot[matchContext.streamKey] = source
-		astMatches, astErr := runtime.matchAST(ctx, source, *matchContext)
-		if astErr != nil {
-			return astErr
-		}
-		matches = appendUniqueTTSRRules(matches, astMatches...)
-	}
 	if len(matches) == 0 {
 		return nil
 	}
@@ -191,34 +180,6 @@ func (runtime *ttsrHook) regexMatches(buffer string, matchContext ttsrMatchConte
 	return matches
 }
 
-func (runtime *ttsrHook) astRules(matchContext ttsrMatchContext) []compiledTTSRRule {
-	rules := make([]compiledTTSRRule, 0)
-	for _, rule := range runtime.rules {
-		if len(rule.ASTConditions) > 0 && runtime.canTrigger(rule) && ttsrRuleScopeMatches(rule.StreamRuleConfig, matchContext) && ttsrRuleGlobsMatch(rule.Globs, matchContext.filePaths) {
-			rules = append(rules, rule)
-		}
-	}
-	return rules
-}
-
-func (runtime *ttsrHook) matchAST(ctx context.Context, source string, matchContext ttsrMatchContext) ([]compiledTTSRRule, error) {
-	language := ttsrLanguage(matchContext.filePaths)
-	if language == "" {
-		return nil, nil
-	}
-	matches := make([]compiledTTSRRule, 0)
-	for _, rule := range runtime.astRules(matchContext) {
-		matched, err := runtime.coding.MatchASTSnapshot(ctx, source, language, rule.ASTConditions)
-		if err != nil {
-			return nil, fmt.Errorf("match TTSR AST rule %q: %w", rule.Name, err)
-		}
-		if matched {
-			matches = append(matches, rule)
-		}
-	}
-	return matches, nil
-}
-
 func (runtime *ttsrHook) inject(ctx context.Context, rules []compiledTTSRRule, matchContext ttsrMatchContext) error {
 	rules = appendUniqueTTSRRules(nil, rules...)
 	if len(rules) == 0 {
@@ -247,7 +208,7 @@ func (runtime *ttsrHook) inject(ctx context.Context, rules []compiledTTSRRule, m
 			return fmt.Errorf("persist TTSR injection: %w", err)
 		}
 	}
-	if err := runtime.control.Enqueue(turnControlMessage{ID: controlID, Kind: kind, Message: value, DiscardRejectedOutput: interrupt && runtime.cfg.ContextMode == "discard"}); err != nil {
+	if err := runtime.control.Enqueue(turnControlMessage{ID: controlID, Kind: kind, Message: value, InterruptStream: interrupt, DiscardRejectedOutput: interrupt && runtime.cfg.ContextMode == "discard"}); err != nil {
 		return err
 	}
 	for _, rule := range rules {
@@ -370,36 +331,6 @@ func ttsrArgumentSource(toolName string, arguments map[string]any) string {
 		}
 	}
 	return ""
-}
-
-func ttsrLanguage(paths []string) string {
-	if len(paths) == 0 {
-		return ""
-	}
-	switch strings.ToLower(filepath.Ext(paths[0])) {
-	case ".ts":
-		return "ts"
-	case ".tsx":
-		return "tsx"
-	case ".js", ".mjs", ".cjs":
-		return "js"
-	case ".jsx":
-		return "jsx"
-	case ".py":
-		return "python"
-	case ".rs":
-		return "rust"
-	case ".go":
-		return "go"
-	case ".java":
-		return "java"
-	case ".c":
-		return "c"
-	case ".cc", ".cpp", ".cxx":
-		return "cpp"
-	default:
-		return ""
-	}
 }
 
 func ttsrShouldInterrupt(mode string, source ttsrSource) bool {

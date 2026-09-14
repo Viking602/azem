@@ -3,15 +3,40 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Viking602/azem/internal/config"
 	hyagent "github.com/Viking602/venat/agent"
 	"github.com/Viking602/venat/message"
 	hyprovider "github.com/Viking602/venat/provider"
 )
+
+func TestGeneratedLoopDetectsShortRepeatedSentences(t *testing.T) {
+	var prefix strings.Builder
+	for i := 0; i < 40; i++ {
+		fmt.Fprintf(&prefix, "Considering candidate %d with a different result and implementation detail. ", i)
+	}
+	for _, phrase := range []string{
+		"Let me write it now. 1m23s is plenty for this. ",
+		"Let me try to implement a 2x2 closed form case for n=2. ",
+	} {
+		if !detectGeneratedLoop(prefix.String() + strings.Repeat(phrase, 5)) {
+			t.Errorf("missed short-sentence loop: %q", phrase)
+		}
+		if detectGeneratedLoop(prefix.String() + strings.Repeat(phrase, 3)) {
+			t.Errorf("interrupted fewer than four repetitions: %q", phrase)
+		}
+	}
+	if detectGeneratedLoop(prefix.String()) {
+		t.Fatal("distinct candidate analysis was mistaken for a loop")
+	}
+}
 
 func TestThinkingLoopGuardInterruptsAndContinues(t *testing.T) {
 	repeated := strings.Repeat("concrete repeated reasoning segment with enough technical words to represent a stalled model loop and no actual progress. ", 8)
@@ -20,22 +45,222 @@ func TestThinkingLoopGuardInterruptsAndContinues(t *testing.T) {
 	guard := newModelLoopGuard(config.LoopGuardConfig{
 		ThinkingEnabled: true, AssistantTextEnabled: true, ToolCallEnabled: true, ToolCallThreshold: 5,
 	}, control, nil, "session", "run")
+	driver := &compactionTestDriver{streams: [][]hyprovider.Event{
+		{{Kind: hyprovider.EventThinkingDelta, Thinking: repeated}},
+		{{Kind: hyprovider.EventTextDelta, Text: "corrected answer"}, {Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete}},
+	}}
+	var stalled *loopGuardStalledStream
 	engine := bindTurnControl(hyagent.Engine{
-		Provider: &compactionTestDriver{streams: [][]hyprovider.Event{
-			{{Kind: hyprovider.EventThinkingDelta, Thinking: repeated}, {Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete}},
-			{{Kind: hyprovider.EventTextDelta, Text: "corrected answer"}, {Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete}},
-		}},
+		Provider: driver,
+		ModelInterceptor: hyprovider.StreamInterceptorFunc(func(ctx context.Context, next hyprovider.Driver, request hyprovider.Request) (hyprovider.Stream, error) {
+			stream, err := next.Stream(ctx, request)
+			if err == nil && len(driver.requests) == 1 {
+				stalled = &loopGuardStalledStream{Stream: stream, ctx: ctx}
+				return stalled, nil
+			}
+			return stream, err
+		}),
 		Model:      "model",
 		LoopPolicy: hyagent.LoopPolicy{MaxIterations: 3},
-	}, control)
+	}, control, time.Time{})
 	engine.Hooks = engine.Hooks.Prepend(guard)
-	result := engine.Run(context.Background(), hyagent.Request{Prompt: "solve"}, hyagent.OutputPolicy{})
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	result := engine.Run(ctx, hyagent.Request{Prompt: "solve"}, hyagent.OutputPolicy{})
 	if result.Failure != nil {
 		t.Fatal(result.Failure)
 	}
 	encoded, _ := json.Marshal(result.Messages)
-	if !strings.Contains(string(encoded), "stalled model loop") || !strings.Contains(string(encoded), "Host loop guard: thinking-loop") || !strings.Contains(string(encoded), "corrected answer") {
+	if strings.Contains(string(encoded), "stalled model loop") || !strings.Contains(string(encoded), "Host loop guard: thinking-loop") || !strings.Contains(string(encoded), "corrected answer") {
 		t.Fatalf("thinking-loop recovery = %s", encoded)
+	}
+	if !stalled.closed || ctx.Err() != nil || len(driver.requests) != 2 || result.Steps[0].ModelCall.StopReason != hyprovider.StopReasonAborted {
+		t.Fatalf("stream was not interrupted and retried within the same live run: %+v", result)
+	}
+}
+
+func TestProviderRuntimeLoopRecoveryKeepsEvidenceAndSettlesExhaustion(t *testing.T) {
+	for _, test := range []struct {
+		name, delta string
+		loops       int
+	}{
+		{"thinking-recovery", "response.reasoning_summary_text.delta", 1},
+		{"text-recovery", "response.output_text.delta", 1},
+		{"exhaustion", "response.reasoning_summary_text.delta", 4},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			loops := test.loops
+			done := make(chan struct{})
+			defer close(done)
+			phrase := "Looping candidate: create the branch, implement the parser, add tests, update documentation, and commit everything. "
+			harness := newSkillRuntimeHarness(t, "---\nname: demo\ndescription: stable catalog\n---\nstable body\n", nil, func(call int, body string, writer http.ResponseWriter) {
+				if call == 1 {
+					writeProviderToolCall(writer, "loop-read", "read-1", "coding.read_file", `{"path":"evidence.txt"}`)
+					return
+				}
+				if call > 2 {
+					assertLoopRetryContext(t, body, phrase)
+				}
+				if call <= loops+1 {
+					fmt.Fprintf(writer, "data: {\"type\":%q,\"delta\":%q}\n\n", test.delta, strings.Repeat(phrase, 20))
+					writer.(http.Flusher).Flush()
+					select {
+					case <-done:
+					case <-time.After(10 * time.Second):
+						t.Error("host failed to interrupt repeated generation")
+					}
+					return
+				}
+				if loops == 4 || call != 3 {
+					t.Errorf("unexpected provider call after retry limit: %d", call)
+				}
+				writeProviderText(writer, "loop-finish", "Finished using the observed evidence.")
+			})
+			if err := os.WriteFile(filepath.Join(harness.workspace, "evidence.txt"), []byte("stable-tool-evidence\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			runID, err := harness.service.StartConfiguredTurn(TurnRequest{SessionID: "loop-e2e", Prompt: "Read evidence.txt and explain it.", Provider: "chatgpt", Model: "gpt-skill", Reasoning: "minimal", AgentMode: "single"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			terminal := waitForLoopTerminal(t, harness.service, runID)
+			wantCalls, wantTerminal := int32(3), EventRunFinished
+			if loops == 4 {
+				wantCalls, wantTerminal = 5, EventRunFailed
+				if !strings.Contains(terminal.Text, "persisted after three guarded retries") {
+					t.Errorf("loop failure was obscured: %s", terminal.Text)
+				}
+			}
+			if harness.calls.Load() != wantCalls || terminal.Kind != wantTerminal {
+				t.Errorf("calls=%d terminal=%s; want %d %s", harness.calls.Load(), terminal.Kind, wantCalls, wantTerminal)
+			}
+			assertLoopAttemptEvidence(t, harness, phrase, loops)
+		})
+	}
+}
+
+func assertLoopRetryContext(t *testing.T, body, phrase string) {
+	t.Helper()
+	if strings.Contains(body, phrase) || !strings.Contains(body, "stable-tool-evidence") || !strings.Contains(body, "Host loop guard") {
+		t.Error("retry retained rejected repetition or lost prior tool evidence/control")
+	}
+}
+
+func waitForLoopTerminal(t *testing.T, service *Service, runID string) Event {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
+	defer cancel()
+	var terminal Event
+	for {
+		event, err := service.NextEvent(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if event.RunID == runID && (event.Kind == EventRunFinished || event.Kind == EventRunFailed || event.Kind == EventRecoveryState) {
+			terminal = event
+			break
+		}
+	}
+	return terminal
+}
+
+func assertLoopAttemptEvidence(t *testing.T, harness skillRuntimeHarness, phrase string, loops int) {
+	t.Helper()
+	var unknownEffects, unknownUsage int
+	if err := harness.store.DB().QueryRowContext(t.Context(), `SELECT count(*) FROM agent_effect_attempts WHERE status IN ('unknown','running')`).Scan(&unknownEffects); err != nil {
+		t.Fatal(err)
+	}
+	if err := harness.store.DB().QueryRowContext(t.Context(), `SELECT count(*) FROM provider_requests WHERE status='unknown'`).Scan(&unknownUsage); err != nil {
+		t.Fatal(err)
+	}
+	if unknownEffects != 0 || unknownUsage != loops {
+		t.Errorf("durable unknown effects=%d, unknown physical usage=%d; want 0 and %d", unknownEffects, unknownUsage, loops)
+	}
+	if retained := retainedLoopAttempts(t, harness, phrase); retained != loops {
+		t.Fatalf("original looping attempt evidence: retained=%d want=%d", retained, loops)
+	}
+}
+
+func retainedLoopAttempts(t *testing.T, harness skillRuntimeHarness, phrase string) int {
+	t.Helper()
+	rows, err := harness.store.DB().QueryContext(t.Context(), `SELECT attempt_inline,attempt_digest FROM agent_effect_attempts WHERE kind='model'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	retained := 0
+	for rows.Next() {
+		var data []byte
+		var digest string
+		if err := rows.Scan(&data, &digest); err != nil {
+			t.Fatal(err)
+		}
+		if digest != "" {
+			data, err = harness.store.Blobs().Get(t.Context(), digest)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		var stored struct{ Attempt struct{ Payload []byte } }
+		if err := json.Unmarshal(data, &stored); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(stored.Attempt.Payload), phrase) {
+			retained++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return retained
+}
+
+// The original regression test ended the stream itself, masking the missing
+// host interruption. This provider never finishes after its first delta.
+type loopGuardStalledStream struct {
+	hyprovider.Stream
+	ctx          context.Context
+	read, closed bool
+}
+
+func (s *loopGuardStalledStream) Recv() (hyprovider.Event, error) {
+	if s.read {
+		<-s.ctx.Done()
+		return hyprovider.Event{}, s.ctx.Err()
+	}
+	s.read = true
+	return s.Stream.Recv()
+}
+
+func (s *loopGuardStalledStream) Close() error {
+	s.closed = true
+	return s.Stream.Close()
+}
+
+func TestStreamControlPreservesToolAndTerminalBoundaries(t *testing.T) {
+	for _, first := range []hyprovider.EventKind{hyprovider.EventThinkingDelta, hyprovider.EventTextDelta, hyprovider.EventToolCallDelta, hyprovider.EventToolCall, hyprovider.EventDone, hyprovider.EventError} {
+		for _, interrupt := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/interrupt=%v", first, interrupt), func(t *testing.T) {
+				queue := newTurnControlQueue()
+				stream := &turnControlStream{ctx: t.Context(), queue: queue, Stream: hyprovider.NewSliceStream([]hyprovider.Event{
+					{Kind: first}, {Kind: hyprovider.EventTextDelta, Text: "original next event"},
+				})}
+				if _, err := stream.Recv(); err != nil {
+					t.Fatal(err)
+				}
+				if err := queue.Enqueue(turnControlMessage{Kind: turnControlSteer, Message: message.NewText(message.RoleSystem, "continue"), InterruptStream: interrupt}); err != nil {
+					t.Fatal(err)
+				}
+				event, err := stream.Recv()
+				wantAbort := interrupt && (first == hyprovider.EventThinkingDelta || first == hyprovider.EventTextDelta)
+				if err != nil || (event.StopReason == hyprovider.StopReasonAborted) != wantAbort {
+					t.Fatalf("next event=%+v, err=%v, wantAbort=%v", event, err, wantAbort)
+				}
+				if !wantAbort && event.Text != "original next event" {
+					t.Fatalf("provider event was changed: %+v", event)
+				}
+			})
+		}
 	}
 }
 

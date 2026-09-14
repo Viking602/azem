@@ -1,5 +1,5 @@
-// Command gen-contracts renders the Go runtime contract into the native Rust
-// desktop client. Run via `make contracts`; CI verifies freshness with
+// Command gen-contracts renders the Go runtime contract into the
+// Rust desktop client. Run via `make contracts`; CI verifies freshness with
 // `make contracts-check`.
 package main
 
@@ -70,6 +70,8 @@ pub struct ProtocolError {
     pub message: String,
     #[serde(default)]
     pub retryable: bool,
+    #[serde(default)]
+    pub cursor: u64,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]

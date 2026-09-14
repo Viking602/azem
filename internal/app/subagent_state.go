@@ -17,15 +17,23 @@ import (
 )
 
 func (r *subagentRuntime) Query(ctx context.Context, sessionID string, ids []string, timeout time.Duration) []agentservice.SubagentSnapshot {
+	return r.query(ctx, sessionID, ids, timeout, false)
+}
+
+func (r *subagentRuntime) query(ctx context.Context, sessionID string, ids []string, timeout time.Duration, anyTerminal bool) []agentservice.SubagentSnapshot {
 	deadline := time.Now().Add(timeout)
 	for {
-		snapshots, allTerminal := r.queryOnce(sessionID, ids)
-		if timeout <= 0 || allTerminal || time.Now().After(deadline) {
-			return snapshots
-		}
+		// Subscribe before reading state so a completion between them cannot be missed.
 		r.mu.Lock()
 		changed := r.changed
 		r.mu.Unlock()
+		snapshots, allTerminal := r.queryOnce(sessionID, ids)
+		settled := anyTerminal && slices.ContainsFunc(snapshots, func(snapshot agentservice.SubagentSnapshot) bool {
+			return snapshot.Found && subagentTerminal(snapshot.Run.State)
+		})
+		if timeout <= 0 || allTerminal || settled || time.Now().After(deadline) {
+			return snapshots
+		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			return snapshots
@@ -571,6 +579,7 @@ func (r *subagentRuntime) handleFrame(id string, frame hyagent.Frame) {
 		}
 		// Title is a stable kind key; the GUI localizes "thinking" → 思考 / Thinking.
 		appendAgentDelta(&active.blocks, "thinking", childRunID, "thinking", frame.Thinking)
+		active.activity = compactActivity(boundedUTF8(active.blocks[len(active.blocks)-1].Content, 512))
 	case hyagent.FrameText:
 		if !noteVisibleContentLocked(active, frame.Text) {
 			r.mu.Unlock()
@@ -578,6 +587,7 @@ func (r *subagentRuntime) handleFrame(id string, frame hyagent.Frame) {
 		}
 		kind := subagentTextKind(frame.TextPhase, false)
 		appendAgentDelta(&active.blocks, kind, childRunID, kind, frame.Text)
+		active.activity = compactActivity(boundedUTF8(active.blocks[len(active.blocks)-1].Content, 512))
 	case hyagent.FrameToolCall:
 		if frame.ToolCall != nil {
 			settleSubagentProcessText(active.blocks, childRunID)
@@ -618,6 +628,10 @@ func (r *subagentRuntime) handleFrame(id string, frame hyagent.Frame) {
 		active.usage.TotalTokens += frame.Usage.TotalTokens
 		active.run.TokensUsed = active.usage.TotalTokens
 	}
+	var transcriptBlockID string
+	if (frame.Kind == hyagent.FrameText || frame.Kind == hyagent.FrameThinking) && len(active.blocks) > 0 {
+		transcriptBlockID = active.blocks[len(active.blocks)-1].ID
+	}
 	r.mu.Unlock()
 	r.persistActivity(id)
 	// Push live roster stats on tool boundaries and turn ends. Thinking and
@@ -632,6 +646,9 @@ func (r *subagentRuntime) handleFrame(id string, frame hyagent.Frame) {
 	event := Event{
 		SessionID: sessionID, RunID: childRunID, AgentID: id, State: "running",
 		Data: childFrameData(frame.Source, parentToolCallID, nil),
+	}
+	if transcriptBlockID != "" {
+		event.Data["transcriptBlockId"] = transcriptBlockID
 	}
 	switch frame.Kind {
 	case hyagent.FrameThinking:

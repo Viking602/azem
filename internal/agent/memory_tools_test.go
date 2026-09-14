@@ -44,6 +44,14 @@ func TestModelMemoryToolsRetainRecallReadEditAndInvalidate(t *testing.T) {
 	}
 
 	recall := findWorkspaceTool(t, service, root, ToolRecall)
+	learned := nativeTestCall(t, callerCtx, findWorkspaceTool(t, service, root, ToolLearn), `{"content":"A native tool failure preserves the exact error boundary","context":"regression"}`)
+	if learned.IsError {
+		t.Fatal(learned.Content)
+	}
+	reflected := nativeTestCall(t, callerCtx, findWorkspaceTool(t, service, root, ToolReflect), `{"query":"exact error boundary"}`)
+	if reflected.IsError || !strings.Contains(reflected.Content, "exact error boundary") || !strings.Contains(reflected.Content, "untrusted historical evidence") {
+		t.Fatal(reflected.Content)
+	}
 	recalled, err := recall.Execute(ctx, tool.Call{ID: "recall-1", Name: ToolRecall, Arguments: json.RawMessage(`{"query":"behavioral checks"}`)}, nil)
 	if err != nil || recalled.IsError || !strings.Contains(recalled.Content, id) || !strings.Contains(recalled.Content, "untrusted historical evidence") {
 		t.Fatalf("recall = %#v, %v", recalled, err)

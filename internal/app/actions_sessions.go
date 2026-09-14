@@ -16,16 +16,8 @@ var sessionActionHandlers = map[ActionKind]actionHandler{
 		return s.createSession(ctx, action.Target)
 	},
 	ActionResumeSession: func(s *Service, ctx context.Context, action Action) error {
-		if err := s.sessions.SetUIState(ctx, action.Target, "unread", false); err != nil {
-			return err
-		}
-		if err := s.sessions.SetArchived(ctx, action.Target, false); err != nil {
-			return err
-		}
-		if err := s.emitSession(ctx, action.Target); err != nil {
-			return err
-		}
-		return s.emitSessionList(ctx)
+		_, err := s.ResumeSession(ctx, action.Target)
+		return err
 	},
 	ActionRefreshSession: func(s *Service, ctx context.Context, action Action) error {
 		_, err := s.emitSessionProjection(ctx, action.Target, "refreshed", false)
@@ -143,6 +135,10 @@ func (s *Service) executeManualCompaction(ctx context.Context, sessionID string)
 		return err
 	}
 	projection.Usage = cleared
+	agents, err := s.projectFusionSession(ctx, &projection)
+	if err != nil {
+		return err
+	}
 	blocks, err := json.Marshal(projection.Blocks)
 	if err != nil {
 		return err
@@ -157,7 +153,7 @@ func (s *Service) executeManualCompaction(ctx context.Context, sessionID string)
 	}
 	s.emit(ctx, Event{
 		Kind: EventSessionLoaded, SessionID: sessionID, State: "compacted",
-		Data: sessionProjectionData(projection, string(blocks)), AgentSnapshots: s.subagentSnapshots(ctx, sessionID), Todo: &todo, Recap: currentRecap,
+		Data: sessionProjectionData(projection, string(blocks)), AgentSnapshots: agents, Todo: &todo, Recap: currentRecap,
 	})
 	_ = s.emitContextProfile(ctx, sessionID)
 	_ = s.dispatchLifecycle(ctx, hooks.PostCompact, s.hookMetadata(sessionID, ""), func(e *hooks.Envelope) {

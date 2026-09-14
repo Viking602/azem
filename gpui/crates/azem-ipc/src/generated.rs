@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 3;
 pub const MAX_CONTROL_FRAME_BYTES: usize = 16777216;
 pub const MAX_BINARY_CHUNK_BYTES: usize = 262144;
 pub const MAX_REASSEMBLED_BINARY: usize = 268435456;
@@ -36,6 +36,10 @@ pub enum Method {
     SearchSessions,
     #[serde(rename = "resume_session")]
     ResumeSession,
+    #[serde(rename = "select_session")]
+    SelectSession,
+    #[serde(rename = "create_session")]
+    CreateSession,
     #[serde(rename = "session_tree")]
     SessionTree,
     #[serde(rename = "navigate_session_tree")]
@@ -50,6 +54,16 @@ pub enum Method {
     ShareSession,
     #[serde(rename = "fork_session")]
     ForkSession,
+    #[serde(rename = "import_session")]
+    ImportSession,
+    #[serde(rename = "expand_skill_invocation")]
+    ExpandSkillInvocation,
+    #[serde(rename = "collaboration")]
+    Collaboration,
+    #[serde(rename = "prompt_queue")]
+    PromptQueue,
+    #[serde(rename = "mutate_prompt_queue")]
+    MutatePromptQueue,
     #[serde(rename = "pull_request_dashboard")]
     PullRequestDashboard,
     #[serde(rename = "pull_request_detail")]
@@ -238,6 +252,8 @@ pub enum ActionKind {
     SetModelProvider,
     #[serde(rename = "set_model_enabled")]
     SetModelEnabled,
+    #[serde(rename = "set_model_extended_context")]
+    SetModelExtendedContext,
     #[serde(rename = "list_model_routes")]
     ListModelRoutes,
     #[serde(rename = "set_model_route")]
@@ -260,6 +276,10 @@ pub enum ActionKind {
     SetChatgptFastMode,
     #[serde(rename = "set_session_preferences")]
     SetSessionPreferences,
+    #[serde(rename = "set_session_mode")]
+    SetSessionMode,
+    #[serde(rename = "set_workflow_mode")]
+    SetWorkflowMode,
     #[serde(rename = "list_background")]
     ListBackground,
     #[serde(rename = "start_background")]
@@ -312,6 +332,12 @@ pub enum EventKind {
     BootstrapDone,
     #[serde(rename = "session_loaded")]
     SessionLoaded,
+    #[serde(rename = "run_state")]
+    RunState,
+    #[serde(rename = "session_projection")]
+    SessionProjection,
+    #[serde(rename = "prompt_queue_state")]
+    PromptQueueState,
     #[serde(rename = "todo_updated")]
     TodoUpdated,
     #[serde(rename = "run_started")]
@@ -427,6 +453,8 @@ pub struct ProtocolError {
     pub message: String,
     #[serde(default)]
     pub retryable: bool,
+    #[serde(default)]
+    pub cursor: u64,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]

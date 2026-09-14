@@ -67,6 +67,19 @@ func acquireRecoveryFence(ctx context.Context, path string) (RecoveryFence, bool
 	}
 }
 
+func acquireCatalogReadFence(ctx context.Context, path string) (io.Closer, error) {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open runtime recovery lock: %w", err)
+	}
+	fence := &fileRecoveryFence{file: file}
+	if err := fence.waitForShared(ctx); err != nil {
+		_ = fence.Close()
+		return nil, err
+	}
+	return fence, nil
+}
+
 func (f *fileRecoveryFence) tryStartRecovery() (bool, error) {
 	err := f.tryLock(true)
 	if err == nil {

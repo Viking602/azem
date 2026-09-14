@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/Viking602/azem/internal/provider/toolnames"
 	"strings"
 
 	sdk "github.com/Viking602/llmux"
@@ -21,12 +22,12 @@ const (
 	trustedHostContextPrefix  = "[Trusted host context]\n"
 )
 
-func convertRequest(request hyprovider.Request, defaultReasoningEffort, providerID string) (sdk.Request, *toolNames, error) {
+func convertRequest(request hyprovider.Request, defaultReasoningEffort, providerID string) (sdk.Request, *toolnames.Names, error) {
 	return convertRequestContext(context.Background(), request, defaultReasoningEffort, providerID)
 }
 
-func convertRequestContext(ctx context.Context, request hyprovider.Request, defaultReasoningEffort, providerID string) (sdk.Request, *toolNames, error) {
-	names := newToolNames(request.Tools)
+func convertRequestContext(ctx context.Context, request hyprovider.Request, defaultReasoningEffort, providerID string) (sdk.Request, *toolnames.Names, error) {
+	names := toolnames.New(request.Tools)
 	anthropicProtocol := providerID == "anthropic"
 	developerMessages := providerID == "openai" || providerID == "xai"
 	if profile, ok := compat.Lookup(providerID); ok {
@@ -87,7 +88,7 @@ func convertRequestContext(ctx context.Context, request hyprovider.Request, defa
 	return sdk.Request{Messages: messages, Instructions: instructions, Metadata: sanitizedMetadata(request.Metadata), Options: options}, names, nil
 }
 
-func convertMessages(input []message.Message, attachmentRoot string, names *toolNames, anthropicProtocol, developerMessages, disableImages bool) ([]sdk.Message, string, error) {
+func convertMessages(input []message.Message, attachmentRoot string, names *toolnames.Names, anthropicProtocol, developerMessages, disableImages bool) ([]sdk.Message, string, error) {
 	messages := make([]sdk.Message, 0, len(input))
 	instructions := make([]string, 0, 2)
 	lastUser := lastUserMessageIndex(input)
@@ -208,7 +209,7 @@ func boolExtraValue(extra map[string]any, key string) bool {
 	return value
 }
 
-func assistantMessage(current message.Message, names *toolNames) (sdk.Message, error) {
+func assistantMessage(current message.Message, names *toolnames.Names) (sdk.Message, error) {
 	if len(current.ProviderState) > 0 {
 		return sdk.Message{Role: sdk.RoleAssistant, ProviderState: append(json.RawMessage(nil), current.ProviderState...)}, nil
 	}

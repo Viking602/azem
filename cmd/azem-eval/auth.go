@@ -82,6 +82,17 @@ func syncAuth(from, to string) error {
 		return fmt.Errorf("open sync source: %w", err)
 	}
 	defer src.Close()
+	// Initialize a fresh evaluation store; existing stores stay on the raw path
+	// so syncing credentials never migrates or rejects a newer host schema.
+	if _, err := os.Stat(to); os.IsNotExist(err) {
+		store, err := sqlitestore.Open(ctx, to)
+		if err != nil {
+			return fmt.Errorf("initialize sync destination: %w", err)
+		}
+		if err := store.Close(ctx); err != nil {
+			return err
+		}
+	}
 	dest, err := openRawSQLite(to, false)
 	if err != nil {
 		return fmt.Errorf("open sync dest: %w", err)
@@ -118,6 +129,11 @@ func syncAuth(from, to string) error {
 			continue
 		}
 		if destErr == nil && !shouldReplaceAuth(data, destData) {
+			if destAccount.credentialRef == "sqlite" {
+				if err := upsertSyncAccount(ctx, dest, providerID, accountID, destAccount, destAccount, now); err != nil {
+					return err
+				}
+			}
 			continue
 		}
 		if _, err := dest.ExecContext(ctx, `INSERT OR REPLACE INTO auth_credentials(provider_id, account_id, data, created_at, updated_at) VALUES(?, ?, ?, ?, ?)`,
@@ -137,14 +153,14 @@ func syncAuth(from, to string) error {
 }
 
 type syncAccount struct {
-	email, displayName, plan, status string
-	found                            bool
+	email, displayName, plan, status, credentialRef string
+	found                                           bool
 }
 
 func loadSyncAccount(ctx context.Context, db *sql.DB, providerID, accountID string) (syncAccount, error) {
 	var account syncAccount
-	err := db.QueryRowContext(ctx, `SELECT email, display_name, plan, status FROM accounts WHERE provider_id = ? AND id = ?`, providerID, accountID).
-		Scan(&account.email, &account.displayName, &account.plan, &account.status)
+	err := db.QueryRowContext(ctx, `SELECT email, display_name, plan, status, credential_ref FROM accounts WHERE provider_id = ? AND id = ?`, providerID, accountID).
+		Scan(&account.email, &account.displayName, &account.plan, &account.status, &account.credentialRef)
 	if err == sql.ErrNoRows {
 		return account, nil
 	}
@@ -156,12 +172,13 @@ func loadSyncAccount(ctx context.Context, db *sql.DB, providerID, accountID stri
 }
 
 func upsertSyncAccount(ctx context.Context, dest *sql.DB, providerID, accountID string, src, existing syncAccount, now int64) error {
+	reference := "sqlite:" + providerID + ":" + accountID
+	if !src.found && existing.found {
+		src = existing
+	}
 	if !src.found {
-		if existing.found {
-			return nil
-		}
 		_, err := dest.ExecContext(ctx, `INSERT INTO accounts(id, provider_id, email, display_name, plan, credential_ref, status, created_at, updated_at)
-			VALUES(?, ?, '', '', '', 'sqlite', 'active', ?, ?)`, accountID, providerID, now, now)
+			VALUES(?, ?, '', '', '', ?, 'active', ?, ?)`, accountID, providerID, reference, now, now)
 		return err
 	}
 	status := src.status
@@ -169,14 +186,15 @@ func upsertSyncAccount(ctx context.Context, dest *sql.DB, providerID, accountID 
 		status = "active"
 	}
 	_, err := dest.ExecContext(ctx, `INSERT INTO accounts(id, provider_id, email, display_name, plan, credential_ref, status, created_at, updated_at)
-		VALUES(?, ?, ?, ?, ?, 'sqlite', ?, ?, ?)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(provider_id, id) DO UPDATE SET
 			email = excluded.email,
 			display_name = excluded.display_name,
 			plan = excluded.plan,
+			credential_ref = CASE WHEN accounts.credential_ref = 'sqlite' THEN excluded.credential_ref ELSE accounts.credential_ref END,
 			status = CASE WHEN excluded.status = 'active' THEN 'active' ELSE accounts.status END,
 			updated_at = excluded.updated_at`,
-		accountID, providerID, src.email, src.displayName, src.plan, status, now, now)
+		accountID, providerID, src.email, src.displayName, src.plan, reference, status, now, now)
 	return err
 }
 

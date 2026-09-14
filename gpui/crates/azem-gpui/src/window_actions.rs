@@ -47,8 +47,9 @@ impl AzemWindow {
         match self.state.navigation.surface {
             Surface::Terminal => self.write_terminal_data("\r"),
             Surface::Search if self.search_input.read(cx).text().trim().is_empty() => {
-                self.runtime
-                    .request(Method::Execute, json!({"kind": "new_session"}));
+                let id = self.runtime.request(Method::CreateSession, json!({}));
+                self.pending_requests
+                    .insert(id, PendingRequest::ResumeSession { sequence: None });
                 self.state.navigation.surface = Surface::Thread;
                 cx.notify();
             }
@@ -226,6 +227,7 @@ impl AzemWindow {
             .search
             .update(cx, |input, cx| input.clear(cx));
         if section == "catalog" {
+            self.refresh_model_catalog();
             self.settings_provider_search
                 .update(cx, |input, cx| input.clear(cx));
             self.settings_model_search
@@ -297,7 +299,7 @@ impl AzemWindow {
             self.subagent_setting_menu = None;
             self.archive_days_menu_open = false;
         }
-        if self.settings_open && self.state.catalogs.providers.is_empty() {
+        if self.settings_open {
             self.refresh_model_catalog();
         }
         cx.notify();
@@ -528,8 +530,6 @@ impl AzemWindow {
             json!({"kind":"rename_session","target":session_id,"name":name,"sessionId":session_id}),
         );
         self.renaming_session_id = None;
-        self.session_rename_input
-            .update(cx, |input, cx| input.clear(cx));
         self.focus.focus(window, cx);
         cx.notify();
     }
@@ -541,8 +541,6 @@ impl AzemWindow {
         cx: &mut Context<Self>,
     ) {
         self.renaming_session_id = None;
-        self.session_rename_input
-            .update(cx, |input, cx| input.clear(cx));
         self.focus.focus(window, cx);
         cx.stop_propagation();
         cx.notify();
@@ -555,8 +553,6 @@ impl AzemWindow {
         cx: &mut Context<Self>,
     ) {
         self.renaming_session_id = None;
-        self.session_rename_input
-            .update(cx, |input, cx| input.clear(cx));
         self.focus.focus(window, cx);
         cx.notify();
     }
@@ -570,6 +566,58 @@ impl AzemWindow {
         self.commit_session_rename(window, cx);
     }
 
+    pub(super) fn return_to_workspace(&mut self, cx: &mut Context<Self>) {
+        self.state.navigation.surface = Surface::Projects;
+        self.request_surface(Surface::Projects);
+        cx.notify();
+    }
+
+    pub(super) fn add_project(
+        &mut self,
+        _: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.state.navigation.project_picker_open
+            || self
+                .pending_requests
+                .values()
+                .any(|request| matches!(request, PendingRequest::OpenProject))
+        {
+            return;
+        }
+        let locale = Locale::resolve(&self.state.settings.language);
+        self.state.navigation.project_error = "".into();
+        self.state.navigation.project_picker_open = true;
+        let selection = rfd::AsyncFileDialog::new()
+            .set_parent(window)
+            .set_title(locale.text("sidebar.addProject"))
+            .set_can_create_directories(true)
+            .pick_folder();
+        cx.spawn(async move |this, cx| {
+            let selected = selection.await;
+            let _ = this.update(cx, |this, cx| {
+                this.state.navigation.project_picker_open = false;
+                if let Some(selected) = selected {
+                    let Some(path) = selected.path().to_str() else {
+                        this.state.navigation.project_error =
+                            locale.text("sidebar.projectPathEncoding").into();
+                        cx.notify();
+                        return;
+                    };
+                    let id = this
+                        .runtime
+                        .request(Method::OpenProject, json!({"path":path}));
+                    this.pending_requests
+                        .insert(id, PendingRequest::OpenProject);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     pub(super) fn close_overlay(
         &mut self,
         _: &CloseOverlay,
@@ -579,8 +627,6 @@ impl AzemWindow {
         self.reasoning_drag = None;
         if self.renaming_session_id.is_some() {
             self.renaming_session_id = None;
-            self.session_rename_input
-                .update(cx, |input, cx| input.clear(cx));
         } else if self.sidebar_context_menu.is_some() {
             self.sidebar_context_menu = None;
         } else if self.completion.is_open() {
@@ -616,6 +662,16 @@ impl AzemWindow {
             self.reply_popover = None;
         } else if self.state.navigation.surface == Surface::Search {
             self.state.navigation.surface = self.search_return_surface;
+        } else if self.state.navigation.surface == Surface::PullRequests
+            && !self.state.pull_requests.selected.is_null()
+        {
+            self.state.pull_requests.selected = serde_json::Value::Null;
+        } else if matches!(
+            self.state.navigation.surface,
+            Surface::Files | Surface::Changes | Surface::PullRequests
+        ) {
+            self.return_to_workspace(cx);
+            return;
         }
         cx.notify();
     }
@@ -650,7 +706,11 @@ impl AzemWindow {
     }
 
     pub(super) fn send_current(&mut self, cx: &mut Context<Self>) {
-        if self.branch_request_pending() || self.approval_request_pending() {
+        if self.branch_request_pending()
+            || self.approval_request_pending()
+            || self.queue_request_pending()
+            || self.workflow_mode_pending()
+        {
             return;
         }
         let source_text = self.composer.read(cx).submission_text();
@@ -673,42 +733,25 @@ impl AzemWindow {
         if !composer_has_submission(&prepared_prompt, &attachments) {
             return;
         }
-        if let Some(id) = self.editing_queued_id.clone() {
-            if let Some(item) = self.queued_prompts.iter_mut().find(|item| {
-                item.id == id
-                    && item.session_id == self.state.navigation.current_session_id.as_ref()
-            }) {
-                item.prompt = prompt;
-                item.selected_skills = selected_skills;
-                item.attachments = attachments;
-                item.failed = false;
-                self.editing_queued_id = None;
-                self.composer.update(cx, |composer, cx| composer.clear(cx));
-                self.state.transcript.attachments.clear();
-                self.completion.selected_skills.clear();
-                self.start_next_queued(cx);
-                cx.notify();
-                return;
-            }
-            self.editing_queued_id = None;
-        }
         if !self.state.connection.connected {
             return;
         }
-        if runtime_busy(&self.state) {
-            self.queued_prompts.push(QueuedPrompt {
-                id: uuid::Uuid::new_v4().to_string(),
-                session_id: self.state.navigation.current_session_id.to_string(),
-                prompt,
-                selected_skills,
-                attachments: attachments.clone(),
-                failed: false,
-            });
-            self.composer.update(cx, |composer, cx| composer.clear(cx));
-            self.state.transcript.attachments.clear();
-            self.completion.selected_skills.clear();
-            self.scroll_transcript_to_bottom(cx);
-            cx.notify();
+        if self.editing_queued_id.is_some() || runtime_busy(&self.state) {
+            let id = self
+                .editing_queued_id
+                .clone()
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            let operation = if self.editing_queued_id.is_some() {
+                "update"
+            } else {
+                "enqueue"
+            };
+            self.mutate_prompt_queue(
+                json!({"operation":operation,"itemId":id,
+                "item":{"id":id,"text":prepared_prompt,"attachments":attachments}}),
+                Some(source_text),
+                cx,
+            );
             return;
         }
         self.start_turn(prompt, selected_skills, attachments, None, cx);
@@ -740,8 +783,11 @@ impl AzemWindow {
             };
         let prompt = payload["prompt"].as_str().unwrap_or_default().to_owned();
         let request_id = self.runtime.request(Method::StartTurn, payload);
-        self.state
-            .append_optimistic_user(request_id.as_str(), prompt, attachments.clone());
+        self.state.append_optimistic_user(
+            request_id.as_str(),
+            crate::text_input::display_session_references(&prompt),
+            attachments.clone(),
+        );
         self.state.runtime.running = true;
         self.state.runtime.activity = "starting".into();
         self.scroll_transcript_to_bottom(cx);
@@ -794,44 +840,94 @@ impl AzemWindow {
         .detach();
     }
 
-    pub(super) fn start_next_queued(&mut self, cx: &mut Context<Self>) {
-        if runtime_busy(&self.state) || self.editing_queued_id.is_some() {
+    pub(super) fn mutate_prompt_queue(
+        &mut self,
+        mut payload: serde_json::Value,
+        source_text: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.queue_request_pending() {
             return;
         }
-        let session_id = self.state.navigation.current_session_id.as_ref();
-        let Some(item) = self
-            .queued_prompts
-            .iter()
-            .find(|item| item.session_id == session_id)
-            .cloned()
-        else {
-            return;
-        };
-        if item.failed {
-            return;
+        if let Some(attachments) = payload
+            .pointer_mut("/item/attachments")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            *attachments = crate::composer_completion::attachment_wire_values(
+                std::mem::take(attachments),
+                true,
+            );
         }
-        self.start_turn(
-            item.prompt,
-            item.selected_skills,
-            item.attachments,
-            Some(item.id),
-            cx,
+        let session_id = self.state.navigation.current_session_id.to_string();
+        payload["sessionId"] = json!(session_id);
+        payload["expectedRevision"] = json!(
+            self.state
+                .runtime
+                .prompt_queues
+                .get(&session_id)
+                .and_then(|q| q["revision"].as_i64())
+                .unwrap_or(0)
         );
+        let submission = source_text.as_ref().map(|_| QueuedPrompt {
+            id: payload["item"]["id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            session_id: session_id.clone(),
+            prompt: payload["item"]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            selected_skills: self.completion.selected_skills.clone(),
+            attachments: self.state.transcript.attachments.clone(),
+            failed: false,
+            pending: true,
+            dispatching: false,
+        });
+        if let Some(item) = &submission {
+            self.queued_prompts.retain(|queued| queued.id != item.id);
+            self.queued_prompts.push(item.clone());
+        }
+        let id = self.runtime.request(Method::MutatePromptQueue, payload);
+        self.pending_requests.insert(
+            id,
+            PendingRequest::PromptQueue {
+                session_id,
+                submission,
+                source_text,
+            },
+        );
+        cx.notify();
     }
 
     pub(super) fn delete_queued(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.queue_request_pending()
+            || self
+                .queued_prompts
+                .iter()
+                .any(|item| item.id == id && (item.pending || item.dispatching))
+        {
+            return;
+        }
         if self.editing_queued_id.as_deref() == Some(id) {
             self.editing_queued_id = None;
             self.composer.update(cx, |composer, cx| composer.clear(cx));
             self.state.transcript.attachments.clear();
             self.completion.selected_skills.clear();
         }
-        self.queued_prompts.retain(|item| item.id != id);
-        self.start_next_queued(cx);
+        self.mutate_prompt_queue(json!({"operation":"remove","itemId":id}), None, cx);
         cx.notify();
     }
 
     pub(super) fn edit_queued(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.queue_request_pending()
+            || self
+                .queued_prompts
+                .iter()
+                .any(|item| item.id == id && (item.pending || item.dispatching))
+        {
+            return;
+        }
         let Some(item) = self
             .queued_prompts
             .iter()
@@ -858,82 +954,52 @@ impl AzemWindow {
         target_id: &str,
         cx: &mut Context<Self>,
     ) {
-        if dragged.session_id == self.state.navigation.current_session_id.as_ref()
-            && reorder_session_queue(
-                &mut self.queued_prompts,
-                &dragged.session_id,
-                &dragged.id,
-                target_id,
-            )
+        if dragged.id != target_id
+            && dragged.session_id == self.state.navigation.current_session_id.as_ref()
+            && !self.queue_request_pending()
+            && [dragged.id.as_str(), target_id].iter().all(|id| {
+                self.queued_prompts.iter().any(|item| {
+                    item.id == *id
+                        && item.session_id == dragged.session_id
+                        && !item.pending
+                        && !item.dispatching
+                })
+            })
         {
-            cx.notify();
+            self.mutate_prompt_queue(
+                json!({"operation":"reorder","itemId":dragged.id,"beforeId":target_id}),
+                None,
+                cx,
+            );
         }
+    }
+
+    pub(super) fn queue_request_pending(&self) -> bool {
+        self.pending_requests.values().any(|request| matches!(request,
+            PendingRequest::PromptQueue { session_id, .. } if session_id == self.state.navigation.current_session_id.as_ref()))
     }
 
     pub(super) fn guide_queued(&mut self, id: &str, cx: &mut Context<Self>) {
-        if !self.state.runtime.running {
-            return;
-        }
-        let Some(item) = self
-            .queued_prompts
-            .iter()
-            .find(|item| item.id == id)
-            .cloned()
-        else {
+        let Some(item) = self.queued_prompts.iter().find(|item| {
+            item.id == id && item.session_id == self.state.navigation.current_session_id.as_ref()
+        }) else {
             return;
         };
-        if !item.selected_skills.is_empty() || !self.can_guide_prompt(&item.prompt) {
-            self.completion.submission_error = Locale::resolve(&self.state.settings.language)
-                .text("completion.skillNextTurn")
-                .into();
-            cx.notify();
+        if item.pending
+            || item.dispatching
+            || !self.state.runtime.guidance_open
+            || !self.state.runtime.running
+            || self.state.runtime.run_id.is_empty()
+            || !item.selected_skills.is_empty()
+            || !self.can_guide_prompt(&item.prompt)
+        {
             return;
         }
-        let request_id = self.runtime.request(
-            Method::Guide,
-            json!({
-                "sessionId": item.session_id,
-                "runId": self.state.runtime.run_id,
-                "text": item.prompt,
-                "attachments": item.attachments,
-            }),
+        self.mutate_prompt_queue(
+            json!({"operation":"guide", "itemId":id, "runId": self.state.runtime.run_id}),
+            None,
+            cx,
         );
-        self.pending_requests.insert(
-            request_id,
-            PendingRequest::QueuedGuide {
-                queued_id: item.id,
-                prompt: item.prompt,
-                attachments: item.attachments,
-            },
-        );
-        cx.notify();
-    }
-
-    pub(super) fn guide_message(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let text = self.composer.read(cx).submission_text().trim().to_string();
-        if !self.state.runtime.running {
-            return;
-        }
-        if !self.completion.selected_skills.is_empty() || !self.can_guide_prompt(&text) {
-            self.completion.submission_error = Locale::resolve(&self.state.settings.language)
-                .text("completion.skillNextTurn")
-                .into();
-            cx.notify();
-            return;
-        }
-        if text.is_empty() {
-            return;
-        }
-        self.runtime.request(
-            Method::Guide,
-            json!({
-                "sessionId": self.state.navigation.current_session_id,
-                "runId": self.state.runtime.run_id,
-                "text": text,
-                "attachments": self.state.transcript.attachments,
-            }),
-        );
-        self.composer.update(cx, |composer, cx| composer.clear(cx));
     }
 
     pub(super) fn can_guide_prompt(&self, text: &str) -> bool {
@@ -948,40 +1014,103 @@ impl AzemWindow {
 
     pub(super) fn attach_file(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
         let locale = Locale::resolve(&self.state.settings.language);
-        let runtime = self.runtime.clone();
-        let session_id = self.state.navigation.current_session_id.to_string();
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some(locale.text("files.images").into()),
+        });
         cx.spawn(async move |this, cx| {
-            if let Some(file) = rfd::AsyncFileDialog::new()
-                .add_filter(
-                    locale.text("files.images"),
-                    &["png", "jpg", "jpeg", "gif", "webp"],
-                )
-                .pick_file()
-                .await
-            {
-                let path = file.path().to_path_buf();
-                let mime_type = match path
-                    .extension()
-                    .and_then(|extension| extension.to_str())
-                    .unwrap_or_default()
-                    .to_ascii_lowercase()
-                    .as_str()
-                {
-                    "png" => "image/png",
-                    "jpg" | "jpeg" => "image/jpeg",
-                    "gif" => "image/gif",
-                    "webp" => "image/webp",
-                    _ => return,
-                };
-                let id =
-                    runtime.upload_attachment(session_id, path, file.file_name(), mime_type.into());
-                let _ = this.update(cx, |this, cx| {
-                    this.pending_requests.insert(id, PendingRequest::Attachment);
-                    cx.notify();
-                });
-            }
+            let Ok(result) = receiver.await else {
+                return;
+            };
+            let Ok(Some(paths)) = result else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.attach_image_paths(&paths, cx);
+            });
         })
         .detach();
+    }
+
+    pub(super) fn paste_composer_images(
+        &mut self,
+        _: &crate::text_input::Paste,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(item) = cx.read_from_clipboard() else {
+            return;
+        };
+        if self.attach_clipboard_item(&item, cx) {
+            cx.stop_propagation();
+        }
+    }
+
+    pub(super) fn attach_clipboard_item(
+        &mut self,
+        item: &ClipboardItem,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let mut attached = false;
+        for entry in item.entries() {
+            match entry {
+                ClipboardEntry::Image(image) => {
+                    let Some(mime) = image_mime_from_format(image.format) else {
+                        continue;
+                    };
+                    let name = format!(
+                        "pasted-image-{}.{}",
+                        chrono::Local::now().format("%Y%m%d-%H%M%S"),
+                        image.format.extension()
+                    );
+                    let id = self.runtime.upload_attachment_bytes(
+                        self.state.navigation.current_session_id.to_string(),
+                        name,
+                        mime.to_string(),
+                        image.bytes.clone(),
+                    );
+                    self.pending_requests.insert(id, PendingRequest::Attachment);
+                    attached = true;
+                }
+                ClipboardEntry::ExternalPaths(paths) => {
+                    attached |= self.attach_image_paths(paths.paths(), cx);
+                }
+                _ => {}
+            }
+        }
+        if attached {
+            cx.notify();
+        }
+        attached
+    }
+
+    pub(super) fn attach_image_paths(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) -> bool {
+        let session_id = self.state.navigation.current_session_id.to_string();
+        let mut attached = false;
+        for path in paths {
+            let Some(mime) = image_mime_from_extension(path) else {
+                continue;
+            };
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("image")
+                .to_string();
+            let id = self.runtime.upload_attachment(
+                session_id.clone(),
+                path.clone(),
+                name,
+                mime.to_string(),
+            );
+            self.pending_requests.insert(id, PendingRequest::Attachment);
+            attached = true;
+        }
+        if attached {
+            cx.notify();
+        }
+        attached
     }
 
     pub(super) fn remove_attachment(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -1017,8 +1146,9 @@ impl AzemWindow {
     }
 
     pub(super) fn new_session(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.runtime
-            .request(Method::Execute, json!({"kind": "new_session"}));
+        let id = self.runtime.request(Method::CreateSession, json!({}));
+        self.pending_requests
+            .insert(id, PendingRequest::ResumeSession { sequence: None });
         self.state.navigation.surface = Surface::Thread;
         cx.notify();
     }

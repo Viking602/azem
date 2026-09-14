@@ -53,6 +53,8 @@ pub struct NavigationModel {
     pub current_title: Arc<str>,
     pub sessions: Vec<SessionSummary>,
     pub projects: Vec<ProjectSummary>,
+    pub project_picker_open: bool,
+    pub project_error: Arc<str>,
     pub session_tree: Value,
     pub search_results: Vec<Value>,
     pub search_error: Arc<str>,
@@ -68,12 +70,14 @@ pub struct TranscriptModel {
 #[derive(Clone, Debug, Default)]
 pub struct RuntimeModel {
     pub running: bool,
+    pub guidance_open: bool,
     pub run_id: Arc<str>,
     pub run_started_at_ms: i64,
     pub active_session_id: Arc<str>,
     pub activity: Arc<str>,
     pub plan_mode: bool,
     pub todo: Value,
+    pub prompt_queues: HashMap<String, Value>,
     pub approvals: Vec<Value>,
     pub questions: Vec<Value>,
     pub plans: Vec<Value>,
@@ -87,6 +91,10 @@ pub struct RuntimeModel {
     pub context_profile: Value,
     pub context_usage: Value,
     pub recap: Value,
+    /// Fingerprint of the last applied resume projection so a broadcast
+    /// `session_loaded` that repeats the direct ResumeSession readback does not
+    /// reparse the full transcript on the initiating window.
+    pub resume_fingerprint: Arc<str>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -124,10 +132,40 @@ pub struct WorkspaceModel {
 #[derive(Clone, Debug, Default)]
 pub struct PullRequestModel {
     pub dashboard: Value,
+    pub tab: PullRequestTab,
     pub selected: Value,
     pub monitors: HashMap<i64, Value>,
     pub loading: bool,
     pub error: Arc<str>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PullRequestTab {
+    Current,
+    Created,
+    #[default]
+    Open,
+}
+
+impl PullRequestTab {
+    pub fn rows(self, dashboard: &Value) -> &[Value] {
+        match self {
+            Self::Current => dashboard
+                .get("current")
+                .filter(|value| !value.is_null())
+                .map(std::slice::from_ref)
+                .unwrap_or_default(),
+            Self::Created | Self::Open => dashboard
+                .get(if self == Self::Created {
+                    "createdByViewer"
+                } else {
+                    "open"
+                })
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or_default(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -154,6 +192,7 @@ pub struct SettingsModel {
     pub reasoning: Arc<str>,
     pub chatgpt_fast_mode: bool,
     pub agent_mode: Arc<str>,
+    pub workflow_mode: Arc<str>,
     pub approval_mode: Arc<str>,
     pub queue_mode: Arc<str>,
     pub subagent_concurrency: i64,
@@ -230,6 +269,12 @@ pub struct Block {
 struct DesktopEvent {
     #[serde(default)]
     sequence: u64,
+    #[serde(default)]
+    session_projection: Value,
+    #[serde(default)]
+    run_projection: Value,
+    #[serde(default)]
+    prompt_queue: Value,
     #[serde(default)]
     kind: String,
     #[serde(default)]
@@ -377,6 +422,7 @@ impl AppState {
             self.settings.reasoning = value_str(base, "reasoning");
             self.settings.chatgpt_fast_mode = base["chatgptFastMode"].as_bool().unwrap_or(false);
             self.settings.agent_mode = value_str(base, "agentMode");
+            self.settings.workflow_mode = value_str(base, "workflowMode");
             self.settings.approval_mode = value_str(base, "approvalMode");
             self.settings.queue_mode = value_str(base, "queueMode");
             self.settings.subagent_concurrency = value_i64(base, "subagentConcurrency");
@@ -435,9 +481,26 @@ impl AppState {
                 }
             }
         }
+        if snapshot.get("selectedSessionId").is_some() {
+            self.apply_projection_snapshot(&snapshot);
+        }
         self.connection.connected = true;
         self.connection.reconnecting = false;
         self.connection.message = "Connected".into();
+    }
+
+    pub(crate) fn next_session_after_archive(&self) -> Option<&SessionSummary> {
+        let sessions = &self.navigation.sessions;
+        let current = sessions
+            .iter()
+            .position(|session| session.id == self.navigation.current_session_id)?;
+        sessions[current + 1..]
+            .iter()
+            .chain(sessions[..current].iter().rev())
+            .find(|session| {
+                !session.archived
+                    && (session.workspace == self.workspace.root || session.workspace.is_empty())
+            })
     }
 
     pub fn apply_envelope(&mut self, envelope: Envelope) {
@@ -455,11 +518,53 @@ impl AppState {
     }
 
     pub fn apply_direct_event(&mut self, value: Value) {
+        if value.get("selectedSessionId").is_some() {
+            if value.get("base").is_some() {
+                self.apply_reconnect_snapshot(value);
+            } else {
+                self.apply_projection_snapshot(&value);
+            }
+            return;
+        }
         match decode_desktop_event(value) {
             Ok(event) => self.apply_desktop_event(event),
             Err(error) => tracing::warn!(%error, "GPUI direct event decode failed"),
         }
     }
+
+    fn apply_model_catalog(&mut self, event: &DesktopEvent) {
+        let models: Vec<Value> = parse_string_json(
+            event
+                .data
+                .get("models")
+                .or_else(|| event.data.get("catalog")),
+        );
+        self.catalogs.models = models.clone();
+        let Some(provider_id) = event
+            .data
+            .get("provider")
+            .map(String::as_str)
+            .filter(|id| !id.is_empty())
+        else {
+            return;
+        };
+        if models.is_empty() {
+            return;
+        }
+        if let Some(provider) = self
+            .catalogs
+            .providers
+            .iter_mut()
+            .find(|provider| provider.get("id").and_then(Value::as_str) == Some(provider_id))
+            && let Some(object) = provider.as_object_mut()
+        {
+            object.insert(
+                "models".into(),
+                Value::Array(models.into_iter().map(normalize_catalog_model).collect()),
+            );
+        }
+    }
+
     pub fn apply_terminal_binary(&mut self, metadata: BinaryMetadata, _data: &[u8]) {
         if metadata.purpose != "terminal_output" || metadata.transfer_id.is_empty() {
             return;
@@ -471,6 +576,14 @@ impl AppState {
 
     fn apply_desktop_event(&mut self, event: DesktopEvent) {
         self.sequence = self.sequence.max(event.sequence);
+        if event.kind == "run_state" {
+            self.apply_run_projection(&event.run_projection);
+            return;
+        }
+        if event.kind == "prompt_queue_state" {
+            self.apply_prompt_queue(&event.prompt_queue);
+            return;
+        }
         let foreign_session = !event.session_id.is_empty()
             && !self.navigation.current_session_id.is_empty()
             && event.session_id != self.navigation.current_session_id.as_ref();
@@ -517,6 +630,7 @@ impl AppState {
             return;
         }
         match event.kind.as_str() {
+            "session_projection" => self.apply_session_projection(&event.session_projection),
             "session_loaded" | "projection_resync" => self.load_session(event),
             "run_started" => {
                 let is_current = event.session_id == self.navigation.current_session_id.as_ref();
@@ -758,16 +872,16 @@ impl AppState {
             }
             "memory_state" => self.runtime.memories = event.memories,
             "recap_state" => self.runtime.recap = event.recap,
-            "model_catalog" => {
-                self.catalogs.models = parse_string_json(
-                    event
-                        .data
-                        .get("models")
-                        .or_else(|| event.data.get("catalog")),
-                )
-            }
+            "model_catalog" => self.apply_model_catalog(&event),
             "model_routes" => {
                 self.catalogs.routes = event.model_routes;
+                if let Some(mode) = event
+                    .data
+                    .get("workflow_mode")
+                    .filter(|mode| matches!(mode.as_str(), "vibe" | "fusion"))
+                {
+                    self.settings.workflow_mode = mode.clone().into();
+                }
                 if let Some(enabled) = event
                     .data
                     .get("chatgpt_fast_mode")
@@ -857,6 +971,11 @@ impl AppState {
     }
 
     fn load_session(&mut self, event: DesktopEvent) {
+        let same_active_run = event.session_id == self.navigation.current_session_id.as_ref()
+            && event
+                .data
+                .get("activeRunID")
+                .is_some_and(|id| !id.is_empty() && id == self.runtime.run_id.as_ref());
         if event.state == "list" {
             self.navigation.sessions = parse_string_json(event.data.get("sessions"));
             self.navigation.projects = parse_string_json(event.data.get("projects"));
@@ -866,6 +985,14 @@ impl AppState {
             return;
         }
         let loaded_session_id = event.session_id.clone();
+        let fingerprint = resume_projection_fingerprint(&event);
+        if event.state == "loaded"
+            && self.navigation.current_session_id.as_ref() == loaded_session_id
+            && !fingerprint.is_empty()
+            && self.runtime.resume_fingerprint.as_ref() == fingerprint
+        {
+            return;
+        }
         if !self.navigation.current_session_id.is_empty()
             && self.navigation.current_session_id.as_ref() != loaded_session_id
         {
@@ -921,11 +1048,13 @@ impl AppState {
             .data
             .get("active")
             .is_some_and(|value| value == "true");
-        self.runtime.run_started_at_ms = if self.runtime.running {
-            unix_millis()
-        } else {
-            0
-        };
+        if !same_active_run {
+            self.runtime.run_started_at_ms = if self.runtime.running {
+                unix_millis()
+            } else {
+                0
+            };
+        }
         if self.runtime.running {
             self.runtime.active_session_id = self.navigation.current_session_id.clone();
         }
@@ -939,6 +1068,11 @@ impl AppState {
         if !keep_agent_detail {
             self.runtime.selected_agent_id = "".into();
             self.runtime.agent_blocks = event.agent_blocks;
+        }
+        if event.state == "loaded" {
+            self.runtime.resume_fingerprint = fingerprint.into();
+        } else {
+            self.runtime.resume_fingerprint = "".into();
         }
     }
 
@@ -1090,6 +1224,8 @@ impl AppState {
             && block.run_id.as_ref() == event.run_id
             && block.text_phase.as_ref() == phase
             && block.state.as_ref() == "streaming"
+            && block.extra.get("fusionBlockId").and_then(Value::as_str)
+                == event.data.get("fusionBlockId").map(String::as_str)
         {
             if kind == "thinking" {
                 append_thinking_content(&mut block.content, &event.text);
@@ -1099,7 +1235,17 @@ impl AppState {
             return;
         }
         settle_streaming_text_blocks(&mut blocks, &event.run_id);
-        let id: Arc<str> = format!("{}:{}:{}:{}", kind, event.run_id, phase, self.sequence).into();
+        let id: Arc<str> = event
+            .data
+            .get("fusionBlockId")
+            .cloned()
+            .unwrap_or_else(|| format!("{}:{}:{}:{}", kind, event.run_id, phase, self.sequence))
+            .into();
+        let extra = event
+            .data
+            .into_iter()
+            .map(|(key, value)| (key, Value::String(value)))
+            .collect();
         blocks.push(Block {
             id: id.clone(),
             kind: kind.into(),
@@ -1111,6 +1257,7 @@ impl AppState {
             },
             state: "streaming".into(),
             text_phase: phase.into(),
+            extra,
             ..Default::default()
         });
         self.transcript.index_by_id.insert(id, blocks.len() - 1);
@@ -1254,13 +1401,59 @@ fn parse_string_json<T: for<'de> Deserialize<'de>>(value: Option<&String>) -> Ve
         .unwrap_or_default()
 }
 
+// model_catalog carries catalog.Model; Settings and model_providers use capabilities.
+fn normalize_catalog_model(mut model: Value) -> Value {
+    if model.get("supportsTools").is_none() {
+        return model;
+    }
+    let mut capabilities = [
+        ("supportsTools", "tools"),
+        ("supportsParallel", "parallel-tools"),
+        ("supportsReasoning", "reasoning"),
+        ("supportsStructured", "structured-output"),
+    ]
+    .into_iter()
+    .filter_map(|(field, capability)| (model[field] == true).then_some(capability))
+    .collect::<Vec<_>>();
+    if model["serviceTiers"]
+        .as_array()
+        .is_some_and(|tiers| tiers.iter().any(|tier| tier["id"] == "priority"))
+        || model["additionalSpeedTiers"]
+            .as_array()
+            .is_some_and(|tiers| tiers.iter().any(|tier| tier == "fast"))
+    {
+        capabilities.push("fast");
+    }
+    model["capabilities"] = capabilities.into();
+    model
+}
+
 fn value_str_map(values: &HashMap<String, String>, key: &str) -> Arc<str> {
     values.get(key).cloned().unwrap_or_default().into()
+}
+
+fn resume_projection_fingerprint(event: &DesktopEvent) -> String {
+    let last_run = event.data.get("lastRunID").cloned().unwrap_or_default();
+    let sequences = event
+        .data
+        .get("blockSequences")
+        .cloned()
+        .unwrap_or_default();
+    if event.session_id.is_empty() {
+        return String::new();
+    }
+    format!("{}|{last_run}|{sequences}", event.session_id)
 }
 
 fn restored_session_blocks(data: &HashMap<String, String>) -> Vec<Block> {
     let mut blocks: Vec<Block> = parse_string_json(data.get("blocks"));
     for block in &mut blocks {
+        if let Some(data) = block.extra.get("data").and_then(Value::as_object).cloned() {
+            block.extra.extend(data);
+        }
+        if let Some(id) = block.extra.get("fusionBlockId").and_then(Value::as_str) {
+            block.id = id.to_string().into();
+        }
         if block.kind.as_ref() == "thinking" {
             block.content = normalize_thinking_content(&block.content);
         }
@@ -1268,7 +1461,7 @@ fn restored_session_blocks(data: &HashMap<String, String>) -> Vec<Block> {
     let sequences: Vec<i64> = parse_string_json(data.get("blockSequences"));
     let tools: Vec<Value> = parse_string_json(data.get("toolRecords"));
     if sequences.len() != blocks.len() {
-        return append_restored_tools(blocks, tools);
+        return interleave_fusion_prose(append_restored_tools(blocks, tools));
     }
     let durable_tool_ids = tools
         .iter()
@@ -1299,7 +1492,42 @@ fn restored_session_blocks(data: &HashMap<String, String>) -> Vec<Block> {
         }
     }
     ordered.sort_by_key(|(sequence, priority, index, _)| (*sequence, *priority, *index));
-    ordered.into_iter().map(|(_, _, _, block)| block).collect()
+    interleave_fusion_prose(ordered.into_iter().map(|(_, _, _, block)| block).collect())
+}
+
+fn interleave_fusion_prose(blocks: Vec<Block>) -> Vec<Block> {
+    let mut after: HashMap<String, Vec<Block>> = HashMap::new();
+    let mut ordinary = Vec::with_capacity(blocks.len());
+    let call_ids = blocks
+        .iter()
+        .filter(|block| block.kind.as_ref() == "tool")
+        .map(|block| block.tool_call_id.to_string())
+        .collect::<std::collections::HashSet<_>>();
+    for block in blocks {
+        if let Some(call_id) = block
+            .extra
+            .get("fusionAfterToolCallId")
+            .and_then(Value::as_str)
+            && call_ids.contains(call_id)
+        {
+            after.entry(call_id.to_string()).or_default().push(block);
+        } else {
+            ordinary.push(block);
+        }
+    }
+    let mut result = Vec::new();
+    for block in ordinary {
+        let prose = if block.kind.as_ref() == "tool" {
+            after.remove(block.tool_call_id.as_ref())
+        } else {
+            None
+        };
+        result.push(block);
+        if let Some(prose) = prose {
+            result.extend(prose);
+        }
+    }
+    result
 }
 
 fn append_thinking_content(existing: &mut String, next: &str) {
@@ -1606,3 +1834,5 @@ fn upsert_pending(values: &mut Vec<Value>, key: &str, id: &str, value: Value) {
 
 #[cfg(test)]
 mod tests;
+
+mod projection;

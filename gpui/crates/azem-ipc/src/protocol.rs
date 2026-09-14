@@ -17,6 +17,7 @@ pub struct Endpoint {
     pub protocol: u32,
     pub workspace_id: String,
     pub workspace: PathBuf,
+    pub daemon_epoch: String,
     pub address: String,
     pub token_file: PathBuf,
     pub pid: u32,
@@ -32,6 +33,7 @@ impl Endpoint {
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         if endpoint.protocol != PROTOCOL_VERSION
             || endpoint.workspace_id.is_empty()
+            || endpoint.daemon_epoch.is_empty()
             || endpoint.address.is_empty()
             || endpoint.pid == 0
         {
@@ -82,6 +84,7 @@ pub struct Challenge {
     pub nonce: String,
     pub workspace_id: String,
     pub protocol: u32,
+    pub daemon_epoch: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -100,6 +103,7 @@ pub struct HelloAck {
     pub protocol: u32,
     pub workspace_id: String,
     pub current_sequence: u64,
+    pub daemon_epoch: String,
     pub replay_available: bool,
 }
 
@@ -184,6 +188,7 @@ mod tests {
             protocol: PROTOCOL_VERSION,
             workspace_id: "workspace".into(),
             workspace: PathBuf::from("/workspace"),
+            daemon_epoch: "epoch".into(),
             address: "/tmp/azem.sock".into(),
             token_file: token_path.clone(),
             pid: 1,

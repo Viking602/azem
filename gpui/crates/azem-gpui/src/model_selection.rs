@@ -75,16 +75,20 @@ fn reasoning_levels(provider: &Value, model: &Value) -> Vec<String> {
     )
 }
 
-struct CursorVariant<'a> {
+struct ModelVariant<'a> {
     model: &'a Value,
     family: String,
+    family_name: Option<String>,
     tier: String,
     thinking: bool,
     fast: bool,
 }
 
-impl<'a> CursorVariant<'a> {
-    fn parse(model: &'a Value) -> Self {
+impl<'a> ModelVariant<'a> {
+    fn parse(provider_id: &str, model: &'a Value) -> Self {
+        if provider_id == "devin" {
+            return Self::devin(model);
+        }
         let id = string(model, "id").to_ascii_lowercase();
         let mut parts: Vec<_> = id.split('-').filter(|part| !part.is_empty()).collect();
         let pop = |parts: &mut Vec<&str>, suffix| {
@@ -109,6 +113,7 @@ impl<'a> CursorVariant<'a> {
         Self {
             model,
             family: parts.join("-"),
+            family_name: None,
             tier: tier.to_owned(),
             thinking,
             fast,
@@ -118,14 +123,85 @@ impl<'a> CursorVariant<'a> {
     fn id(&self) -> &str {
         string(self.model, "id")
     }
+
+    fn devin(model: &'a Value) -> Self {
+        // Legacy MODEL_PRIVATE IDs carry no effort; the account label does.
+        let name = string(model, "name");
+        let name = if name.is_empty() {
+            string(model, "id")
+        } else {
+            name
+        };
+        let (primary, companion) = name
+            .strip_prefix("Fusion (")
+            .and_then(|name| name.split_once(" + "))
+            .map_or((name, None), |(primary, companion)| {
+                (primary, Some(companion))
+            });
+        let mut words: Vec<_> = primary.split_whitespace().collect();
+        let context = words.last().copied().filter(|word| {
+            let lower = word.to_ascii_lowercase();
+            lower
+                .strip_suffix('m')
+                .or_else(|| lower.strip_suffix('k'))
+                .is_some_and(|size| !size.is_empty() && size.chars().all(|c| c.is_ascii_digit()))
+        });
+        if context.is_some() {
+            words.pop();
+        }
+        let mut tier = "default".to_owned();
+        let mut thinking = false;
+        let mut fast = false;
+        while let Some(last) = words.last().map(|word| word.to_ascii_lowercase()) {
+            match last.as_str() {
+                "fast" => fast = true,
+                "thinking" => thinking = true,
+                "no" if thinking => {
+                    tier = "none".into();
+                    thinking = false;
+                }
+                "extra" if tier == "high" => tier = "xhigh".into(),
+                depth if TIERS[1..].contains(&depth) => tier = depth.to_owned(),
+                _ => break,
+            }
+            words.pop();
+        }
+        let mut family_name = words.join(" ");
+        if let Some(context) = context {
+            family_name.push(' ');
+            family_name.push_str(context);
+        }
+        if let Some(companion) = companion {
+            family_name = format!("Fusion ({family_name} + {companion}");
+        }
+        if family_name.is_empty() {
+            family_name = name.to_owned();
+        }
+        Self {
+            model,
+            family: family_name.to_ascii_lowercase(),
+            family_name: Some(family_name),
+            tier,
+            thinking,
+            fast,
+        }
+    }
 }
 
-struct CursorGroup<'a> {
-    variants: Vec<CursorVariant<'a>>,
+struct ModelGroup<'a> {
+    variants: Vec<ModelVariant<'a>>,
 }
 
-impl<'a> CursorGroup<'a> {
-    fn find(&self, tier: &str, thinking: bool, fast: bool) -> Option<&CursorVariant<'a>> {
+impl<'a> ModelGroup<'a> {
+    fn no_zdr(&self) -> bool {
+        self.variants.iter().any(|variant| {
+            string(variant.model, "name")
+                .to_ascii_lowercase()
+                .contains("(no zdr)")
+        })
+    }
+
+    fn find(&self, tier: &str, thinking: bool, fast: bool) -> Option<&ModelVariant<'a>> {
         self.variants.iter().find(|variant| {
             variant.tier == tier && variant.thinking == thinking && variant.fast == fast
         })
@@ -138,6 +214,9 @@ impl<'a> CursorGroup<'a> {
     }
 
     fn name(&self) -> String {
+        if let Some(name) = self.variants.first().and_then(|v| v.family_name.as_ref()) {
+            return name.clone();
+        }
         self.variants
             .iter()
             .map(|variant| {
@@ -177,22 +256,42 @@ impl<'a> CursorGroup<'a> {
     }
 }
 
-fn cursor_groups(provider: &Value) -> Vec<CursorGroup<'_>> {
-    let mut groups: Vec<CursorGroup<'_>> = Vec::new();
-    for model in enabled_models(provider) {
-        let variant = CursorVariant::parse(model);
+fn variant_groups(provider: &Value, include_disabled: bool) -> Vec<ModelGroup<'_>> {
+    let mut groups: Vec<ModelGroup<'_>> = Vec::new();
+    for model in provider["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|model| {
+            !string(model, "id").is_empty()
+                && (include_disabled || (provider["enabled"] != false && model["disabled"] != true))
+        })
+    {
+        let variant = ModelVariant::parse(string(provider, "id"), model);
         if let Some(group) = groups
             .iter_mut()
             .find(|group| group.variants[0].family == variant.family)
         {
             group.variants.push(variant);
         } else {
-            groups.push(CursorGroup {
+            groups.push(ModelGroup {
                 variants: vec![variant],
             });
         }
     }
     for group in &mut groups {
+        if string(provider, "id") == "devin"
+            && group
+                .variants
+                .iter()
+                .any(|v| v.thinking && v.tier == "default")
+        {
+            for v in &mut group.variants {
+                if !v.thinking && v.tier == "default" {
+                    v.tier = "none".into();
+                }
+            }
+        }
         group.variants.sort_by_key(|variant| {
             (
                 TIERS
@@ -208,12 +307,55 @@ fn cursor_groups(provider: &Value) -> Vec<CursorGroup<'_>> {
     groups
 }
 
+/// Settings keeps the entire family, including disabled variants, in each switch.
+pub fn catalog_models(provider: &Value) -> Vec<Value> {
+    if !matches!(string(provider, "id"), "cursor" | "devin") {
+        return provider["models"].as_array().cloned().unwrap_or_default();
+    }
+    variant_groups(provider, true)
+        .into_iter()
+        .map(|group| {
+            let mut model = group.variants[0].model.clone();
+            model["name"] = group.name().into();
+            model["familyName"] = model["name"].clone();
+            model["noZdr"] = group.no_zdr().into();
+            model["modelIds"] = group.variants.iter().map(|v| v.id()).collect();
+            let enabled = group
+                .variants
+                .iter()
+                .filter(|v| v.model["disabled"] != true)
+                .count();
+            model["disabled"] = (enabled == 0).into();
+            model["enabledVariantCount"] = enabled.into();
+            for key in [
+                "aliases",
+                "capabilities",
+                "inputModalities",
+                "outputModalities",
+            ] {
+                let mut values = Vec::new();
+                for variant in &group.variants {
+                    values.extend(strings(variant.model, key));
+                    if key == "aliases" {
+                        values.push(variant.id().to_owned());
+                        values.push(string(variant.model, "name").to_owned());
+                    }
+                }
+                values.sort();
+                values.dedup();
+                model[key] = values.into();
+            }
+            model
+        })
+        .collect()
+}
+
 pub fn model_choices<'a>(
     provider: &'a Value,
     selected_model: &str,
     reasoning: &str,
 ) -> Vec<ModelChoice<'a>> {
-    if string(provider, "id") != "cursor" {
+    if !matches!(string(provider, "id"), "cursor" | "devin") {
         return enabled_models(provider)
             .map(|model| ModelChoice {
                 model,
@@ -235,7 +377,7 @@ pub fn model_choices<'a>(
             })
             .collect();
     }
-    let groups = cursor_groups(provider);
+    let groups = variant_groups(provider, false);
     let fast = groups
         .iter()
         .flat_map(|group| &group.variants)
@@ -250,6 +392,16 @@ pub fn model_choices<'a>(
                 .find(|variant| variant.id() == selected_model);
             let thinking = group.thinking(fast);
             let variant = selected
+                .or_else(|| {
+                    (string(provider, "id") == "devin")
+                        .then(|| {
+                            group
+                                .variants
+                                .iter()
+                                .find(|v| v.tier == reasoning && v.fast == fast)
+                        })
+                        .flatten()
+                })
                 .or_else(|| group.find(reasoning, thinking, fast))
                 .or_else(|| group.find(reasoning, group.thinking(false), false))
                 .or_else(|| group.find("default", thinking, fast))
@@ -281,11 +433,7 @@ pub fn model_choices<'a>(
                 reasoning: variant.tier.clone(),
                 selected: selected.is_some(),
                 variant_count: group.variants.len(),
-                no_zdr: group.variants.iter().any(|variant| {
-                    string(variant.model, "name")
-                        .to_ascii_lowercase()
-                        .contains("(no zdr)")
-                }),
+                no_zdr: group.no_zdr(),
             }
         })
         .collect()
@@ -301,8 +449,8 @@ pub fn model_modes(
     let Some(provider) = provider(providers, provider_id) else {
         return ModelModes::default();
     };
-    if provider_id == "cursor" {
-        for group in cursor_groups(provider) {
+    if matches!(provider_id, "cursor" | "devin") {
+        for group in variant_groups(provider, false) {
             if let Some(current) = group
                 .variants
                 .iter()
@@ -315,14 +463,22 @@ pub fn model_modes(
                             .variants
                             .iter()
                             .filter(|variant| {
-                                variant.thinking == thinking && variant.fast == current.fast
+                                (provider_id == "devin" || variant.thinking == thinking)
+                                    && variant.fast == current.fast
                             })
                             .map(|variant| variant.tier.clone())
                             .collect(),
                     ),
                     reasoning: current.tier.clone(),
                     fast: current.fast,
-                    fast_available: group.find(&current.tier, thinking, !current.fast).is_some(),
+                    fast_available: if provider_id == "devin" {
+                        group
+                            .variants
+                            .iter()
+                            .any(|v| v.tier == current.tier && v.fast != current.fast)
+                    } else {
+                        group.find(&current.tier, thinking, !current.fast).is_some()
+                    },
                 };
             }
         }
@@ -344,24 +500,30 @@ pub fn model_modes(
 }
 
 /// Resolve only advertised, enabled IDs; a missing speed/tier combination never becomes a made-up ID.
-pub fn cursor_selection(
+pub fn variant_selection(
     providers: &[Value],
+    provider_id: &str,
     model_id: &str,
     reasoning: Option<&str>,
     fast: Option<bool>,
 ) -> Option<(String, String)> {
-    let provider = provider(providers, "cursor")?;
-    for group in cursor_groups(provider) {
+    let provider = provider(providers, provider_id)?;
+    for group in variant_groups(provider, false) {
         if let Some(current) = group
             .variants
             .iter()
             .find(|variant| variant.id() == model_id)
         {
-            let variant = group.find(
-                reasoning.unwrap_or(&current.tier),
-                group.thinking(current.fast),
-                fast.unwrap_or(current.fast),
-            )?;
+            let tier = reasoning.unwrap_or(&current.tier);
+            let speed = fast.unwrap_or(current.fast);
+            let variant = if provider_id == "devin" {
+                group
+                    .variants
+                    .iter()
+                    .find(|v| v.tier == tier && v.fast == speed)
+            } else {
+                group.find(tier, group.thinking(current.fast), speed)
+            }?;
             return Some((variant.id().to_owned(), variant.tier.clone()));
         }
     }
@@ -372,6 +534,70 @@ pub fn cursor_selection(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn devin_depths_resolve_private_ids_fast_context_and_fusion_without_inventing_variants() {
+        let providers = vec![json!({"id":"devin","models":[
+            {"id":"MODEL_PRIVATE_12","name":"GPT-5.1 No Thinking"},
+            {"id":"MODEL_PRIVATE_13","name":"GPT-5.1 Low Thinking"},
+            {"id":"MODEL_PRIVATE_15","name":"GPT-5.1 High Thinking"},
+            {"id":"gpt-high-priority","name":"GPT-5.1 High Thinking Fast"},
+            {"id":"gpt-disabled","name":"GPT-5.1 Max Thinking","disabled":true},
+            {"id":"glm-high-1m","name":"GLM-5.2 High 1M"},
+            {"id":"glm-max-1m","name":"GLM-5.2 Max 1M"},
+            {"id":"glm-high","name":"GLM-5.2 High"},
+            {"id":"fusion-low","name":"Fusion (GPT-6 Astra Low Thinking Fast + GLM-5.2 High)"},
+            {"id":"fusion-high","name":"Fusion (GPT-6 Astra High Thinking Fast + GLM-5.2 High)"},
+            {"id":"other-companion","name":"Fusion (GPT-6 Astra Max Thinking Fast + GPT-5.6 Sol High Thinking Fast)"},
+            {"id":"claude","name":"Claude Opus 4.6 1M"},
+            {"id":"claude-thinking","name":"Claude Opus 4.6 Thinking 1M"}
+        ]})];
+        let modes = model_modes(&providers, "devin", "MODEL_PRIVATE_13", "", false);
+        assert_eq!(modes.levels, ["none", "low", "high"]);
+        let high =
+            variant_selection(&providers, "devin", "MODEL_PRIVATE_13", Some("high"), None).unwrap();
+        assert_eq!(high.0, "MODEL_PRIVATE_15");
+        assert_eq!(
+            variant_selection(&providers, "devin", &high.0, None, Some(true))
+                .unwrap()
+                .0,
+            "gpt-high-priority"
+        );
+        assert!(
+            variant_selection(&providers, "devin", "gpt-high-priority", Some("low"), None)
+                .is_none()
+        );
+        assert!(variant_selection(&providers, "devin", &high.0, Some("max"), None).is_none());
+        assert_eq!(
+            variant_selection(&providers, "devin", "glm-high-1m", Some("max"), None)
+                .unwrap()
+                .0,
+            "glm-max-1m"
+        );
+        assert!(variant_selection(&providers, "devin", "glm-high", Some("max"), None).is_none());
+        assert_eq!(
+            variant_selection(&providers, "devin", "fusion-low", Some("high"), None)
+                .unwrap()
+                .0,
+            "fusion-high"
+        );
+        assert!(variant_selection(&providers, "devin", "fusion-low", Some("max"), None).is_none());
+        assert_eq!(
+            model_modes(&providers, "devin", "claude", "", false).levels,
+            ["default", "none"]
+        );
+        assert_eq!(
+            variant_selection(&providers, "devin", "claude", Some("default"), None)
+                .unwrap()
+                .0,
+            "claude-thinking"
+        );
+        let choices = model_choices(&providers[0], "MODEL_PRIVATE_13", "low");
+        assert_eq!(choices.len(), 6);
+        assert_eq!(choices[0].family_name.as_deref(), Some("GPT-5.1"));
+        assert_eq!(choices[0].variant_count, 4);
+        assert!(choices[0].selected && choices[0].aliases.contains("MODEL_PRIVATE_15"));
+    }
 
     #[test]
     fn cursor_depth_and_fast_select_exact_enabled_account_ids() {
@@ -387,16 +613,22 @@ mod tests {
         assert_eq!(modes.levels, ["low", "high"]);
         assert_eq!(modes.reasoning, "low");
         assert!(modes.fast && modes.fast_available);
-        let high =
-            cursor_selection(&providers, "gpt-5.6-sol-low-fast", Some("high"), None).unwrap();
+        let high = variant_selection(
+            &providers,
+            "cursor",
+            "gpt-5.6-sol-low-fast",
+            Some("high"),
+            None,
+        )
+        .unwrap();
         assert_eq!(high, ("gpt-5.6-sol-high-fast".into(), "high".into()));
         assert_eq!(
-            cursor_selection(&providers, &high.0, None, Some(false))
+            variant_selection(&providers, "cursor", &high.0, None, Some(false))
                 .unwrap()
                 .0,
             "gpt-5.6-sol-high"
         );
-        assert!(cursor_selection(&providers, &high.0, Some("max"), None).is_none());
+        assert!(variant_selection(&providers, "cursor", &high.0, Some("max"), None).is_none());
         let choices = model_choices(&providers[0], &high.0, "high");
         assert_eq!(choices.len(), 2);
         assert_eq!(choices[0].variant_count, 4);
@@ -430,13 +662,25 @@ mod tests {
         assert_eq!(modes.levels, ["low", "high", "xhigh"]);
         assert!(!modes.fast && !modes.fast_available);
         assert!(
-            cursor_selection(&providers, "claude-fable-5-thinking-high", None, Some(true))
-                .is_none()
+            variant_selection(
+                &providers,
+                "cursor",
+                "claude-fable-5-thinking-high",
+                None,
+                Some(true)
+            )
+            .is_none()
         );
         assert_eq!(
-            cursor_selection(&providers, "claude-fable-5-high", Some("xhigh"), None)
-                .unwrap()
-                .0,
+            variant_selection(
+                &providers,
+                "cursor",
+                "claude-fable-5-high",
+                Some("xhigh"),
+                None
+            )
+            .unwrap()
+            .0,
             "claude-fable-5-thinking-extra-high"
         );
     }

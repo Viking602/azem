@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
+	"time"
 
 	"github.com/Viking602/azem/internal/desktop"
 	"github.com/Viking602/azem/internal/githubpr"
@@ -14,6 +16,33 @@ import (
 type RequestDispatcher interface {
 	Dispatch(Method, json.RawMessage) (any, error)
 	ImportAttachmentBytes(sessionID, name, mimeType string, data []byte) (desktop.Attachment, error)
+}
+
+func bindReconnectSnapshotBoundary(result any, epoch string, cursor uint64) any {
+	switch snapshot := result.(type) {
+	case desktop.ReconnectSnapshot:
+		snapshot.DaemonEpoch = epoch
+		snapshot.WireSequence = cursor
+		return snapshot
+	case *desktop.ReconnectSnapshot:
+		if snapshot != nil {
+			snapshot.DaemonEpoch = epoch
+			snapshot.WireSequence = cursor
+		}
+		return snapshot
+	case desktop.SessionSelectionSnapshot:
+		snapshot.DaemonEpoch = epoch
+		snapshot.WireSequence = cursor
+		return snapshot
+	case *desktop.SessionSelectionSnapshot:
+		if snapshot != nil {
+			snapshot.DaemonEpoch = epoch
+			snapshot.WireSequence = cursor
+		}
+		return snapshot
+	default:
+		return result
+	}
 }
 
 type Dispatcher struct {
@@ -27,6 +56,12 @@ func NewDispatcher(bridge *desktop.Bridge) (*Dispatcher, error) {
 	return &Dispatcher{bridge: bridge}, nil
 }
 
+func (dispatcher *Dispatcher) RefreshProjection() {
+	if dispatcher != nil && dispatcher.bridge != nil {
+		dispatcher.bridge.RefreshProjection()
+	}
+}
+
 func (dispatcher *Dispatcher) Dispatch(method Method, payload json.RawMessage) (any, error) {
 	switch method {
 	case MethodInitialise:
@@ -37,25 +72,39 @@ func (dispatcher *Dispatcher) Dispatch(method Method, payload json.RawMessage) (
 			return nil, err
 		}
 		snapshot, err := dispatcher.bridge.ReconnectSnapshot(params.SessionID)
-		if err == nil && params.Refresh {
-			dispatcher.bridge.RefreshProjection()
-		}
 		return snapshot, err
 	case MethodStartTurn:
 		params, err := decodeParams[desktop.TurnRequest](payload)
 		if err != nil {
 			return nil, err
 		}
-		return dispatcher.bridge.StartTurn(params)
+		if strings.TrimSpace(params.MutationID) == "" {
+			return nil, errors.New("start turn mutationId is required")
+		}
+		runID, err := dispatcher.bridge.StartTurn(params)
+		if err != nil {
+			return nil, err
+		}
+		return desktop.StartTurnReceipt{MutationID: params.MutationID, SessionID: params.SessionID, RunID: runID, AcceptedAt: time.Now().UTC()}, nil
 	case MethodGuide, MethodFollowUp:
 		params, err := decodeParams[messageParams](payload)
 		if err != nil {
 			return nil, err
 		}
-		if method == MethodGuide {
-			return nil, dispatcher.bridge.Guide(params.SessionID, params.RunID, params.Text, params.Attachments)
+		if strings.TrimSpace(params.MutationID) == "" {
+			return nil, errors.New("turn control mutationId is required")
 		}
-		return nil, dispatcher.bridge.FollowUp(params.SessionID, params.RunID, params.Text, params.Attachments)
+		kind := "follow_up"
+		if method == MethodGuide {
+			kind = "guide"
+			err = dispatcher.bridge.Guide(params.SessionID, params.RunID, params.Text, params.Attachments)
+		} else {
+			err = dispatcher.bridge.FollowUp(params.SessionID, params.RunID, params.Text, params.Attachments)
+		}
+		if err != nil {
+			return nil, err
+		}
+		return desktop.TurnControlReceipt{MutationID: params.MutationID, SessionID: params.SessionID, RunID: params.RunID, Kind: kind, AcceptedAt: time.Now().UTC()}, nil
 	case MethodCancelActive:
 		params, err := decodeParams[cancelParams](payload)
 		if err != nil {
@@ -102,7 +151,19 @@ func (dispatcher *Dispatcher) Dispatch(method Method, payload json.RawMessage) (
 		if err != nil {
 			return nil, err
 		}
-		return dispatcher.bridge.ResumeSession(params.SessionID)
+		return dispatcher.bridge.SelectSession(params.SessionID)
+	case MethodSelectSession:
+		params, err := decodeParams[sessionParams](payload)
+		if err != nil {
+			return nil, err
+		}
+		return dispatcher.bridge.SelectSessionFast(params.SessionID)
+	case MethodCreateSession:
+		params, err := decodeParams[titleParams](payload)
+		if err != nil {
+			return nil, err
+		}
+		return dispatcher.bridge.CreateSession(params.Title)
 	case MethodSessionTree:
 		params, err := decodeParams[sessionParams](payload)
 		if err != nil {
@@ -145,6 +206,36 @@ func (dispatcher *Dispatcher) Dispatch(method Method, payload json.RawMessage) (
 			return nil, err
 		}
 		return dispatcher.bridge.ForkSession(params.SessionID, params.Activate)
+	case MethodImportSession:
+		params, err := decodeParams[importSessionParams](payload)
+		if err != nil {
+			return nil, err
+		}
+		return dispatcher.bridge.ImportSession(params.Source, params.Path, params.TargetSessionID)
+	case MethodExpandSkillInvocation:
+		params, err := decodeParams[skillInvocationParams](payload)
+		if err != nil {
+			return nil, err
+		}
+		return dispatcher.bridge.ExpandSkillInvocation(params.Name, params.Arguments)
+	case MethodCollaboration:
+		params, err := decodeParams[desktop.CollaborationRequest](payload)
+		if err != nil {
+			return nil, err
+		}
+		return dispatcher.bridge.Collaboration(params)
+	case MethodPromptQueue:
+		params, err := decodeParams[sessionParams](payload)
+		if err != nil {
+			return nil, err
+		}
+		return dispatcher.bridge.PromptQueue(params.SessionID)
+	case MethodMutatePromptQueue:
+		params, err := decodeParams[desktop.PromptQueueMutation](payload)
+		if err != nil {
+			return nil, err
+		}
+		return dispatcher.bridge.MutatePromptQueue(params)
 	case MethodPullRequestDashboard:
 		return dispatcher.bridge.PullRequestDashboard()
 	case MethodPullRequestDetail:
@@ -287,10 +378,19 @@ type reconnectParams struct {
 	Refresh   bool   `json:"refresh,omitempty"`
 }
 
+func reconnectSnapshotWantsRefresh(payload json.RawMessage) bool {
+	params, err := decodeParams[reconnectParams](payload)
+	return err == nil && params.Refresh
+}
+
 type sessionParams struct {
 	SessionID string `json:"sessionId"`
 }
+type titleParams struct {
+	Title string `json:"title,omitempty"`
+}
 type messageParams struct {
+	MutationID  string               `json:"mutationId"`
 	SessionID   string               `json:"sessionId"`
 	RunID       string               `json:"runId"`
 	Text        string               `json:"text"`
@@ -344,6 +444,15 @@ type shareParams struct {
 type forkSessionParams struct {
 	SessionID string `json:"sessionId"`
 	Activate  bool   `json:"activate"`
+}
+type importSessionParams struct {
+	Source          string `json:"source"`
+	Path            string `json:"path"`
+	TargetSessionID string `json:"targetSessionId"`
+}
+type skillInvocationParams struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
 }
 type numberParams struct {
 	Number int `json:"number"`

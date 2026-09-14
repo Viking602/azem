@@ -17,6 +17,8 @@ import (
 
 	azemacp "github.com/Viking602/azem/internal/acp"
 	"github.com/Viking602/azem/internal/app"
+	"github.com/Viking602/azem/internal/daemon"
+	"github.com/Viking602/azem/internal/desktopclient"
 	"github.com/Viking602/azem/internal/headless"
 	azemrpc "github.com/Viking602/azem/internal/rpc"
 	"github.com/Viking602/azem/internal/tui"
@@ -76,6 +78,9 @@ func runLaunch(args []string) (returnErr error) {
 	}
 	autoPrint := pipedInput != "" && !options.print && options.mode == ""
 	headlessMode := options.print || autoPrint || options.mode == "text" || options.mode == "json"
+	if !protocolMode && !headlessMode {
+		return runInteractiveTUI(options, workspace)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	boot, err := app.Bootstrap(ctx, workspace, options.configFile)
@@ -169,16 +174,45 @@ func runLaunch(args []string) (returnErr error) {
 		shutdownErr := boot.Service.Shutdown(shutdownCtx)
 		return errors.Join(runErr, shutdownErr)
 	}
+	return errors.New("unsupported launch mode")
+}
+
+func runInteractiveTUI(options cliOptions, startupWorkspace string) error {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	defer stop()
+	workspace, err := daemon.ResolveInitialWorkspace(ctx, daemon.InitialWorkspaceOptions{
+		StartupDirectory: startupWorkspace,
+		ConfigFile:       options.configFile,
+	})
+	if err != nil {
+		return err
+	}
+	client, err := desktopclient.NewWorkspaceClient(ctx, daemon.ClientOptions{
+		Workspace: workspace, ConfigFile: options.configFile, ClientID: "azem-tui",
+	})
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	snapshot, err := client.InitialSnapshot(ctx, "")
+	if err != nil {
+		return err
+	}
+	runtime, err := tui.NewDaemonRuntime(client, snapshot)
+	if err != nil {
+		return err
+	}
 	model := tui.NewModel(
-		boot.Service,
-		boot.Paths.Workspace,
-		boot.Config.Defaults.Provider,
-		boot.Config.Defaults.Model,
-		boot.Config.Defaults.Reasoning,
-		boot.Config.Defaults.AgentMode,
-		boot.SessionID,
+		runtime,
+		snapshot.Base.Workspace,
+		snapshot.Base.Provider,
+		snapshot.Base.Model,
+		snapshot.Base.Reasoning,
+		snapshot.Base.AgentMode,
+		snapshot.SelectedSessionID,
 	)
-	if err := model.SetLanguage(boot.Config.Defaults.Language); err != nil {
+	model.ApplyReconnectSnapshot(snapshot)
+	if err := model.SetLanguage(snapshot.Base.Language); err != nil {
 		return err
 	}
 	program := tea.NewProgram(model, tea.WithoutSignalHandler())
@@ -187,15 +221,10 @@ func runLaunch(args []string) (returnErr error) {
 		program.Quit()
 	}()
 	_, runErr := program.Run()
-
-	shutdownOwned = false
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer shutdownCancel()
-	shutdownErr := boot.Service.Shutdown(shutdownCtx)
 	if runErr != nil && !errors.Is(runErr, tea.ErrInterrupted) {
-		return errors.Join(runErr, shutdownErr)
+		return runErr
 	}
-	return shutdownErr
+	return nil
 }
 
 type cliOptions struct {

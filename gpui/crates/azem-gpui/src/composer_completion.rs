@@ -16,6 +16,8 @@ use crate::{
 pub(super) enum CompletionKind {
     Skill,
     File,
+    Session,
+    Reference,
     Command,
 }
 
@@ -44,6 +46,7 @@ pub(super) struct ComposerCompletion {
     index: usize,
     scroll: ScrollHandle,
     files: Vec<CompletionItem>,
+    reference_kind: Option<CompletionKind>,
     loading: bool,
     truncated: bool,
     error: String,
@@ -191,10 +194,15 @@ fn fast_available(state: &crate::state::AppState) -> bool {
 
 fn prompt_tokens(text: &str) -> Vec<Range<usize>> {
     let mut ranges = Vec::new();
+    let references = crate::text_input::session_reference_ranges(text);
     let mut start = None;
     let mut quote = None;
     let mut escaped = false;
     for (index, ch) in text.char_indices() {
+        if references.iter().any(|(range, _)| range.contains(&index)) {
+            start.get_or_insert(index);
+            continue;
+        }
         if start.is_none() && !ch.is_whitespace() {
             start = Some(index);
         }
@@ -287,6 +295,31 @@ fn skill_items(skills: &[Value], needle: &str) -> Vec<CompletionItem> {
     items
 }
 
+fn session_items(state: &crate::state::AppState, needle: &str) -> Vec<CompletionItem> {
+    let needle = needle.to_lowercase();
+    state
+        .navigation
+        .sessions
+        .iter()
+        .filter(|session| {
+            !session.archived
+                && session.workspace == state.workspace.root
+                && session.id != state.navigation.current_session_id
+                && (session.title.to_lowercase().contains(&needle)
+                    || session.id.to_lowercase().contains(&needle))
+        })
+        .take(50)
+        .map(|session| CompletionItem {
+            kind: CompletionKind::Session,
+            name: session.title.to_string(),
+            detail: String::new(),
+            value: session.id.to_string(),
+            glyph: "message-square-text",
+            enabled: true,
+        })
+        .collect()
+}
+
 // Keep the established activeSkills turn contract. Selected skills and explicit
 // /skill:name tokens activate skills; ordinary slashes and file mentions stay text.
 pub(super) fn prepare_prompt(
@@ -332,6 +365,22 @@ pub(super) fn prepare_prompt(
     Ok((prompt, active))
 }
 
+pub(super) fn attachment_wire_values(attachments: Vec<Value>, queue: bool) -> Vec<Value> {
+    attachments
+        .into_iter()
+        .map(|mut attachment| {
+            if let Some(fields) = attachment.as_object_mut() {
+                let mime = fields.remove("mimeType").or_else(|| fields.remove("mime"));
+                fields.remove("mime");
+                if let Some(mime) = mime {
+                    fields.insert(if queue { "mime" } else { "mimeType" }.into(), mime);
+                }
+            }
+            attachment
+        })
+        .collect()
+}
+
 pub(super) fn turn_payload(
     state: &crate::state::AppState,
     source: &str,
@@ -350,15 +399,23 @@ pub(super) fn turn_payload(
         "provider": state.settings.provider,
         "model": state.settings.model,
         "reasoning": state.settings.reasoning,
-        "agentMode": state.settings.agent_mode,
+        "agentMode": if state.runtime.plan_mode { "single" } else { state.settings.workflow_mode.as_ref() },
         "planMode": state.runtime.plan_mode,
         "disableSubagents": false,
         "activeSkills": active_skills,
-        "images": attachments,
+        "images": attachment_wire_values(attachments, false),
     }))
 }
 
 impl ComposerCompletion {
+    fn reference_root(&self) -> bool {
+        self.reference_kind.is_none()
+            && self
+                .query
+                .as_ref()
+                .is_some_and(|query| query.kind == CompletionKind::File && query.needle.is_empty())
+    }
+
     pub fn dismiss(&mut self) {
         self.query = None;
         self.generation += 1;
@@ -381,6 +438,40 @@ impl ComposerCompletion {
                 items.extend(skill_items(&state.catalogs.skills, &query.needle));
                 items
             }
+            Some(_) if self.reference_root() => {
+                let locale = Locale::resolve(&state.settings.language);
+                [
+                    (
+                        "file",
+                        "completion.fileOption",
+                        "completion.fileDetail",
+                        "file-text",
+                    ),
+                    (
+                        "session",
+                        "completion.sessionOption",
+                        "",
+                        "message-square-text",
+                    ),
+                ]
+                .into_iter()
+                .map(|(value, name, detail, glyph)| CompletionItem {
+                    kind: CompletionKind::Reference,
+                    name: locale.text(name).to_owned(),
+                    detail: if detail.is_empty() {
+                        String::new()
+                    } else {
+                        locale.text(detail).to_owned()
+                    },
+                    value: value.to_owned(),
+                    glyph,
+                    enabled: true,
+                })
+                .collect()
+            }
+            Some(query) if self.reference_kind == Some(CompletionKind::Session) => {
+                session_items(state, &query.needle)
+            }
             Some(_) => self.files.clone(),
             None => Vec::new(),
         }
@@ -397,6 +488,8 @@ impl ComposerCompletion {
                 .query
                 .as_ref()
                 .is_none_or(|query| query.kind != CompletionKind::File)
+            || self.reference_kind == Some(CompletionKind::Session)
+            || self.reference_root()
         {
             return;
         }
@@ -439,6 +532,15 @@ impl AzemWindow {
         if query == self.completion.last_query {
             return;
         }
+        if query.is_none()
+            || self.completion.last_query.as_ref().is_some_and(|previous| {
+                query
+                    .as_ref()
+                    .is_some_and(|query| previous.range.start != query.range.start)
+            })
+        {
+            self.completion.reference_kind = None;
+        }
         self.completion.dismiss();
         self.completion.last_query = query.clone();
         self.completion.query = query.clone();
@@ -452,7 +554,10 @@ impl AzemWindow {
             self.branch_picker.open = false;
             self.model_picker_open = false;
             self.context_popover_open = false;
-            if query.kind == CompletionKind::File {
+            if query.kind == CompletionKind::File
+                && !self.completion.reference_root()
+                && self.completion.reference_kind != Some(CompletionKind::Session)
+            {
                 self.completion.loading = true;
                 let generation = self.completion.generation;
                 self.completion.debounce = Some(cx.spawn(async move |this, cx| {
@@ -494,10 +599,23 @@ impl AzemWindow {
         if !item.enabled {
             return;
         }
+        if item.kind == CompletionKind::Reference {
+            self.completion.reference_kind = Some(if item.value == "session" {
+                CompletionKind::Session
+            } else {
+                CompletionKind::File
+            });
+            self.completion.last_query = None;
+            self.sync_completions(cx);
+            self.composer.focus_handle(cx).focus(window, cx);
+            return;
+        }
         self.completion.dismiss();
         self.composer.update(cx, |input, cx| {
             if item.kind == CompletionKind::File {
                 input.insert_file_reference(query.range, &item.value, window, cx);
+            } else if item.kind == CompletionKind::Session {
+                input.insert_session_reference(query.range, &item.value, &item.name, window, cx);
             } else {
                 input.replace_byte_range(query.range, "", window, cx);
             }
@@ -511,7 +629,7 @@ impl AzemWindow {
                 }
             }
             CompletionKind::Command => self.execute_composer_command(&item.value, window, cx),
-            CompletionKind::File => {}
+            CompletionKind::File | CompletionKind::Session | CompletionKind::Reference => {}
         }
         cx.notify();
     }
@@ -541,12 +659,17 @@ impl AzemWindow {
                     );
                 }
             }
-            "compact" | "rebuild" | "reload-skills" | "archive" | "new" => {
+            "new" => {
+                let id = self.runtime.request(Method::CreateSession, json!({}));
+                self.pending_requests
+                    .insert(id, crate::PendingRequest::ResumeSession { sequence: None });
+            }
+            "compact" | "rebuild" | "reload-skills" | "archive" => {
                 let kind = match command {
                     "compact" | "rebuild" => "compact",
                     "reload-skills" => "reload_skills",
                     "archive" => "archive_session",
-                    _ => "new_session",
+                    _ => "archive_session",
                 };
                 self.runtime.request(
                     Method::Execute,
@@ -765,6 +888,10 @@ impl AzemWindow {
         let locale = Locale::resolve(&self.state.settings.language);
         let (heading, empty) = if query.kind == CompletionKind::Skill {
             ("completion.slash", "completion.noSkills")
+        } else if self.completion.reference_root() {
+            ("completion.references", "completion.noFiles")
+        } else if self.completion.reference_kind == Some(CompletionKind::Session) {
+            ("completion.sessions", "completion.noSessions")
         } else {
             ("completion.files", "completion.noFiles")
         };
@@ -797,6 +924,37 @@ impl AzemWindow {
                     .text_color(palette.muted)
                     .text_size(px(10.))
                     .child(locale.text(heading)),
+            )
+            .when(
+                query.kind == CompletionKind::File && !self.completion.reference_root(),
+                |menu| {
+                    menu.child(
+                        div()
+                            .id("completion-reference-back")
+                            .role(Role::Button)
+                            .aria_label(locale.text("completion.backToReferences"))
+                            .tab_stop(true)
+                            .px_2()
+                            .py_1()
+                            .rounded(px(6.))
+                            .cursor_pointer()
+                            .text_color(palette.muted)
+                            .hover(move |style| style.bg(palette.hover))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                let Some(query) = this.completion.query.clone() else {
+                                    return;
+                                };
+                                this.completion.reference_kind = None;
+                                this.completion.last_query = None;
+                                this.composer.update(cx, |input, cx| {
+                                    input.replace_byte_range(query.range, "@", window, cx)
+                                });
+                                this.sync_completions(cx);
+                                this.composer.focus_handle(cx).focus(window, cx);
+                            }))
+                            .child(locale.text("completion.backToReferences")),
+                    )
+                },
             )
             .child(
                 div()
@@ -858,17 +1016,20 @@ impl AzemWindow {
                                     .child(
                                         div().flex_shrink_0().truncate().child(item.name.clone()),
                                     )
-                                    .child(
-                                        div()
-                                            .text_size(px(10.))
-                                            .line_height(px(15.))
-                                            .text_color(palette.muted)
-                                            .when(item.kind == CompletionKind::Command, |detail| {
-                                                detail.max_w(gpui::relative(0.68))
-                                            })
-                                            .truncate()
-                                            .child(item.detail.clone()),
-                                    ),
+                                    .when(!item.detail.is_empty(), |text| {
+                                        text.child(
+                                            div()
+                                                .text_size(px(10.))
+                                                .line_height(px(15.))
+                                                .text_color(palette.muted)
+                                                .when(
+                                                    item.kind == CompletionKind::Command,
+                                                    |detail| detail.max_w(gpui::relative(0.68)),
+                                                )
+                                                .truncate()
+                                                .child(item.detail.clone()),
+                                        )
+                                    }),
                             )
                     })),
             )
@@ -909,6 +1070,74 @@ impl AzemWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mentions_choose_files_or_current_project_conversations_without_changing_file_search() {
+        let mut state = crate::state::AppState::default();
+        state.settings.language = "zh-CN".into();
+        state.workspace.root = "/project".into();
+        state.navigation.current_session_id = "current".into();
+        state.navigation.sessions = serde_json::from_value(json!([
+            {"id":"current","title":"当前会话","workspace":"/project"},
+            {"id":"source","title":"中文设计方案","workspace":"/project"},
+            {"id":"other","title":"其他项目","workspace":"/other"},
+            {"id":"archived","title":"已归档","workspace":"/project","archived":true}
+        ]))
+        .unwrap();
+        let mut picker = ComposerCompletion {
+            query: completion_query("@", Some(1)),
+            ..Default::default()
+        };
+        let options = picker.items(&state);
+        assert_eq!(
+            options
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["文件", "会话"]
+        );
+        picker.reference_kind = Some(CompletionKind::Session);
+        assert_eq!(
+            picker
+                .items(&state)
+                .iter()
+                .map(|item| item.value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["source"]
+        );
+        picker.query.as_mut().unwrap().needle = "设计".into();
+        assert_eq!(picker.items(&state).len(), 1);
+        picker.query.as_mut().unwrap().needle = "不存在".into();
+        assert!(picker.items(&state).is_empty());
+        picker.receive_files(
+            picker.generation,
+            Ok(json!({"entries":[{"path":"wrong.rs"}]})),
+            Locale::resolve("zh-CN"),
+        );
+        assert!(picker.files.is_empty());
+        picker.reference_kind = Some(CompletionKind::File);
+        picker.query.as_mut().unwrap().needle = "src".into();
+        picker.receive_files(
+            picker.generation,
+            Ok(json!({"entries":[{"path":"src/main.rs","name":"main.rs"}]})),
+            Locale::resolve("zh-CN"),
+        );
+        assert_eq!(picker.items(&state)[0].value, "src/main.rs");
+
+        let reference =
+            crate::text_input::session_reference("source", "讨论 /skill:unknown 与设计");
+        let draft = format!("{reference} 接着做 @README.md");
+        assert_eq!(
+            prepare_prompt(&draft, &[], &[], Locale::resolve("zh-CN"))
+                .unwrap()
+                .0,
+            draft
+        );
+        assert_eq!(
+            turn_payload(&state, &draft, &[], vec![]).unwrap()["prompt"],
+            draft
+        );
+    }
 
     #[test]
     fn composer_shortcuts_capture_bound_actions_before_the_text_input() {
@@ -1053,6 +1282,33 @@ mod tests {
         assert_eq!(payload["images"], json!(images));
         state.catalogs.skills[0]["disabled"] = json!(true);
         assert!(turn_payload(&state, raw_draft, &[], images).is_err());
+    }
+
+    #[test]
+    fn settings_workflow_survives_navigation_and_plan_overrides_only_one_turn() {
+        let mut state = crate::state::AppState::default();
+        state.apply_reconnect_snapshot(json!({"base":{"workflowMode":"vibe"}}));
+        state.apply_direct_event(json!({"kind":"session_projection", "sessionProjection": {"session": {"id":"old-session", "agentMode":"fusion"}}}));
+        assert_eq!(
+            turn_payload(&state, "Run", &[], vec![]).unwrap()["agentMode"],
+            "vibe"
+        );
+        state.apply_direct_event(json!({"kind":"model_routes","data":{"workflow_mode":"fusion"}}));
+        state.apply_direct_event(json!({"kind":"session_projection", "sessionProjection": {"session": {"id":"other-session", "agentMode":"single"}}}));
+        assert_eq!(
+            turn_payload(&state, "Run", &[], vec![]).unwrap()["agentMode"],
+            "fusion"
+        );
+        state.runtime.plan_mode = true;
+        let plan = turn_payload(&state, "Plan", &[], vec![]).unwrap();
+        assert_eq!(plan["agentMode"], "single");
+        assert_eq!(plan["planMode"], true);
+        assert_eq!(state.settings.workflow_mode.as_ref(), "fusion");
+        state.runtime.plan_mode = false;
+        assert_eq!(
+            turn_payload(&state, "Run", &[], vec![]).unwrap()["agentMode"],
+            "fusion"
+        );
     }
 
     #[test]

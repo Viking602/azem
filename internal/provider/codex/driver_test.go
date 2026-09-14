@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -31,6 +32,7 @@ func TestDriverRetriesConnectionResetFiveTimesThenSucceeds(t *testing.T) {
 			_, _ = writer.Write([]byte("data: {\"type\":\"error\",\"code\":\"server_error\",\"message\":\"upstream connection reset\"}\n\n"))
 			return
 		}
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n"))
 		_, _ = writer.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n"))
 	}))
 	defer server.Close()
@@ -47,6 +49,9 @@ func TestDriverRetriesConnectionResetFiveTimesThenSucceeds(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer stream.Close()
+	if event, err := stream.Recv(); err != nil || event.Text != "ok" {
+		t.Fatalf("text=%+v err=%v", event, err)
+	}
 	event, err := stream.Recv()
 	if err != nil || event.Kind != hyprovider.EventDone {
 		t.Fatalf("event=%#v error=%v", event, err)
@@ -156,6 +161,7 @@ func TestDriverRetriesOverloadedRateLimitFiveTimesThenSucceeds(t *testing.T) {
 			_, _ = writer.Write([]byte("data: {\"type\":\"error\",\"code\":\"server_is_overloaded\",\"message\":\"Our servers are currently overloaded. Please try again later.\"}\n\n"))
 			return
 		}
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n"))
 		_, _ = writer.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n"))
 	}))
 	defer server.Close()
@@ -173,6 +179,9 @@ func TestDriverRetriesOverloadedRateLimitFiveTimesThenSucceeds(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer stream.Close()
+	if event, err := stream.Recv(); err != nil || event.Text != "ok" {
+		t.Fatalf("text=%+v err=%v", event, err)
+	}
 	event, err := stream.Recv()
 	if err != nil || event.Kind != hyprovider.EventDone {
 		t.Fatalf("event=%#v error=%v", event, err)
@@ -473,6 +482,8 @@ func TestDriverAlignsPromptCacheBodyHeadersAndPrefersProviderState(t *testing.T)
 			t.Error(err)
 		}
 		if body.PromptCacheKey != "session-cache-key" ||
+			request.Header.Get("session-id") != body.PromptCacheKey ||
+			request.Header.Get("thread-id") != body.PromptCacheKey ||
 			request.Header.Get("conversation_id") != body.PromptCacheKey ||
 			request.Header.Get("session_id") != body.PromptCacheKey {
 			t.Errorf("cache routing body=%q conversation=%q session=%q", body.PromptCacheKey,
@@ -566,4 +577,64 @@ func newTestDriver(t *testing.T, endpoint string) *Driver {
 		t.Fatal(err)
 	}
 	return driver
+}
+
+func TestTurnAffinityReplaysFirstTokenWithoutCrossingTurnsOrRoutes(t *testing.T) {
+	var calls atomic.Int32
+	expected := []string{"", "first", "first", "", "", ""}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		index := int(calls.Add(1)) - 1
+		if index >= len(expected) {
+			t.Error("unexpected request")
+			return
+		}
+		if got := r.Header.Get("x-codex-turn-state"); got != expected[index] {
+			t.Errorf("request %d state=%q want=%q", index+1, got, expected[index])
+		}
+		state := "replacement"
+		if index == 0 {
+			state = "first"
+		}
+		w.Header().Set("x-codex-turn-state", state)
+		w.Header().Set("Content-Type", "text/event-stream")
+		if index == 0 {
+			// The first SSE fails before emission; its HTTP routing state must survive
+			// the existing retry owner's reopen of the same logical turn.
+			fmt.Fprint(w, "data: {\"type\":\"error\",\"code\":\"server_error\",\"message\":\"retry fixture\"}\n\n")
+			return
+		}
+		fmt.Fprint(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[]}}\n\n")
+	}))
+	defer server.Close()
+	raw := newTestDriver(t, server.URL)
+	turn := providerretry.WithRetry(WithTurnAffinity(raw), providerretry.RetryConfig{MaxRetries: 1})
+	request := hyprovider.Request{Model: "gpt-test", PromptCacheKey: "session-a", Messages: []message.Message{message.NewText(message.RoleUser, "hello")}}
+	read := func(driver hyprovider.Driver) {
+		stream, err := driver.Stream(context.Background(), request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer stream.Close()
+		for {
+			event, err := stream.Recv()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if event.Kind == hyprovider.EventDone {
+				break
+			}
+		}
+	}
+	read(turn) // First HTTP response establishes state, second retries with it.
+	read(turn) // Later tool continuation retains the first token, not replacement.
+	request.Model = "gpt-other"
+	read(turn)
+	request.Model = "gpt-test"
+	request.PromptCacheKey = "session-b"
+	read(turn)
+	request.PromptCacheKey = "session-a"
+	read(WithTurnAffinity(raw)) // Same transport and session, new logical turn.
+	if calls.Load() != int32(len(expected)) {
+		t.Fatalf("calls=%d", calls.Load())
+	}
 }

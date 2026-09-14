@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestModelsDevEnrichmentResolvesProviderAliasesAndModelAliases(t *testing.T) {
@@ -98,5 +99,30 @@ func TestModelsDevMatchesCursorFamilyByName(t *testing.T) {
 	}
 	if !models[0].SupportsTools || !models[0].SupportsReasoning || fmt.Sprint(models[0].InputModalities) != "[text image attachment]" {
 		t.Fatalf("model=%+v", models[0])
+	}
+}
+
+func TestModelsDevNameMatchUsesIndexInsteadOfScanningCatalog(t *testing.T) {
+	providers := make(map[string]modelsDevProvider, 80)
+	for i := 0; i < 80; i++ {
+		models := make(map[string]modelsDevModel, 80)
+		for j := 0; j < 80; j++ {
+			id := fmt.Sprintf("noise-%d-%d", i, j)
+			models[id] = modelsDevModel{ID: id, Name: "Noise " + id}
+		}
+		providers[fmt.Sprintf("p%d", i)] = modelsDevProvider{Models: models}
+	}
+	providers["anthropic"] = modelsDevProvider{Models: map[string]modelsDevModel{
+		"claude-opus-4-6": {ID: "claude-opus-4-6", Name: "Claude 4.6 Opus", ToolCall: true, Reasoning: true},
+	}}
+	catalog := indexModelsDev(providers)
+	models := []Model{{ID: "claude-4.6-opus-high-thinking", Name: "Claude 4.6 Opus High Thinking"}}
+	started := time.Now()
+	_, matched := catalog.Enrich(ModelsDevProviderHint{ID: "cursor"}, models)
+	if elapsed := time.Since(started); elapsed > 50*time.Millisecond {
+		t.Fatalf("name match scanned the catalog in %s", elapsed)
+	}
+	if matched != 1 || !models[0].SupportsTools || !models[0].SupportsReasoning {
+		t.Fatalf("matched=%d model=%+v", matched, models[0])
 	}
 }

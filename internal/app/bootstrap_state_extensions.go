@@ -2,7 +2,6 @@ package app
 
 import (
 	"github.com/Viking602/azem/internal/commands"
-	"github.com/Viking602/azem/internal/customtools"
 	"github.com/Viking602/azem/internal/extensions"
 	mcpruntime "github.com/Viking602/azem/internal/mcp"
 	"github.com/Viking602/azem/internal/plugins"
@@ -15,8 +14,6 @@ type bootstrapExtensionState struct {
 	pluginCatalog        plugins.Integration
 	commandCatalog       *commands.Catalog
 	commandDiagnostics   []string
-	customTools          *customtools.Host
-	customDiagnostics    []string
 	extensionThemes      []extensions.Theme
 	extensionDiagnostics []string
 	managedSkillsDir     string

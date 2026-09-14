@@ -3,6 +3,39 @@ use serde_json::json;
 use uuid::Uuid;
 
 #[test]
+fn route_and_composer_selection_keep_family_names_and_resolve_real_depth_variants() {
+    let providers = vec![json!({"id":"devin","models":[
+        {"id":"private-medium","name":"SWE-2 Medium"},
+        {"id":"private-high","name":"SWE-2 High"},
+        {"id":"private-max","name":"SWE-2 Max"}
+    ]})];
+    let mut model = "private-high".to_string();
+    for (depth, expected_id, label) in [
+        ("medium", "private-medium", "中"),
+        ("max", "private-max", "最高"),
+        ("high", "private-high", "高"),
+    ] {
+        let (selected, reasoning) =
+            crate::variant_selection(&providers, "devin", &model, Some(depth), None).unwrap();
+        assert_eq!(
+            (selected.as_str(), reasoning.as_str()),
+            (expected_id, depth)
+        );
+        assert_eq!(
+            crate::selected_model_display_name(&providers, "devin", &selected),
+            "SWE-2"
+        );
+        // A stale stored depth must not override the actual selected wire variant.
+        let modes = crate::model_modes(&providers, "devin", &selected, "wrong", false);
+        assert_eq!(
+            crate::model_reasoning_display_name(&modes, "wrong", Locale::resolve("zh-CN")),
+            label
+        );
+        model = selected;
+    }
+}
+
+#[test]
 fn first_window_overlaps_runtime_start_with_native_window_creation() {
     let source = crate::MAIN_SOURCE;
     let main = source.split("fn main() {").nth(1).unwrap();
@@ -40,6 +73,42 @@ fn window_close_detaches_without_stopping_the_workspace_daemon() {
         .unwrap();
     assert!(drop_impl.contains("self.runtime.detach()"));
     assert!(!drop_impl.contains("self.runtime.disconnect()"));
+}
+
+#[test]
+fn project_add_opens_a_directory_picker_and_preserves_cancel_and_error_paths() {
+    let button = crate::SURFACES_SOURCE
+        .split(".id(\"project-add\")")
+        .nth(1)
+        .unwrap()
+        .split(".id(\"project-tree\")")
+        .next()
+        .unwrap();
+    assert!(button.contains("cx.listener(AzemWindow::add_project)"));
+    assert!(!button.contains("Surface::Projects"));
+    assert!(button.contains("Role::Alert"));
+    let action = crate::MAIN_SOURCE
+        .split("fn add_project(")
+        .nth(1)
+        .unwrap()
+        .split("fn close_overlay(")
+        .next()
+        .unwrap();
+    for required in [
+        "rfd::AsyncFileDialog::new()",
+        ".set_parent(window)",
+        ".pick_folder()",
+        "if let Some(selected) = selected",
+        "Method::OpenProject",
+        "PendingRequest::OpenProject",
+        "project_picker_open = false",
+        "sidebar.projectPathEncoding",
+    ] {
+        assert!(action.contains(required), "{required}");
+    }
+    assert!(!action.contains("switch_workspace("));
+    assert!(!action.contains("Surface::"));
+    assert!(crate::MAIN_SOURCE.contains("project_error = error.into()"));
 }
 
 #[test]
@@ -118,9 +187,9 @@ fn environment_and_side_panel_have_independent_controls() {
     assert!(source.contains("environment_panel_fits("));
     assert!(source.contains("side_panel_layout_width"));
     assert!(source.contains("ENVIRONMENT_PANEL_RESERVED_WIDTH"));
-    assert!(source.contains("let environment_returning"));
+    assert!(source.contains("let environment_layout = environment_panel_layout("));
     assert!(source.contains("self.side_panel_visible_width"));
-    assert!(source.contains(".max(ENVIRONMENT_PANEL_RESERVED_WIDTH)"));
+    assert!(source.contains("layout.reserved_width"));
     let environment_layer = source.find(".when_some(environment").unwrap();
     let side_panel_layer = source.find(".when_some(side_panel").unwrap();
     assert!(environment_layer < side_panel_layer);
@@ -129,12 +198,178 @@ fn environment_and_side_panel_have_independent_controls() {
 }
 
 #[test]
+fn closing_agent_panel_does_not_defer_the_environment_until_unmount() {
+    use super::{SIDE_PANEL_TRANSITION, eased_side_panel_width, environment_panel_layout};
+    use std::time::Duration;
+
+    // The agent selection and outgoing content remain mounted for all 300 ms.
+    for (workspace, width, agent) in [(1440., 720., true), (1200., 560., false)] {
+        let alongside = if !agent && super::environment_panel_fits(workspace, width) {
+            1.
+        } else {
+            0.
+        };
+        let frame =
+            |visible| environment_panel_layout(workspace, width, visible, alongside, 1.).unwrap();
+        let start = frame(width);
+        assert_eq!(start.opacity, 0.);
+        assert_eq!(start.reserved_width, width);
+        let mut previous = start;
+        for ms in 1..=300 {
+            let visible = eased_side_panel_width(width, 0., Duration::from_millis(ms));
+            let current = frame(visible);
+            assert!(
+                current.opacity > 0.,
+                "environment missing during exit at {ms} ms"
+            );
+            assert!(current.opacity >= previous.opacity && current.opacity <= 1.);
+            assert!(current.reserved_width <= previous.reserved_width);
+            assert!(previous.reserved_width - current.reserved_width < 12.);
+            assert_eq!(current.right_inset, visible);
+            previous = current;
+        }
+        let settled = environment_panel_layout(workspace, 0., 0., 1., 1.).unwrap();
+        assert_eq!(previous.reserved_width, settled.reserved_width);
+        assert_eq!(previous.opacity, settled.opacity);
+
+        let interrupted = eased_side_panel_width(width, 0., Duration::from_millis(80));
+        let reversed = eased_side_panel_width(interrupted, width, Duration::ZERO);
+        assert_eq!(
+            frame(interrupted).reserved_width,
+            frame(reversed).reserved_width
+        );
+        assert_eq!(frame(interrupted).opacity, frame(reversed).opacity);
+        assert_eq!(
+            frame(eased_side_panel_width(
+                interrupted,
+                width,
+                SIDE_PANEL_TRANSITION
+            ))
+            .opacity,
+            0.
+        );
+    }
+
+    // A wide workspace can keep an ordinary panel and environment alongside each other.
+    let alongside = environment_panel_layout(2200., 800., 400., 1., 1.).unwrap();
+    assert_eq!(alongside.right_inset, 400.);
+    assert_eq!(alongside.reserved_width, 712.);
+    assert_eq!(alongside.opacity, 1.);
+    assert!(environment_panel_layout(900., 260., 0., 0., 1.).is_none());
+    assert!(environment_panel_layout(1440., 720., 0., 0., 0.).is_none());
+}
+
+#[test]
+fn environment_card_tucks_behind_the_panel_and_reverses_without_a_jump() {
+    use super::{PopupMotion, environment_panel_layout};
+    use std::time::{Duration, Instant};
+    let now = Instant::now();
+    let mut motion = PopupMotion {
+        open: true,
+        opacity: 1.,
+        ..Default::default()
+    };
+    let frame = |visibility| environment_panel_layout(2200., 600., 600., 1., visibility);
+    let shown = frame(motion.opacity).unwrap();
+    assert_eq!(shown.tuck_progress, 0.);
+    assert_eq!(shown.reserved_width, 912.);
+    assert!(motion.update(false, false, now));
+    assert_eq!(frame(motion.opacity).unwrap().tuck_progress, 0.);
+    let halfway = now + Duration::from_millis(100);
+    motion.update(false, false, halfway);
+    let hiding = frame(motion.opacity).unwrap();
+    assert!((hiding.tuck_progress - 0.5).abs() < 0.001);
+    assert!((hiding.opacity - 0.875).abs() < 0.001);
+    assert_eq!(hiding.right_inset, 600.);
+    assert!(hiding.reserved_width < shown.reserved_width);
+    motion.update(true, false, halfway);
+    assert_eq!(
+        frame(motion.opacity).unwrap().tuck_progress,
+        hiding.tuck_progress
+    );
+    assert!(!motion.update(true, false, now + Duration::from_millis(300)));
+    assert_eq!(frame(motion.opacity).unwrap().tuck_progress, 0.);
+    motion.update(false, false, now + Duration::from_millis(300));
+    assert!(!motion.update(false, false, now + Duration::from_millis(500)));
+    assert!(frame(motion.opacity).is_none());
+    assert!(!motion.update(true, true, now + Duration::from_millis(501)));
+    assert_eq!(frame(motion.opacity).unwrap().tuck_progress, 0.);
+    assert!(!motion.update(false, true, now + Duration::from_millis(502)));
+    assert!(frame(motion.opacity).is_none());
+
+    let covered = environment_panel_layout(1440., 720., 360., 0., 1.).unwrap();
+    assert_eq!(covered.tuck_progress, 0.5);
+    assert_eq!(covered.opacity, 0.875);
+    assert_eq!(covered.reserved_width, 516.);
+}
+
+#[test]
+fn resizing_across_environment_fit_threshold_keeps_the_card_until_exit_finishes() {
+    use super::{
+        ENVIRONMENT_PANEL_RESERVED_WIDTH, PopupMotion, environment_panel_fits,
+        environment_panel_layout,
+    };
+    use std::time::{Duration, Instant};
+    let now = Instant::now();
+    let (workspace, before, after) = (1849., 896., 898.);
+    assert!(environment_panel_fits(workspace, before));
+    assert!(!environment_panel_fits(workspace, after));
+    let mut motion = PopupMotion {
+        open: true,
+        opacity: 1.,
+        ..Default::default()
+    };
+    let frame = |width, visibility| {
+        environment_panel_layout(workspace, width, width, visibility, 1.).unwrap()
+    };
+    let start = frame(before, motion.opacity);
+    // The mouse-move owns the transition, so an immediate mouse-up cannot skip it.
+    assert!(motion.update(false, false, now));
+    let next = frame(after, motion.opacity);
+    assert_eq!(next.opacity, start.opacity);
+    assert_eq!(next.tuck_progress, 0.);
+    assert_eq!(next.right_inset - start.right_inset, after - before);
+    assert!(next.reserved_width <= workspace - super::MAIN_TEXT_MIN_WIDTH);
+    let middle = now + Duration::from_millis(100);
+    motion.update(false, false, middle);
+    let tucked = frame(after, motion.opacity);
+    assert!(tucked.tuck_progress > 0. && tucked.tuck_progress < 1.);
+    assert!(tucked.opacity > 0. && tucked.opacity < 1.);
+    assert!(
+        tucked.right_inset - ENVIRONMENT_PANEL_RESERVED_WIDTH * tucked.tuck_progress
+            < next.right_inset
+    );
+    // Dragging back across the threshold reverses from the current pose.
+    motion.update(true, false, middle);
+    let returning = frame(before, motion.opacity);
+    assert_eq!(returning.tuck_progress, tucked.tuck_progress);
+    assert!(!motion.update(true, false, now + Duration::from_millis(300)));
+    assert_eq!(frame(before, motion.opacity).opacity, 1.);
+    motion.update(false, false, now + Duration::from_millis(300));
+    assert!(!motion.update(false, false, now + Duration::from_millis(500)));
+    let hidden = frame(after, motion.opacity);
+    assert_eq!(hidden.opacity, 0.);
+    assert_eq!(hidden.reserved_width, after);
+    assert!(!motion.update(true, true, now + Duration::from_millis(501)));
+    assert_eq!(frame(before, motion.opacity).opacity, 1.);
+}
+
+#[test]
 fn side_panel_splits_the_current_workspace_and_clamps_its_draggable_width() {
     assert_eq!(super::workspace_width(1_686.), 1_440.);
-    assert_eq!(super::side_panel_width_for_workspace(1_440.), Some(720.));
-    assert_eq!(super::side_panel_width_for_workspace(1_200.), Some(560.));
-    assert_eq!(super::side_panel_width_for_workspace(2_000.), Some(1_000.));
-    assert_eq!(super::side_panel_width_for_workspace(899.), None);
+    assert_eq!(
+        super::side_panel_width_for_workspace(1_440., None),
+        Some(720.)
+    );
+    assert_eq!(
+        super::side_panel_width_for_workspace(1_200., None),
+        Some(560.)
+    );
+    assert_eq!(
+        super::side_panel_width_for_workspace(2_000., None),
+        Some(1_000.)
+    );
+    assert_eq!(super::side_panel_width_for_workspace(899., None), None);
     assert_eq!(super::side_panel_max_width(1_200.), Some(560.));
     assert_eq!(
         super::eased_side_panel_width(0., 420., std::time::Duration::ZERO),
@@ -241,8 +476,8 @@ fn security_scan_list_loads_selected_or_latest_projection() {
 #[test]
 fn environment_plan_items_wrap_inside_the_sidebar() {
     let source = crate::SURFACES_SOURCE;
-    let start = source.find("todo_items.into_iter().map").unwrap();
-    let item = &source[start..source.len().min(start + 2_500)];
+    let start = source.find("fn plan_list(").unwrap();
+    let item = &source[start..source.len().min(start + 5_000)];
     assert!(item.contains(".min_w_0()"));
     assert!(item.contains(".whitespace_normal()"));
 }
@@ -443,6 +678,8 @@ fn queued_messages_reorder_only_inside_their_session() {
         selected_skills: Vec::new(),
         attachments: Vec::new(),
         failed: false,
+        pending: false,
+        dispatching: false,
     };
     let mut prompts = vec![
         queued("a", "one"),
@@ -475,6 +712,28 @@ fn image_attachments_expand_the_composer_input() {
     assert_eq!(composer_input_height(1, false, 0), 60.);
     assert_eq!(composer_input_height(1, false, 1), 72.);
     assert_eq!(composer_input_height(1, true, 1), 112.);
+}
+
+#[test]
+fn composer_paste_and_attach_images_and_timeline_renders_them() {
+    let source = crate::MAIN_SOURCE;
+    for required in [
+        "capture_action(cx.listener(Self::paste_composer_images))",
+        "fn paste_composer_images(",
+        "ClipboardEntry::Image(image)",
+        "upload_attachment_bytes(",
+        "fn attach_file(",
+        "prompt_for_paths(PathPromptOptions",
+        "fn attach_image_paths(",
+        "PendingRequest::Attachment",
+    ] {
+        assert!(source.contains(required), "{required}");
+    }
+    let surfaces = crate::SURFACES_SOURCE;
+    assert!(surfaces.contains("fn user_attachment_previews("));
+    assert!(surfaces.contains("user_attachment_previews(index, block, palette)"));
+    assert!(composer_has_submission("", &[json!({"id":"image-1"})]));
+    assert!(!composer_has_submission("", &[]));
 }
 
 #[test]
@@ -526,6 +785,30 @@ fn image_only_submission_is_allowed() {
 }
 
 #[test]
+fn model_picker_uses_catalog_logo_ids() {
+    let picker = crate::MAIN_SOURCE
+        .split("fn model_picker_view(")
+        .nth(1)
+        .unwrap()
+        .split("\n    pub(super) fn ")
+        .next()
+        .unwrap();
+    assert!(picker.contains("catalog_provider_logo_id(Some(&provider), &provider_id)"));
+    let compact = picker.split_whitespace().collect::<String>();
+    assert!(compact.contains("provider_logo(&logo_id,"));
+    assert!(!compact.contains("provider_logo(&provider_id,"));
+    let composer = crate::MAIN_SOURCE
+        .split("fn composer_view(")
+        .nth(1)
+        .unwrap()
+        .split("\n    pub(super) fn ")
+        .next()
+        .unwrap();
+    assert!(composer.contains("provider_logo(&current_logo, 15., palette.ink)"));
+    assert!(!composer.contains("provider_logo(&current_provider, 15., palette.ink)"));
+}
+
+#[test]
 fn model_picker_uses_product_names_and_capability_copy() {
     let model = json!({
         "id": "stealth/ox-alpha",
@@ -561,9 +844,9 @@ fn closed_model_picker_does_not_build_the_catalog() {
         .split("\n    pub(super) fn ")
         .next()
         .unwrap();
-    assert!(composer.contains(
-            "(self.model_picker_open && self.route_picker_target.is_none())\n            .then(|| self.model_picker_view(palette, cx))"
-        ));
+    assert!(composer.contains("self.popup_motion(\"model\").visible()"));
+    assert!(composer.contains("self.model_picker_render_target.is_none()"));
+    assert!(composer.contains(".then(|| self.model_picker_view(palette, cx))"));
     assert!(composer.contains(".when_some(picker, |shell, picker| shell.child(picker))"));
 }
 
@@ -666,7 +949,7 @@ fn every_reasoning_depth_has_a_distinct_localized_name() {
                 "Low",
                 "Medium",
                 "High",
-                "Very high",
+                "Extra High",
                 "Max",
                 "Ultra",
             ],
@@ -754,7 +1037,21 @@ fn context_composition_groups_real_profile_and_usage_tokens() {
     assert_eq!(composition.cache_hit_rate, Some(75));
     assert_eq!(composition.segments[0].label, "核心指令");
     assert_eq!(composition.segments[3].category, "current_output");
-    assert_eq!(format_context_tokens(1_048_600), "1048.6k");
+    for (tokens, expected) in [
+        (-1, "0"),
+        (999, "999"),
+        (1_000, "1k"),
+        (21_100, "21.1k"),
+        (272_000, "272k"),
+        (999_000, "999k"),
+        (1_000_000, "1M"),
+        (1_048_600, "1.05M"),
+        (1_050_000, "1.05M"),
+        (1_100_000, "1.1M"),
+        (2_000_000, "2M"),
+    ] {
+        assert_eq!(format_context_tokens(tokens), expected);
+    }
 
     let popover = crate::MAIN_SOURCE
         .split("fn context_popover_view(")
@@ -799,10 +1096,72 @@ fn persisted_window_size_rejects_invalid_or_too_small_values() {
 #[test]
 fn window_size_persistence_round_trips_on_disk() {
     let path = std::env::temp_dir().join(format!("azem-window-{}.json", Uuid::new_v4()));
-    save_window_size(&path, gpui::size(gpui::px(1536.), gpui::px(960.))).unwrap();
+    let placement = crate::WindowPlacement {
+        uuid: "external-display".into(),
+        x: 120.,
+        y: 80.,
+    };
+    save_window_size(
+        &path,
+        gpui::size(gpui::px(1536.), gpui::px(960.)),
+        Some(&placement),
+        &Default::default(),
+    )
+    .unwrap();
     let restored = load_window_size(&path).unwrap();
     assert_eq!(f32::from(restored.width), 1536.);
     assert_eq!(f32::from(restored.height), 960.);
+    let saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(saved["display"]["uuid"], "external-display");
+    assert_eq!(saved["display"]["x"], 120.);
+    assert_eq!(saved["display"]["y"], 80.);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn session_side_panel_widths_survive_reopen_and_window_constraints() {
+    use super::{load_session_side_panel_widths, side_panel_width_for_workspace};
+    let path = std::env::temp_dir().join(format!("azem-session-panels-{}.json", Uuid::new_v4()));
+    std::fs::write(&path, r#"{"width":1686,"height":960}"#).unwrap();
+    let mut widths = load_session_side_panel_widths(&path);
+    assert!(widths.is_empty());
+    widths.insert("session-a".into(), 420.);
+    widths.insert("session-b".into(), 680.);
+    save_window_size(
+        &path,
+        gpui::size(gpui::px(1686.), gpui::px(960.)),
+        None,
+        &widths,
+    )
+    .unwrap();
+    let restored = load_session_side_panel_widths(&path);
+    let panel = |session: &str, workspace| {
+        side_panel_width_for_workspace(workspace, restored.get(session).copied())
+    };
+    assert_eq!(panel("session-a", 1440.), Some(420.));
+    assert_eq!(panel("session-b", 1440.), Some(680.));
+    assert_eq!(panel("session-a", 1440.), Some(420.));
+    assert_eq!(panel("session-new", 1440.), Some(720.));
+    assert_eq!(panel("session-b", 1200.), Some(560.));
+    assert_eq!(panel("session-b", 899.), None);
+    assert_eq!(panel("session-b", 1440.), Some(680.));
+    assert_eq!(restored, widths);
+    for invalid in [0., -1., f32::NAN, f32::INFINITY] {
+        assert_eq!(
+            side_panel_width_for_workspace(1440., Some(invalid)),
+            Some(720.)
+        );
+    }
+    std::fs::write(
+        &path,
+        r#"{"sessionSidePanelWidths":{"session-a":420,"":500,"zero":0,"bad":"wide","huge":1e99}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        load_session_side_panel_widths(&path),
+        [("session-a".into(), 420.)].into()
+    );
     std::fs::remove_file(path).unwrap();
 }
 
@@ -857,4 +1216,212 @@ fn pending_question_replaces_running_header_status() {
     assert!(cancel.contains("\"sessionId\": session_id"));
     assert!(cancel.contains("\"runId\": run_id"));
     assert!(cancel.contains("PendingRequest::CancelActive"));
+}
+
+#[test]
+fn live_tool_group_opens_then_settles_without_overriding_manual_toggle() {
+    let mut expansion = ProcessExpansion::default();
+    assert!(expansion.group_is_expanded("live", true));
+    expansion.toggle("live");
+    assert!(!expansion.group_is_expanded("live", true));
+    assert!(!expansion.group_is_expanded("live", false));
+    expansion.toggle("live");
+    assert!(expansion.group_is_expanded("live", false));
+    assert!(!expansion.group_is_expanded("history", false));
+}
+
+#[test]
+fn disclosure_motion_matches_css_ease_out_and_reverses_continuously() {
+    use crate::{DisclosureMotion, disclosure_ease};
+    use std::time::{Duration, Instant};
+    assert_eq!(disclosure_ease(0.), 0.);
+    assert_eq!(disclosure_ease(1.), 1.);
+    assert!((disclosure_ease(0.5) - 0.6846).abs() < 0.001);
+    let now = Instant::now();
+    let mut motion = DisclosureMotion {
+        from: 0.,
+        target: 1.,
+        started: now,
+        height: 200.,
+        index: 0,
+    };
+    let midway = now + Duration::from_millis(110);
+    let position = motion.progress(midway);
+    motion.from = position;
+    motion.target = 0.;
+    motion.started = midway;
+    assert_eq!(motion.progress(midway), position);
+    assert_eq!(motion.progress(midway + Duration::from_millis(220)), 0.);
+    let mut expansion = ProcessExpansion::default();
+    expansion.disclosure("test", 0, false, false);
+    expansion.disclosure("test", 0, true, false);
+    assert!(expansion.disclosure("test", 0, true, false).2);
+    assert_eq!(
+        expansion.disclosure("test", 0, false, true),
+        (0., 0., false)
+    );
+}
+
+#[test]
+fn window_placement_restores_offsets_and_falls_back_to_center() {
+    use gpui::{Bounds, point, px, size};
+    let screen = Bounds::new(point(px(-1920.), px(0.)), size(px(1920.), px(1080.)));
+    let saved = crate::WindowPlacement {
+        uuid: "external".into(),
+        x: 120.,
+        y: 60.,
+    };
+    let restored = crate::restored_window_bounds(screen, size(px(1440.), px(920.)), Some(&saved));
+    assert_eq!(restored.origin, point(px(-1800.), px(60.)));
+    let primary = Bounds::new(point(px(0.), px(0.)), size(px(1440.), px(900.)));
+    let fallback = crate::restored_window_bounds(primary, size(px(1200.), px(800.)), None);
+    assert_eq!(fallback.origin, point(px(120.), px(50.)));
+    let clipped = crate::restored_window_bounds(primary, size(px(2000.), px(1200.)), Some(&saved));
+    assert_eq!(clipped, primary);
+}
+
+#[test]
+fn queue_attachments_convert_upload_mime_and_restore_turn_wire_shape() {
+    let uploaded = json!({"id":"image","name":"screen.png","mimeType":"image/png","path":"/tmp/image","size":42});
+    let queued = crate::composer_completion::attachment_wire_values(vec![uploaded.clone()], true);
+    assert_eq!(queued[0]["mime"], "image/png");
+    assert!(queued[0].get("mimeType").is_none());
+    let restored = crate::composer_completion::attachment_wire_values(queued, false);
+    assert_eq!(restored, vec![uploaded]);
+}
+
+#[test]
+fn pending_approval_is_visible_only_in_its_session() {
+    let mut state = crate::state::AppState::default();
+    state.runtime.running = true;
+    state.navigation.current_session_id = "approval-session".into();
+    state.runtime.approvals = vec![json!({
+        "sessionId": "approval-session", "approvalId": "approval-1", "state": "pending"
+    })];
+    for status in ["pending", "interrupted"] {
+        state.runtime.approvals[0]["state"] = json!(status);
+        assert!(crate::window_controls::pending_native_approval(&state).is_some());
+        assert_eq!(
+            crate::window_render::thread_status(&state),
+            ("approval.required", false)
+        );
+    }
+    for status in ["resolved", "reviewing"] {
+        state.runtime.approvals[0]["state"] = json!(status);
+        assert!(crate::window_controls::pending_native_approval(&state).is_none());
+    }
+    state.runtime.approvals[0]["state"] = json!("pending");
+    state.navigation.current_session_id = "other-session".into();
+    assert!(crate::window_controls::pending_native_approval(&state).is_none());
+}
+
+#[test]
+fn approval_command_hides_wire_json_without_rewriting_shell() {
+    let command = "git diff --check && printf 'a && b'";
+    let args = json!({"command": command, "timeout_seconds": 20}).to_string();
+    assert_eq!(crate::window_controls::approval_action_text(&args), command);
+    assert_eq!(
+        crate::window_controls::approval_action_text(command),
+        command
+    );
+    assert_eq!(
+        crate::window_controls::approval_action_text("{invalid"),
+        "{invalid"
+    );
+}
+
+#[test]
+fn session_motion_replays_navigation_but_never_stream_updates() {
+    let now = std::time::Instant::now();
+    let mut motion = super::SurfaceMotion::default();
+    assert_eq!(motion.opacity(super::Surface::Thread, "a", false, now), 1.);
+    assert_eq!(motion.opacity(super::Surface::Thread, "b", false, now), 0.);
+    let middle = motion.opacity(
+        super::Surface::Thread,
+        "b",
+        false,
+        now + std::time::Duration::from_millis(70),
+    );
+    assert!(middle > 0. && middle < 1.);
+    assert_eq!(
+        motion.opacity(
+            super::Surface::Thread,
+            "b",
+            false,
+            now + std::time::Duration::from_millis(140)
+        ),
+        1.
+    );
+    assert_eq!(
+        motion.opacity(
+            super::Surface::Thread,
+            "a",
+            false,
+            now + std::time::Duration::from_millis(150)
+        ),
+        0.
+    );
+    assert_eq!(
+        motion.opacity(
+            super::Surface::Thread,
+            "a",
+            true,
+            now + std::time::Duration::from_millis(151)
+        ),
+        1.
+    );
+    assert_eq!(
+        motion.opacity(
+            super::Surface::Thread,
+            "a",
+            false,
+            now + std::time::Duration::from_millis(152)
+        ),
+        1.
+    );
+}
+
+#[test]
+fn synara_sidebar_curve_is_bounded_and_reversible() {
+    let duration = super::SIDE_PANEL_TRANSITION;
+    assert_eq!(duration, std::time::Duration::from_millis(300));
+    let middle = super::eased_side_panel_width(0., super::SIDEBAR_WIDTH, duration / 2);
+    assert!(middle > super::SIDEBAR_WIDTH / 2. && middle < super::SIDEBAR_WIDTH);
+    assert_eq!(
+        super::eased_side_panel_width(middle, 0., std::time::Duration::ZERO),
+        middle
+    );
+    assert_eq!(super::eased_side_panel_width(middle, 0., duration), 0.);
+    assert!((super::css_ease_out(0.5) - 0.6846).abs() < 0.001);
+}
+
+#[test]
+fn popup_motion_retains_exit_and_reverses_without_jumping() {
+    use std::time::{Duration, Instant};
+    let now = Instant::now();
+    let at = |ms| now + Duration::from_millis(ms);
+    let mut motion = super::PopupMotion::default();
+    assert!(!motion.update(false, false, now));
+    assert!(!motion.visible());
+    assert!(motion.update(true, false, now));
+    assert!(motion.visible());
+    assert!(!motion.update(true, false, at(200)));
+    assert_eq!(motion.opacity, 1.);
+    assert!(motion.update(false, false, at(200)));
+    assert!(!motion.open);
+    assert!(motion.visible());
+    motion.update(false, false, at(300));
+    let halfway = motion.opacity;
+    assert!((halfway - 0.5).abs() < 0.001);
+    assert!(motion.update(true, false, at(300)));
+    assert_eq!(motion.opacity, halfway);
+    assert!(!motion.update(true, false, at(500)));
+    assert_eq!(motion.opacity, 1.);
+    motion.update(false, false, at(500));
+    assert!(!motion.update(false, false, at(700)));
+    assert!(!motion.visible());
+    assert!(!motion.update(true, true, at(701)));
+    assert_eq!(motion.opacity, 1.);
+    assert!(!motion.update(false, true, at(702)));
+    assert!(!motion.visible());
 }

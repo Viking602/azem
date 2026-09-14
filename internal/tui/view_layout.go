@@ -40,6 +40,7 @@ const (
 	uiClickAgents
 	uiClickModel
 	uiClickReasoning
+	uiClickDelivery
 	uiClickApprovalMode
 )
 
@@ -674,6 +675,8 @@ func (m AppModel) composerCaptionSegments() []uiSegment {
 	}
 	return append(segments,
 		uiSegment{content: m.theme.MetaDivider.Render(" · ")},
+		uiSegment{target: uiClickDelivery, content: m.theme.MetaValue.Render(strings.ToUpper(first(m.deliveryMode, "queue")))},
+		uiSegment{content: m.theme.MetaDivider.Render(" · ")},
 		uiSegment{target: uiClickApprovalMode, content: m.theme.Muted.Render(m.approvalModeLabel())},
 		uiSegment{content: " "},
 	)
@@ -818,6 +821,7 @@ func (m AppModel) headerRightSegments() []uiSegment {
 	}
 	return segments
 }
+
 func (m AppModel) renderHeaderAgents() string {
 	mark := "○"
 	style := m.theme.Muted

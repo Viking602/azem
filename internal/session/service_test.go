@@ -51,6 +51,48 @@ func TestUpdateLatestBlockStateTargetsNewestMatchingProposal(t *testing.T) {
 	}
 }
 
+func TestLoadDisplayProjectionSkipsModelHistoryBlob(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "display-projection.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	service := NewService(store.DB(), store.Blobs())
+	if _, err := service.Ensure(ctx, Session{ID: "session", Title: "Display"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.AppendBlock(ctx, "session", Block{Kind: "user", Content: "ask", RunID: "run-1"}); err != nil {
+		t.Fatal(err)
+	}
+	history := ModelHistory{
+		ProviderID: "chatgpt", ModelID: "gpt-test", Messages: []message.Message{
+			{Role: message.RoleUser, Text: "ask"},
+			{Role: message.RoleAssistant, Text: "answer"},
+		},
+	}
+	if err := service.CompleteTurn(ctx, "session", Block{Kind: "assistant", Content: "answer", RunID: "run-1"}, history); err != nil {
+		t.Fatal(err)
+	}
+	display, err := service.LoadDisplayProjection(ctx, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(display.Blocks) == 0 || display.Blocks[0].Content != "ask" {
+		t.Fatalf("display blocks = %+v", display.Blocks)
+	}
+	if len(display.ModelHistory.Messages) != 0 {
+		t.Fatalf("display projection decoded model history = %#v", display.ModelHistory)
+	}
+	full, err := service.LoadProjection(ctx, "session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(full.ModelHistory.Messages) != 2 {
+		t.Fatalf("full projection model history = %#v", full.ModelHistory)
+	}
+}
+
 func TestPhase3ArtifactRoundTripAfterReopenAndDeduplicates(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "artifacts.db")
@@ -186,6 +228,12 @@ func TestPhase6SearchHistoryIsolationSafetyBudgetsAndProvenance(t *testing.T) {
 	}
 	if _, err := service.PutArtifact(ctx, "one", "run", InternalArtifactKindPrefix+"work_spec_v1:test", []byte(`{"goal":"needle private control"}`), "needle private control"); err != nil {
 		t.Fatal(err)
+	}
+	// Indexed lookup must still reject noncanonical IDs (CAST accepts suffixes).
+	for _, source := range []string{"sequence:00", "sequence:0junk", "invalidx:0"} {
+		if _, err := store.DB().ExecContext(ctx, `INSERT INTO history_fts(content,session_id,source_type,source_id) VALUES('needle','one','sequence',?)`, source); err != nil {
+			t.Fatal(err)
+		}
 	}
 	items, err := service.SearchHistory(ctx, "one", `needle " OR ( ) : * -`, 1000, 4096, 4096)
 	if err != nil {
@@ -1526,5 +1574,42 @@ func TestForkRebuildsDerivedContextInsteadOfCopyingArchiveCheckpoint(t *testing.
 	var archiveCount int
 	if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM context_artifacts WHERE session_id='forked' AND kind='context_archive'`).Scan(&archiveCount); err != nil || archiveCount != 0 {
 		t.Fatalf("forked archive artifacts=%d err=%v", archiveCount, err)
+	}
+}
+
+func TestWorkEvidenceProjectionSkipsUnrelatedPayloads(t *testing.T) {
+	ctx := context.Background()
+	db, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "evidence.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(ctx)
+	service := NewService(db.DB(), db.Blobs())
+	if _, err := service.Ensure(ctx, Session{ID: "s"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.AppendBlock(ctx, "s", Block{Kind: "user", RunID: "current", Content: "Verify this change"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.AppendBlock(ctx, "s", Block{Kind: "assistant", RunID: "old", Content: "unrelated history"}); err != nil {
+		t.Fatal(err)
+	}
+	// Corrupt only irrelevant payloads: evidence must not decode them; full
+	// history loading must continue to reject them rather than hide corruption.
+	if _, err := db.DB().ExecContext(ctx, `UPDATE session_blocks SET data='{"content":42}' WHERE session_id='s' AND kind='assistant' `); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.DB().ExecContext(ctx, `UPDATE session_projections SET model_history='{"messages":42}'  WHERE session_id='s'`); err != nil {
+		t.Fatal(err)
+	}
+	projection, err := service.LoadWorkEvidenceProjection(ctx, "s", []string{"current"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projection.Blocks) != 1 || projection.Blocks[0].Content != "Verify this change" {
+		t.Fatalf("wrong evidence: %+v", projection.Blocks)
+	}
+	if _, err := service.LoadProjection(ctx, "s"); err == nil {
+		t.Fatal("full projection ignored corrupted history")
 	}
 }

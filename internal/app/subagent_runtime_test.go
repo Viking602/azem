@@ -1022,18 +1022,18 @@ func TestSubagentResultJSONContracts(t *testing.T) {
 
 func TestEffectiveSubagentToolsIntersectsCapabilityAndRoleAllowlist(t *testing.T) {
 	allTools := []string{
-		"coding.list_files", "coding.glob", "coding.read_file", "coding.search", "ast_grep", "lsp", "web_search", "github", "recall", "coding.git_diff",
-		"coding.edit_hashline", "coding.replace", "coding.write_file", "coding.delete_file", "coding.gofmt", "coding.go_test", "coding.shell", "debug", "eval", "browser", "computer", "hub", "generate_image", "tts", "retain", "memory_edit",
+		"coding.list_files", "coding.glob", "coding.read_file", "coding.search", "recall", "coding.git_diff",
+		"coding.edit_hashline", "coding.replace", "coding.write_file", "coding.delete_file", "coding.gofmt", "coding.go_test", "coding.shell", "hub", "retain", "memory_edit",
 		"subagent.spawn", "mcp.external",
 	}
 	tests := []struct {
 		mode string
 		want []string
 	}{
-		{mode: "read-only", want: []string{"ast_grep", "coding.git_diff", "coding.glob", "coding.list_files", "coding.read_file", "coding.search", "github", "lsp", "recall", "web_search"}},
-		{mode: "read-write", want: []string{"ast_grep", "coding.delete_file", "coding.edit_hashline", "coding.git_diff", "coding.glob", "coding.gofmt", "coding.list_files", "coding.read_file", "coding.replace", "coding.search", "coding.write_file", "github", "lsp", "recall", "web_search"}},
-		{mode: "execute", want: []string{"ast_grep", "browser", "coding.git_diff", "coding.glob", "coding.go_test", "coding.list_files", "coding.read_file", "coding.search", "coding.shell", "computer", "debug", "eval", "github", "hub", "lsp", "recall", "web_search"}},
-		{mode: "all", want: []string{"ast_grep", "browser", "coding.delete_file", "coding.edit_hashline", "coding.git_diff", "coding.glob", "coding.go_test", "coding.gofmt", "coding.list_files", "coding.read_file", "coding.replace", "coding.search", "coding.shell", "coding.write_file", "computer", "debug", "eval", "generate_image", "github", "hub", "lsp", "memory_edit", "recall", "retain", "tts", "web_search"}},
+		{mode: "read-only", want: []string{"coding.git_diff", "coding.glob", "coding.list_files", "coding.read_file", "coding.search", "recall"}},
+		{mode: "read-write", want: []string{"coding.delete_file", "coding.edit_hashline", "coding.git_diff", "coding.glob", "coding.gofmt", "coding.list_files", "coding.read_file", "coding.replace", "coding.search", "coding.write_file", "recall"}},
+		{mode: "execute", want: []string{"coding.git_diff", "coding.glob", "coding.go_test", "coding.list_files", "coding.read_file", "coding.search", "coding.shell", "hub", "recall"}},
+		{mode: "all", want: []string{"coding.delete_file", "coding.edit_hashline", "coding.git_diff", "coding.glob", "coding.go_test", "coding.gofmt", "coding.list_files", "coding.read_file", "coding.replace", "coding.search", "coding.shell", "coding.write_file", "hub", "memory_edit", "recall", "retain"}},
 		{mode: "invalid"},
 	}
 	for _, test := range tests {
@@ -1168,7 +1168,7 @@ func TestDefaultSubagentSpawnResolvesWorker(t *testing.T) {
 		}
 	}
 	allowed := effectiveSubagentTools(profile.Tools, profile.CapabilityMode)
-	for _, toolName := range []string{"ast_grep", "lsp", "web_search", "github", "recall", "retain", "memory_edit", "debug", "eval", "browser", "computer", "hub", "generate_image", "tts", "coding.glob", "coding.edit_hashline", "coding.replace", "coding.write_file", "coding.delete_file", "coding.gofmt", "coding.go_test", "coding.shell"} {
+	for _, toolName := range []string{"recall", "retain", "memory_edit", "hub", "coding.glob", "coding.edit_hashline", "coding.replace", "coding.write_file", "coding.delete_file", "coding.gofmt", "coding.go_test", "coding.shell"} {
 		if !allowed[toolName] {
 			t.Errorf("default worker does not allow %q: %v", toolName, allowed)
 		}
@@ -1708,6 +1708,10 @@ func TestIdleTimeoutResetsOnTextAndToolAndIgnoresEmptyThinking(t *testing.T) {
 	}
 	runtime.mu.Unlock()
 	runtime.handleFrame(run.ID, hyagent.Frame{Kind: hyagent.FrameText, Text: "正在核对边界", TextPhase: hyprovider.TextPhaseCommentary})
+	runtime.handleFrame(run.ID, hyagent.Frame{Kind: hyagent.FrameText, Text: "。", TextPhase: hyprovider.TextPhaseCommentary})
+	if runtime.active[run.ID].activity != "正在核对边界。" {
+		t.Fatalf("stream activity was replaced by its last token: %q", runtime.active[run.ID].activity)
+	}
 	runtime.cancelIdleChildren()
 	if runtime.active[run.ID] == nil || runtime.active[run.ID].run.State != agentservice.SubagentRunning {
 		t.Fatal("recent commentary was treated as idle")

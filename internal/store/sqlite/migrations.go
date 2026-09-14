@@ -8,7 +8,7 @@ import (
 	"github.com/Viking602/azem/internal/blobstore"
 )
 
-const schemaVersion = 28
+const schemaVersion = 29
 
 var migrations = []string{
 	`CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -859,6 +859,15 @@ var migrations = []string{
 				ELSE finished_at
 			END
 		WHERE state IN ('initializing','queued','running','cancelling');`,
+	`CREATE TABLE session_prompt_queues (
+		session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+		revision INTEGER NOT NULL CHECK(revision >= 0),
+		state TEXT NOT NULL CHECK(state IN ('active','paused')),
+		pause_reason TEXT NOT NULL DEFAULT '',
+		items_inline BLOB NOT NULL DEFAULT '[]',
+		items_digest TEXT NOT NULL DEFAULT '',
+		updated_at INTEGER NOT NULL
+	);`,
 }
 
 func migrate(ctx context.Context, db *sql.DB, blobs blobstore.Store) error {

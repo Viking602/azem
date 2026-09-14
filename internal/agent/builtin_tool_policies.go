@@ -26,27 +26,8 @@ func approvedExternalPolicy(tags ...string) agentruntime.ToolPolicy {
 	}
 }
 
-func (*astGrepDriver) ToolPolicy() agentruntime.ToolPolicy {
-	policy := readOnlyPolicy("coding", "search", "ast")
-	policy.Concurrency = tool.ConcurrencyParallel
-	return policy
-}
-
-func (*browserDriver) ToolPolicy() agentruntime.ToolPolicy {
-	policy := approvedExternalPolicy("browser", "network", "execute")
-	policy.Concurrency = tool.ConcurrencyParallel
-	return policy
-}
-
 func (deleteFileDriver) ToolPolicy() agentruntime.ToolPolicy {
 	return workspaceWritePolicy("coding", "delete", "workspace-write")
-}
-
-func (*evalDriver) ToolPolicy() agentruntime.ToolPolicy {
-	policy := approvedExternalPolicy("coding", "eval", "execute")
-	policy.Concurrency = tool.ConcurrencyExclusive
-	policy.ConcurrencyGroup = "eval-session"
-	return policy
 }
 
 func (globDriver) ToolPolicy() agentruntime.ToolPolicy {
@@ -60,23 +41,8 @@ func (*hashlineDriver) ToolPolicy() agentruntime.ToolPolicy {
 	return policy
 }
 
-func (*imageGenDriver) ToolPolicy() agentruntime.ToolPolicy {
-	policy := workspaceWritePolicy("media", "image", "network", "write")
-	policy.RequiresApproval = true
-	policy.Concurrency = tool.ConcurrencyParallel
-	return policy
-}
-
-func (*ttsDriver) ToolPolicy() agentruntime.ToolPolicy {
-	policy := workspaceWritePolicy("media", "speech", "write")
-	policy.RequiresApproval = true
-	policy.Concurrency = tool.ConcurrencyExclusive
-	policy.ConcurrencyGroup = "speech-generation"
-	return policy
-}
-
 func (driver *memoryToolDriver) ToolPolicy() agentruntime.ToolPolicy {
-	if driver.operation == ToolRecall {
+	if driver.operation == ToolRecall || driver.operation == ToolReflect {
 		policy := readOnlyPolicy("memory", "read")
 		policy.Concurrency = tool.ConcurrencyParallel
 		return policy
@@ -108,12 +74,6 @@ func (driver *shellDriver) ToolPolicy() agentruntime.ToolPolicy {
 		"platform":               runtime.GOOS,
 		"max_wall_clock_seconds": fmt.Sprint(maxWallClockSeconds(driver.maxWallClock())),
 	}
-	return policy
-}
-
-func (*webSearchDriver) ToolPolicy() agentruntime.ToolPolicy {
-	policy := readOnlyPolicy("web", "search", "network")
-	policy.Concurrency = tool.ConcurrencyParallel
 	return policy
 }
 

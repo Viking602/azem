@@ -154,6 +154,39 @@ func TestBridgeResumeSessionReturnsDurableProjectionDirectly(t *testing.T) {
 	if event.Kind != string(azemapp.EventSessionLoaded) || event.SessionID != "session-resume" || !strings.Contains(event.Data["blocks"], "durable search target") {
 		t.Fatalf("direct resume projection = %+v", event)
 	}
+	if event.Data["title"] != "Resume target" {
+		t.Fatalf("resume title = %q", event.Data["title"])
+	}
+}
+
+func TestBridgeResumeSessionDoesNotRequireSecondProjectionRebuild(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "resume-once.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	sessions := session.NewService(store.DB(), store.Blobs())
+	if _, err := sessions.Ensure(ctx, session.Session{ID: "session-once", Title: "Once"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sessions.AppendBlock(ctx, "session-once", session.Block{Kind: "user", Content: "once"}); err != nil {
+		t.Fatal(err)
+	}
+	runtime := azemapp.NewService(ctx, config.Default())
+	runtime.AttachDurable(sessions, nil)
+	bridge := &Bridge{runtime: runtime, ctx: ctx}
+	first, err := bridge.ResumeSession("session-once")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := runtime.SessionProjection(ctx, "session-once")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Data["blocks"] != second.Data["blocks"] || first.Data["blockSequences"] != second.Data["blockSequences"] {
+		t.Fatalf("resume readback drifted from session projection: %#v vs %#v", first.Data, second.Data)
+	}
 }
 
 func TestReconnectSnapshotAllowsFreshUnpersistedSession(t *testing.T) {
@@ -179,9 +212,44 @@ func TestReconnectSnapshotAllowsFreshUnpersistedSession(t *testing.T) {
 	if snapshot.Base.SessionID != "session-fresh" || snapshot.Session != nil {
 		t.Fatalf("fresh reconnect snapshot = %#v", snapshot)
 	}
+	if snapshot.Runs == nil || snapshot.LiveBlocks == nil || snapshot.Controls == nil || snapshot.RuntimeRecovery.State != "clear" {
+		t.Fatalf("fresh reconnect omitted explicit runtime domains: %#v", snapshot)
+	}
 	if len(snapshot.Skills.Entries) != 0 || snapshot.Hooks != nil ||
 		snapshot.Marketplace != nil || snapshot.PullRequests != nil {
 		t.Fatalf("optional catalogs delayed first reconnect: %#v", snapshot)
+	}
+}
+
+func TestCreateSessionReturnsClientLocalEphemeralProjection(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "new-session.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	sessions := session.NewService(store.DB(), store.Blobs())
+	cfg := config.Default()
+	cfg.Workspace.Root = t.TempDir()
+	runtime := azemapp.NewService(ctx, cfg)
+	runtime.AttachDurable(sessions, nil)
+	bridge := &Bridge{runtime: runtime, ctx: ctx}
+
+	selection, err := bridge.CreateSession("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selection.SelectedSessionID == "" || selection.Session == nil ||
+		selection.Session.Session.ID != selection.SelectedSessionID ||
+		!selection.Ephemeral || len(selection.Session.Blocks) != 0 || len(selection.Runs) != 0 {
+		t.Fatalf("new session selection = %#v", selection)
+	}
+	var count int
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM sessions WHERE id=?`, selection.SelectedSessionID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("empty session persisted before its first turn: %d", count)
 	}
 }
 
@@ -214,6 +282,13 @@ func TestReconnectSnapshotIncludesDurableSessionAndProjectCatalogs(t *testing.T)
 	}); err != nil {
 		t.Fatal(err)
 	}
+	now := time.Now().UTC()
+	if _, err := sessions.SavePromptQueueCAS(ctx, "session-history", 0, session.PromptQueueV1{
+		State: session.PromptQueuePaused, PauseReason: "test",
+		Items: []session.QueuedPromptV1{{ID: "queued", Text: "later", State: session.QueuedPromptQueued, CreatedAt: now, UpdatedAt: now}},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	cfg := config.Default()
 	runtime := azemapp.NewService(ctx, cfg)
 	runtime.AttachDurable(sessions, nil)
@@ -232,6 +307,38 @@ func TestReconnectSnapshotIncludesDurableSessionAndProjectCatalogs(t *testing.T)
 	}
 	if len(snapshot.Projects) != 1 || snapshot.Projects[0].Workspace != workspace {
 		t.Fatalf("projects = %+v", snapshot.Projects)
+	}
+	if snapshot.Session == nil || snapshot.Session.Version != azemapp.SessionProjectionVersion ||
+		len(snapshot.Session.Blocks) != 1 || snapshot.Session.Blocks[0].Content != "historical turn" {
+		t.Fatalf("typed session projection = %#v", snapshot.Session)
+	}
+	if len(snapshot.PromptQueues) != 1 || snapshot.PromptQueues[0].Items[0].ID != "queued" {
+		t.Fatalf("prompt queues = %#v", snapshot.PromptQueues)
+	}
+	// A normal long conversation exceeds the native JSON decoder's 128-level
+	// limit when its parent chain is nested into the startup snapshot.
+	for range 100 {
+		if _, err := sessions.AppendBlock(ctx, "session-history", session.Block{Kind: "user", Content: "later turn"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot, err = bridge.ReconnectSnapshot("session-history")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Tree != nil || snapshot.Session == nil || len(snapshot.Session.Blocks) != 101 {
+		t.Fatal("startup must retain all blocks without embedding the recursive session tree")
+	}
+	tree, err := bridge.SessionTree("session-history")
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for nodes := tree.Roots; len(nodes) > 0; nodes = nodes[0].Children {
+		count++
+	}
+	if count != 101 {
+		t.Fatalf("on-demand tree retained %d entries, want 101", count)
 	}
 }
 
@@ -419,8 +526,11 @@ func TestAllowedDesktopActions(t *testing.T) {
 	if !allowedAction(azemapp.ActionSetQueueMode) {
 		t.Fatal("queue mode must be configurable from the desktop")
 	}
-	if !allowedAction(azemapp.ActionSetSessionPreferences) {
+	if !allowedAction(azemapp.ActionSetSessionPreferences) || !allowedAction(azemapp.ActionSetSessionMode) {
 		t.Fatal("session preferences must be configurable from the desktop")
+	}
+	if !allowedAction(azemapp.ActionSetModelExtendedContext) {
+		t.Fatal("model extended context must be configurable from the desktop")
 	}
 	if !allowedAction(azemapp.ActionSetChatGPTFastMode) {
 		t.Fatal("ChatGPT fast mode must be configurable from the desktop")
@@ -441,8 +551,8 @@ func TestAllowedDesktopActions(t *testing.T) {
 		t.Fatal("unknown desktop actions must be rejected")
 	}
 	for _, kind := range []azemapp.ActionKind{azemapp.ActionPublishSecurityScan, azemapp.ActionPatchSecurityWithPR, azemapp.ActionReconcileSecurityPublish} {
-		if allowedAction(kind) {
-			t.Fatalf("host-only security action %q reached the desktop", kind)
+		if !allowedAction(kind) {
+			t.Fatalf("governed remote TUI security action %q is missing from the daemon allowlist", kind)
 		}
 	}
 }

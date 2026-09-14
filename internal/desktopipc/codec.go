@@ -23,13 +23,20 @@ type DecodedFrame struct {
 }
 
 type Codec struct {
-	reader *bufio.Reader
-	writer *bufio.Writer
-	mu     sync.Mutex
+	reader   *bufio.Reader
+	writer   *bufio.Writer
+	protocol int
+	mu       sync.Mutex
 }
 
 func NewCodec(stream io.ReadWriter) *Codec {
-	return &Codec{reader: bufio.NewReaderSize(stream, 64<<10), writer: bufio.NewWriterSize(stream, 64<<10)}
+	return NewCodecForVersion(stream, ProtocolVersion)
+}
+
+// NewCodecForVersion exists only for the authenticated one-shot upgrade
+// handshake with the immediately preceding daemon protocol.
+func NewCodecForVersion(stream io.ReadWriter, protocol int) *Codec {
+	return &Codec{reader: bufio.NewReaderSize(stream, 64<<10), writer: bufio.NewWriterSize(stream, 64<<10), protocol: protocol}
 }
 
 func (codec *Codec) ReadFrame() (DecodedFrame, error) {
@@ -51,7 +58,7 @@ func (codec *Codec) ReadFrame() (DecodedFrame, error) {
 		if err := json.Unmarshal(payload[1:], &envelope); err != nil {
 			return DecodedFrame{}, fmt.Errorf("decode IPC control frame: %w", err)
 		}
-		if err := envelope.Validate(); err != nil {
+		if err := envelope.validateVersion(codec.protocol); err != nil {
 			return DecodedFrame{}, err
 		}
 		return DecodedFrame{Envelope: &envelope}, nil
@@ -81,7 +88,7 @@ func (codec *Codec) ReadFrame() (DecodedFrame, error) {
 }
 
 func (codec *Codec) WriteEnvelope(envelope Envelope) error {
-	if err := envelope.Validate(); err != nil {
+	if err := envelope.validateVersion(codec.protocol); err != nil {
 		return err
 	}
 	encoded, err := json.Marshal(envelope)
@@ -111,7 +118,7 @@ func (codec *Codec) WriteBinary(metadata BinaryMetadata, data []byte) error {
 }
 
 func (codec *Codec) WriteTerminalReplay(response Envelope, chunks []terminalChunk) error {
-	if err := response.Validate(); err != nil {
+	if err := response.validateVersion(codec.protocol); err != nil {
 		return err
 	}
 	encoded, err := json.Marshal(response)

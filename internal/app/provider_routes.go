@@ -12,6 +12,7 @@ import (
 	"github.com/Viking602/azem/internal/provider/catalog"
 	"github.com/Viking602/azem/internal/provider/codex"
 	cursordriver "github.com/Viking602/azem/internal/provider/cursor"
+	devindriver "github.com/Viking602/azem/internal/provider/devin"
 	"github.com/Viking602/azem/internal/provider/xai"
 	hyprovider "github.com/Viking602/venat/provider"
 )
@@ -58,6 +59,7 @@ func (r *ProviderRuntime) UpdateModelRoute(scope, role string, route config.Mode
 		"approval": &r.cfg.Agents.Approval,
 		"vision":   &r.cfg.Agents.Vision,
 		"recap":    &r.cfg.Agents.Recap,
+		"fusion":   &r.cfg.Agents.Fusion,
 	}
 	if target := routeTargets[scope]; target != nil {
 		*target = route
@@ -160,15 +162,23 @@ func (r *ProviderRuntime) UpdateChatGPTFastMode(enabled bool) {
 	r.mu.Unlock()
 }
 
+func (r *ProviderRuntime) UpdateChatGPTExtendedContextModels(models []string) {
+	r.mu.Lock()
+	r.cfg.Providers.ChatGPT.ExtendedContextModels = append([]string(nil), models...)
+	r.mu.Unlock()
+}
+
+func (r *ProviderRuntime) modelWithContextSettings(providerID string, model catalog.Model) catalog.Model {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return applyModelContextSettings(providerID, model, r.cfg.Providers.ChatGPT.ExtendedContextModels)
+}
+
 func (r *ProviderRuntime) UpdateSubscriptionDisabledModels(provider string, models []string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if provider == "chatgpt" {
-		r.cfg.Providers.ChatGPT.DisabledModels = append([]string(nil), models...)
-	} else if provider == "grok" {
-		r.cfg.Providers.Grok.DisabledModels = append([]string(nil), models...)
-	} else if provider == "cursor" {
-		r.cfg.Providers.Cursor.DisabledModels = append([]string(nil), models...)
+	if cfg := r.cfg.Providers.Subscription(provider); cfg != nil {
+		cfg.DisabledModels = append([]string(nil), models...)
 	}
 }
 
@@ -238,17 +248,11 @@ func (r *ProviderRuntime) resolveDriverForAccountRoute(ctx context.Context, prov
 	}
 	r.mu.RLock()
 	var disabledModels []string
-	if providerID == "chatgpt" {
-		disabledModels = append([]string(nil), r.cfg.Providers.ChatGPT.DisabledModels...)
-	} else if providerID == "grok" {
-		disabledModels = append([]string(nil), r.cfg.Providers.Grok.DisabledModels...)
-	} else {
-		disabledModels = append([]string(nil), r.cfg.Providers.Cursor.DisabledModels...)
-	}
+	disabledModels = append([]string(nil), r.cfg.Providers.Subscription(providerID).DisabledModels...)
 	r.mu.RUnlock()
 	if modelID == "" {
 		for _, model := range models.Models {
-			if !slices.Contains(disabledModels, model.ID) {
+			if !model.Disabled && !slices.Contains(disabledModels, model.ID) {
 				modelID = model.ID
 				break
 			}
@@ -257,7 +261,7 @@ func (r *ProviderRuntime) resolveDriverForAccountRoute(ctx context.Context, prov
 	var selectedModel catalog.Model
 	for _, model := range models.Models {
 		if model.MatchesID(modelID) {
-			if slices.Contains(disabledModels, model.ID) {
+			if model.Disabled || slices.Contains(disabledModels, model.ID) {
 				return auth.Account{}, "", 0, nil, fmt.Errorf("model %q is disabled for %s", model.ID, providerID)
 			}
 			selectedModel = model
@@ -267,6 +271,7 @@ func (r *ProviderRuntime) resolveDriverForAccountRoute(ctx context.Context, prov
 	if selectedModel.ID == "" {
 		return auth.Account{}, "", 0, nil, fmt.Errorf("model %q is not available for %s account %s", modelID, providerID, account.ID)
 	}
+	selectedModel = r.modelWithContextSettings(providerID, selectedModel)
 	reasoningEffort, err := catalog.ResolveReasoningEffort(providerID, selectedModel, requestedReasoning)
 	if err != nil {
 		return auth.Account{}, "", 0, nil, err
@@ -297,6 +302,12 @@ func (r *ProviderRuntime) resolveDriverForAccountRoute(ctx context.Context, prov
 			return auth.Account{}, "", 0, nil, fmt.Errorf("unsupported Grok transport %q", r.cfg.Providers.Grok.Transport)
 		}
 		driver, err := xai.New(transport, modelIDs, reasoningEffort)
+		return account, modelID, selectedModel.ContextWindow, driver, err
+	case "devin":
+		driver, err := devindriver.New(func(ctx context.Context) (string, error) {
+			credential, err := r.auth.Credential(ctx, "devin", account.ID)
+			return credential.AccessToken, err
+		}, account.ID, selectedModel)
 		return account, modelID, selectedModel.ContextWindow, driver, err
 	case "cursor":
 		driver, err := cursordriver.New(func(ctx context.Context) (string, error) {

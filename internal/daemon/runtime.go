@@ -118,10 +118,10 @@ func New(parent context.Context, options Options) (*Runtime, error) {
 	server, err := desktopipc.NewServer(desktopipc.ServerOptions{
 		Listener: listener, Token: token, WorkspaceID: workspaceID, Hub: hub, Dispatcher: dispatcher,
 		TransferDir: filepath.Join(daemonDir, "transfers"), TerminalReplay: terminal, OnDaemonStop: cancel,
+		IdleTimeout: 5 * time.Second,
 		AuthorizeDaemonStop: func(includeActive bool) error {
-			_, runID := boot.Service.ActiveRun()
-			if runID != "" && !includeActive {
-				return fmt.Errorf("daemon has active run %s", runID)
+			if !includeActive && boot.Service.HasActiveWork() {
+				return errors.New("daemon has active work")
 			}
 			return nil
 		},
@@ -134,7 +134,8 @@ func New(parent context.Context, options Options) (*Runtime, error) {
 	runtime.server = server
 	runtime.endpoint = desktopipc.Endpoint{
 		Protocol: desktopipc.ProtocolVersion, WorkspaceID: workspaceID, Workspace: boot.Paths.Workspace,
-		Address: address, TokenFile: tokenPath, PID: os.Getpid(), StartedAt: time.Now().UTC(),
+		DaemonEpoch: server.DaemonEpoch(),
+		Address:     address, TokenFile: tokenPath, PID: os.Getpid(), StartedAt: time.Now().UTC(),
 	}
 	if err := desktopipc.WriteEndpointFile(runtime.endpointPath, runtime.endpoint); err != nil {
 		runtime.Close()

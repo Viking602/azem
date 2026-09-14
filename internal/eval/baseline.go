@@ -167,7 +167,7 @@ func toolIdentities(definitions []message.ToolDefinition, origins map[string]str
 
 func dependencyIdentities(root string, requested []string) ([]DependencyIdentityV1, string, error) {
 	if len(requested) == 0 {
-		requested = []string{"go.mod", "go.sum", "runtime-js/package.json", "runtime-js/bun.lock"}
+		requested = []string{"go.mod", "go.sum"}
 	}
 	paths := append([]string(nil), requested...)
 	sort.Strings(paths)

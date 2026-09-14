@@ -16,7 +16,10 @@ import (
 )
 
 func (m *AppModel) applyEvent(event app.Event) {
-	if event.Kind != app.EventSessionLoaded && event.SessionID != "" && event.SessionID != m.sessionID {
+	if m.reduceProjectionEvent(event) {
+		return
+	}
+	if event.SessionID != "" && event.SessionID != m.sessionID {
 		return
 	}
 	if event.AgentID != "" && event.AgentID != "main" {
@@ -162,6 +165,8 @@ func (m *AppModel) applyEvent(event app.Event) {
 		}
 	case app.EventModelCatalog:
 		m.loadModels(event)
+	case app.EventModelProviders:
+		m.loadModelProviders(event)
 	case app.EventModelRoutes:
 		if maxConcurrency, err := strconv.Atoi(event.Data["subagent_max_concurrency"]); err == nil && maxConcurrency > 0 {
 			m.subagentConcurrency = maxConcurrency

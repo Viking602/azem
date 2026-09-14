@@ -416,7 +416,7 @@ func (driver gofmtDriver) Execute(ctx context.Context, call tool.Call, _ tool.Up
 	formattedText := string(formatted)
 	changed := formattedText != read.Text
 	if changed {
-		destination, err := brokerDestination(driver.workspace.Root(), read.Path, true)
+		destination, err := resolveWorkspacePath(driver.workspace.Root(), read.Path, true)
 		if err != nil {
 			return toolError(call, "coding.gofmt failed: "+err.Error()), nil
 		}
@@ -562,6 +562,57 @@ func structuredToolResult(call tool.Call, content string, value any) (tool.Resul
 
 func toolError(call tool.Call, content string) tool.Result {
 	return tool.Result{ToolCallID: call.ID, Name: call.Name, Content: content, IsError: true}
+}
+
+// resolveWorkspacePath resolves every existing path component so the returned
+// absolute path cannot escape the workspace root through a symlink.
+func resolveWorkspacePath(rootPath, relative string, followLeaf bool) (string, error) {
+	rootPath, err := filepath.Abs(rootPath)
+	if err != nil {
+		return "", err
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(rootPath)
+	if err != nil {
+		return "", err
+	}
+	candidate := filepath.Join(rootPath, filepath.FromSlash(relative))
+	parent := filepath.Dir(candidate)
+	var missing []string
+	for {
+		resolved, resolveErr := filepath.EvalSymlinks(parent)
+		if resolveErr == nil {
+			parent = resolved
+			break
+		}
+		if !errors.Is(resolveErr, fs.ErrNotExist) {
+			return "", resolveErr
+		}
+		next := filepath.Dir(parent)
+		if next == parent {
+			return "", resolveErr
+		}
+		missing = append(missing, filepath.Base(parent))
+		parent = next
+	}
+	for index := len(missing) - 1; index >= 0; index-- {
+		parent = filepath.Join(parent, missing[index])
+	}
+	candidate = filepath.Join(parent, filepath.Base(candidate))
+	if followLeaf {
+		if _, statErr := os.Lstat(candidate); statErr == nil {
+			candidate, err = filepath.EvalSymlinks(candidate)
+			if err != nil {
+				return "", err
+			}
+		} else if !errors.Is(statErr, fs.ErrNotExist) {
+			return "", statErr
+		}
+	}
+	relativeToRoot, err := filepath.Rel(resolvedRoot, candidate)
+	if err != nil || relativeToRoot == ".." || strings.HasPrefix(relativeToRoot, ".."+string(filepath.Separator)) || filepath.IsAbs(relativeToRoot) {
+		return "", fs.ErrPermission
+	}
+	return filepath.Clean(candidate), nil
 }
 
 var _ Workspace = (*localWorkspace)(nil)

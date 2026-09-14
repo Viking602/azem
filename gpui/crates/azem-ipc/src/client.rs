@@ -6,7 +6,7 @@ use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadHalf, WriteHalf},
+    io::{AsyncRead, AsyncWrite, ReadHalf, WriteHalf},
     sync::{Mutex, broadcast, oneshot, watch},
     task::JoinHandle,
     time,
@@ -70,7 +70,9 @@ impl Client {
                 }
                 _ => return Err(anyhow!("daemon did not send an authentication challenge")),
             };
-        if challenge.protocol != PROTOCOL_VERSION || challenge.workspace_id != endpoint.workspace_id
+        if challenge.protocol != PROTOCOL_VERSION
+            || challenge.workspace_id != endpoint.workspace_id
+            || challenge.daemon_epoch != endpoint.daemon_epoch
         {
             return Err(anyhow!("daemon challenge does not match the endpoint"));
         }
@@ -102,6 +104,14 @@ impl Client {
                 }
                 _ => return Err(anyhow!("daemon rejected IPC authentication")),
             };
+        if acknowledgement.protocol != PROTOCOL_VERSION
+            || acknowledgement.workspace_id != endpoint.workspace_id
+            || acknowledgement.daemon_epoch != endpoint.daemon_epoch
+        {
+            return Err(anyhow!(
+                "daemon acknowledgement does not match the endpoint"
+            ));
+        }
         let (reader, writer) = tokio::io::split(stream);
         let (events, _) = broadcast::channel(2048);
         let (shutdown, shutdown_rx) = watch::channel(false);
@@ -179,29 +189,32 @@ impl Client {
         name: &str,
         mime_type: &str,
     ) -> Result<Value> {
-        let path = path.as_ref();
-        let byte_length = tokio::fs::metadata(path).await?.len();
+        let data = tokio::fs::read(path.as_ref()).await?;
+        self.upload_attachment_bytes(session_id, name, mime_type, &data)
+            .await
+    }
+
+    pub async fn upload_attachment_bytes(
+        &self,
+        session_id: &str,
+        name: &str,
+        mime_type: &str,
+        data: &[u8],
+    ) -> Result<Value> {
+        let byte_length = data.len() as u64;
+        if byte_length == 0 {
+            return Err(anyhow!("attachment is empty"));
+        }
         if byte_length > crate::generated::MAX_REASSEMBLED_BINARY as u64 {
             return Err(anyhow!("attachment exceeds the IPC reassembly limit"));
         }
-        let mut hash_file = tokio::fs::File::open(path).await?;
-        let mut hasher = Sha256::new();
-        let mut buffer = vec![0_u8; crate::generated::MAX_BINARY_CHUNK_BYTES];
-        loop {
-            let read = hash_file.read(&mut buffer).await?;
-            if read == 0 {
-                break;
-            }
-            hasher.update(&buffer[..read]);
-        }
-        let digest = hasher
-            .finalize()
+        let digest = Sha256::digest(data)
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         let transfer_id = Uuid::new_v4().to_string();
-        let chunk_count =
-            byte_length.div_ceil(crate::generated::MAX_BINARY_CHUNK_BYTES as u64) as usize;
+        let chunk_size = crate::generated::MAX_BINARY_CHUNK_BYTES;
+        let chunk_count = data.len().div_ceil(chunk_size);
         self.request(
             Method::BeginAttachmentTransfer,
             &serde_json::json!({
@@ -216,12 +229,9 @@ impl Client {
         )
         .await?;
         let upload = async {
-            let mut file = tokio::fs::File::open(path).await?;
             for index in 0..chunk_count {
-                let read = file.read(&mut buffer).await?;
-                if read == 0 {
-                    return Err(anyhow!("attachment ended before its declared size"));
-                }
+                let start = index * chunk_size;
+                let end = (start + chunk_size).min(data.len());
                 let metadata = BinaryMetadata {
                     transfer_id: transfer_id.clone(),
                     purpose: "attachment".into(),
@@ -234,7 +244,7 @@ impl Client {
                     index,
                     count: chunk_count,
                 };
-                self.write_binary(&metadata, &buffer[..read]).await?;
+                self.write_binary(&metadata, &data[start..end]).await?;
             }
             self.request(
                 Method::CommitAttachment,

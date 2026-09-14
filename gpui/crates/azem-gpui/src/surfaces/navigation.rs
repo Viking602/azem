@@ -1,13 +1,13 @@
+use super::navigation_motion::{clip_list, reorder_list};
 use super::*;
 pub(crate) fn sidebar(
     state: &AppState,
     palette: ThemePalette,
     labels: Labels,
-    open_projects: &HashSet<String>,
-    show_all_sessions: bool,
+    tree: &SidebarTreeState,
     sidebar_context_target: Option<&SidebarMenuTarget>,
     cx: &mut Context<AzemWindow>,
-) -> gpui::AnyElement {
+) -> gpui::Stateful<gpui::Div> {
     let locale = Locale::resolve(&state.settings.language);
     let mut projects = Vec::new();
     if !state.workspace.root.is_empty() {
@@ -26,7 +26,7 @@ pub(crate) fn sidebar(
         .id("sidebar")
         .role(Role::Navigation)
         .aria_label(labels.projects)
-        .w(px(SIDEBAR_WIDTH))
+        .w_full()
         .h_full()
         .bg(palette.sidebar)
         .border_r_1()
@@ -239,7 +239,7 @@ pub(crate) fn sidebar(
                     div()
                         .id("project-add")
                         .role(Role::Button)
-                        .aria_label(labels.projects)
+                        .aria_label(locale.text("sidebar.addProject"))
                         .tab_stop(true)
                         .size(px(25.))
                         .rounded(px(7.))
@@ -249,13 +249,17 @@ pub(crate) fn sidebar(
                         .justify_center()
                         .cursor_pointer()
                         .hover(move |style| style.bg(palette.hover))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.state.navigation.surface = Surface::Projects;
-                            cx.notify();
-                        }))
+                        .on_click(cx.listener(AzemWindow::add_project))
                         .child(icon("plus", 15., palette.faint)),
                 ),
         )
+        .when(!state.navigation.project_error.is_empty(), |sidebar| {
+            sidebar.child(
+                div().id("project-add-error").role(Role::Alert)
+                    .px_2().pb_2().text_xs().text_color(palette.danger)
+                    .child(state.navigation.project_error.to_string()),
+            )
+        })
         .child(
             div()
                 .id("project-tree")
@@ -265,7 +269,7 @@ pub(crate) fn sidebar(
                 .overflow_y_scroll()
                 .flex()
                 .flex_col()
-                .children(
+                .child(reorder_list("project-order", 0.,
                     projects
                         .into_iter()
                         .enumerate()
@@ -276,7 +280,7 @@ pub(crate) fn sidebar(
                                 Some(SidebarMenuTarget::Project { workspace })
                                     if workspace == &project
                             );
-                            let expanded = active || open_projects.contains(&project);
+                            let expanded = tree.expanded(&project, active);
                             let project_name = std::path::Path::new(&project)
                                 .file_name()
                                 .and_then(|name| name.to_str())
@@ -302,22 +306,24 @@ pub(crate) fn sidebar(
                                         && pull_request_title != Some(session.title.as_ref())
                                 })
                                 .collect::<Vec<_>>();
-                            let visible_count = if active && show_all_sessions {
-                                sessions.len()
-                            } else {
-                                sessions.len().min(5)
-                            };
+                            let visible_sessions = tree.visible_sessions(&project, sessions.len());
+                            let total_sessions = sessions.len();
+                            let more_project = project.clone();
+                            let less_project = project.clone();
                             let toggle_project = project.clone();
                             let new_project_session = project.clone();
                             let context_project = project.clone();
-                            div()
-                                .id(("project-node", project_index))
+                            let project_key = project.clone();
+                            let node = div()
+                                .id(gpui::SharedString::from(format!("project-node-{project}")))
                                 .flex()
                                 .flex_col()
                                 .mb(px(3.))
                                 .child(
                                     div()
                                         .h(px(35.))
+                                        .border_l_2()
+                                        .border_color(if active { palette.accent.opacity(0.5) } else { palette.sidebar })
                                         .pl(px(3.))
                                         .pr(px(4.))
                                         .rounded(px(9.))
@@ -358,13 +364,7 @@ pub(crate) fn sidebar(
                                                 .gap(px(6.))
                                                 .cursor_pointer()
                                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                                    if this.open_projects.contains(&toggle_project)
-                                                    {
-                                                        this.open_projects.remove(&toggle_project);
-                                                    } else {
-                                                        this.open_projects
-                                                            .insert(toggle_project.clone());
-                                                    }
+                                                    this.sidebar_tree.expanded.insert(toggle_project.clone(), !expanded);
                                                     cx.notify();
                                                 }))
                                                 .child(div().w(px(10.)).child(icon(
@@ -380,7 +380,7 @@ pub(crate) fn sidebar(
                                                     div()
                                                         .overflow_hidden()
                                                         .text_color(palette.ink)
-                                                        .text_xs()
+                                                        .text_size(px(13.))
                                                         .font_weight(gpui::FontWeight::SEMIBOLD)
                                                         .child(project_name),
                                                 ),
@@ -401,10 +401,8 @@ pub(crate) fn sidebar(
                                                 .hover(move |style| style.bg(palette.paper))
                                                 .on_click(cx.listener(move |this, _, _, cx| {
                                                     if active {
-                                                        this.runtime.request(
-                                                            Method::Execute,
-                                                            json!({"kind": "new_session"}),
-                                                        );
+                                                        let id = this.runtime.request(Method::CreateSession, json!({}));
+ this.pending_requests.insert(id, PendingRequest::ResumeSession { sequence: None });
                                                         this.state.navigation.surface =
                                                             Surface::Thread;
                                                         cx.notify();
@@ -421,8 +419,8 @@ pub(crate) fn sidebar(
                                                 .child(icon("plus", 15., palette.faint)),
                                         ),
                                 )
-                                .when(expanded, |node| {
-                                    let node = node.when_some(
+                                .child({
+                                    let node = div().flex().flex_col().when_some(
                                         project_pull_request,
                                         |node, pull_request| {
                                             let number = pull_request
@@ -507,7 +505,7 @@ pub(crate) fn sidebar(
                                             )
                                         },
                                     );
-                                    node.child(
+                                    let content = node.child(
                                         div()
                                             .ml(px(17.))
                                             .pl(px(10.))
@@ -515,10 +513,12 @@ pub(crate) fn sidebar(
                                             .border_color(palette.border_strong)
                                             .flex()
                                             .flex_col()
-                                            .children(
+                                            .gap(px(4.))
+                                            .child(clip_list(format!("sessions-{project}"),
+                                                (visible_sessions < sessions.len()).then_some(visible_sessions as f32 * 39. - 4.),
+                                                reorder_list("session-order", 4.,
                                                 sessions
-                                                    .into_iter()
-                                                    .take(visible_count)
+                                                    .iter()
                                                     .enumerate()
                                                     .map(|(session_index, session)| {
                                                         let session_id = session.id.to_string();
@@ -543,19 +543,19 @@ pub(crate) fn sidebar(
                                                         let context_workspace = workspace.clone();
                                                         let context_title = title.clone();
                                                         let context_pinned = session.pinned;
-                                                        div()
-                                                .id((
-                                                    "project-session",
-                                                    project_index * 1000 + session_index,
-                                                ))
-                                                .role(Role::Button)
-                                                .aria_label(title.clone())
-                                                .aria_selected(selected || context_selected)
-                                                .tab_stop(true)
+                                                        let row = div()
+                                                .id(gpui::SharedString::from(format!("project-session-{session_id}")))
+                                                .when(session_index < visible_sessions, |row| row
+                                                    .role(Role::Button)
+                                                    .aria_label(title.clone())
+                                                    .aria_selected(selected || context_selected)
+                                                    .tab_stop(true))
                                                 .h(px(35.))
                                                 .px(px(6.))
                                                 .rounded(px(8.))
-                                                .bg(if selected || context_selected {
+                                                .bg(if selected {
+                                                    palette.paper
+                                                } else if context_selected {
                                                     palette.hover
                                                 } else {
                                                     palette.sidebar
@@ -565,12 +565,16 @@ pub(crate) fn sidebar(
                                                 } else {
                                                     palette.muted
                                                 })
-                                                .text_xs()
+                                                .text_size(px(13.))
+                                                .font_weight(gpui::FontWeight::NORMAL)
+                                                .when(selected, |row| row.shadow(vec![
+                                                    BoxShadow::new(px(0.), px(2.), hsla(0., 0., 0., 0.05)).blur_radius(px(5.)),
+                                                ]))
                                                 .flex()
                                                 .items_center()
                                                 .gap(px(7.))
                                                 .cursor_pointer()
-                                                .hover(move |style| style.bg(palette.hover))
+                                                .hover(move |style| style.bg(if selected { palette.paper } else { palette.hover }))
                                                 .on_mouse_down(
                                                     MouseButton::Right,
                                                     cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
@@ -588,10 +592,32 @@ pub(crate) fn sidebar(
                                                         cx.notify();
                                                     }),
                                                 )
-                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                .on_click({
+                                                    let optimistic_title = title.clone();
+                                                    cx.listener(move |this, _, _, cx| {
                                                     if active {
+                                                        // Optimistic selection keeps the sidebar
+                                                        // responsive while the durable projection
+                                                        // round-trip completes.
+                                                        this.state.navigation.current_session_id =
+                                                            session_id.clone().into();
+                                                        this.state.navigation.current_title =
+                                                            optimistic_title.clone().into();
+                                                        if let Some(session) = this
+                                                            .state
+                                                            .navigation
+                                                            .sessions
+                                                            .iter_mut()
+                                                            .find(|session| {
+                                                                session.id.as_ref() == session_id
+                                                            })
+                                                        {
+                                                            session.unread = false;
+                                                        }
+                                                        this.state.navigation.surface =
+                                                            Surface::Thread;
                                                         let request_id = this.runtime.request(
-                                                            Method::ResumeSession,
+                                                            Method::SelectSession,
                                                             json!({"sessionId": session_id}),
                                                         );
                                                         this.pending_requests.insert(
@@ -600,8 +626,6 @@ pub(crate) fn sidebar(
                                                                 sequence: None,
                                                             },
                                                         );
-                                                        this.state.navigation.surface =
-                                                            Surface::Thread;
                                                         cx.notify();
                                                     } else {
                                                         this.switch_workspace(
@@ -612,7 +636,8 @@ pub(crate) fn sidebar(
                                                             cx,
                                                         );
                                                     }
-                                                }))
+                                                })
+                                                })
                                                 .child(
                                                     div()
                                                         .flex_1()
@@ -652,41 +677,75 @@ pub(crate) fn sidebar(
                                                             .rounded_full()
                                                             .bg(palette.accent),
                                                     )
-                                                })
+                                                });
+                                                        (session.id.to_string(), row.into_any_element())
                                                     }),
-                                            )
+                                            ), tree, cx))
+                                            .when(sessions.is_empty(), |list| {
+                                                list.child(
+                                                    div()
+                                                        .h(px(30.))
+                                                        .px(px(6.))
+                                                        .text_color(palette.faint)
+                                                        .text_size(px(13.))
+                                                        .flex()
+                                                        .items_center()
+                                                        .child(locale.text("sidebar.noSessions")),
+                                                )
+                                            })
                                             .when(
-                                                active && state.navigation.sessions.len() > 5,
+                                                total_sessions > 5,
                                                 |list| {
                                                     list.child(
                                                         div()
+                                                            .flex()
+                                                            .items_center()
+                                                            .gap(px(8.))
+                                                            .when(visible_sessions < total_sessions, |controls| controls.child(div()
                                                             .id("show-more-sessions")
                                                             .role(Role::Button)
+                                                            .aria_label(locale.text("common.showMore"))
                                                             .tab_stop(true)
                                                             .h(px(30.))
                                                             .px(px(6.))
                                                             .text_color(palette.faint)
-                                                            .text_xs()
+                                                            .text_size(px(13.))
                                                             .flex()
                                                             .items_center()
                                                             .cursor_pointer()
                                                             .on_click(cx.listener(
-                                                                |this, _, _, cx| {
-                                                                    this.show_all_sessions =
-                                                                        !this.show_all_sessions;
+                                                                move |this, _, _, cx| {
+                                                                    this.sidebar_tree.show_more(&more_project, total_sessions);
                                                                     cx.notify();
                                                                 },
                                                             ))
-                                                            .child(if show_all_sessions {
-                                                                locale.text("ui.showLess")
-                                                            } else { locale.text("common.showMore") }),
+                                                            .child(locale.text("common.showMore"))))
+                                                            .when(visible_sessions > 5, |controls| controls.child(div()
+                                                                .id("show-less-sessions")
+                                                                .role(Role::Button)
+                                                                .aria_label(locale.text("ui.showLess"))
+                                                                .tab_stop(true)
+                                                                .h(px(30.))
+                                                                .px(px(6.))
+                                                                .text_color(palette.faint)
+                                                                .text_size(px(13.))
+                                                                .flex()
+                                                                .items_center()
+                                                                .cursor_pointer()
+                                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                                    this.sidebar_tree.session_limits.remove(&less_project);
+                                                                    cx.notify();
+                                                                }))
+                                                                .child(locale.text("ui.showLess")))),
                                                     )
                                                 },
                                             ),
-                                    )
-                                })
+                                    );
+                                    clip_list(format!("project-{project}"), (!expanded).then_some(0.), content, tree, cx)
+                                });
+                            (project_key, node.into_any_element())
                         }),
-                ),
+                )),
         )
         .child(
             div()
@@ -712,9 +771,7 @@ pub(crate) fn sidebar(
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.settings_open = true;
                             this.settings_provider = None;
-                            if this.state.catalogs.providers.is_empty() {
-                                this.refresh_model_catalog();
-                            }
+                            this.refresh_model_catalog();
                             cx.notify();
                         }))
                         .child(div().w(px(16.)).child(icon("settings", 15., palette.muted)))
@@ -723,7 +780,6 @@ pub(crate) fn sidebar(
                         .child(div().text_color(palette.faint).text_xs().child("⌘,")),
                 ),
         )
-        .into_any_element()
 }
 
 fn sidebar_context_menu_item(
@@ -969,7 +1025,7 @@ pub(crate) fn session_rename_modal(
                         .child(locale.text("sidebar.saveRename")),
                 ),
         );
-    div()
+    let overlay = div()
         .id("session-rename-backdrop")
         .absolute()
         .occlude()
@@ -978,8 +1034,8 @@ pub(crate) fn session_rename_modal(
         .flex()
         .items_center()
         .justify_center()
-        .child(dialog)
-        .into_any_element()
+        .child(dialog);
+    popup_transition(overlay, this.popup_motion("rename"))
 }
 
 pub(crate) fn search_surface(
@@ -987,6 +1043,7 @@ pub(crate) fn search_surface(
     input: Entity<TextInput>,
     palette: ThemePalette,
     labels: Labels,
+    motion: crate::PopupMotion,
     cx: &mut Context<AzemWindow>,
 ) -> gpui::AnyElement {
     let locale = Locale::resolve(&state.settings.language);
@@ -1023,7 +1080,7 @@ pub(crate) fn search_surface(
             "terminal",
         ),
     ];
-    div()
+    let overlay = div()
         .id("search-surface")
         .role(Role::Search)
         .aria_label(labels.search)
@@ -1124,9 +1181,15 @@ pub(crate) fn search_surface(
                                             .on_click(cx.listener(move |this, _, window, cx| {
                                                 match action {
                                                     "new" => {
-                                                        this.runtime.request(
-                                                            Method::Execute,
-                                                            json!({"kind": "new_session"}),
+                                                        let id = this.runtime.request(
+                                                            Method::CreateSession,
+                                                            json!({}),
+                                                        );
+                                                        this.pending_requests.insert(
+                                                            id,
+                                                            PendingRequest::ResumeSession {
+                                                                sequence: None,
+                                                            },
                                                         );
                                                         this.state.navigation.surface =
                                                             Surface::Thread;
@@ -1238,7 +1301,7 @@ pub(crate) fn search_surface(
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         if workspace.is_empty() || workspace == current_workspace {
                                             let request_id = this.runtime.request(
-                                                Method::ResumeSession,
+                                                Method::SelectSession,
                                                 json!({"sessionId": session_id}),
                                             );
                                             this.pending_requests.insert(
@@ -1291,6 +1354,6 @@ pub(crate) fn search_surface(
                         .child(locale.text("ui.navigate"))
                         .child(locale.text("ui.escClose")),
                 ),
-        )
-        .into_any_element()
+        );
+    popup_transition(overlay, motion)
 }

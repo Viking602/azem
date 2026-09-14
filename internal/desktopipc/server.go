@@ -2,6 +2,7 @@ package desktopipc
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,54 +11,106 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	azemapp "github.com/Viking602/azem/internal/app"
+	"github.com/Viking602/azem/internal/session"
 )
 
 const (
 	eventBatchInterval = 16 * time.Millisecond
 	maxEventBatchCount = 128
+	maxCommandReceipts = 4096
+	commandReceiptTTL  = 24 * time.Hour
 )
 
 type ServerOptions struct {
 	Listener            net.Listener
 	Token               []byte
 	WorkspaceID         string
+	DaemonEpoch         string
 	Hub                 *EventHub
 	Dispatcher          RequestDispatcher
 	TransferDir         string
 	TerminalReplay      *TerminalReplay
 	OnDaemonStop        func()
 	AuthorizeDaemonStop func(includeActive bool) error
+	IdleTimeout         time.Duration
+}
+type sequencedCommand struct {
+	request   Envelope
+	transfers *TransferManager
+	response  chan Envelope
+}
+type commandReceipt struct {
+	digest   [sha256.Size]byte
+	response Envelope
+	storedAt time.Time
 }
 
 type Server struct {
 	listener       net.Listener
 	token          []byte
 	workspaceID    string
+	daemonEpoch    string
 	hub            *EventHub
 	dispatcher     RequestDispatcher
 	transferDir    string
 	terminalReplay *TerminalReplay
 	onDaemonStop   func()
 	authorizeStop  func(bool) error
+	idleTimeout    time.Duration
+	idleSince      time.Time
+	stopping       bool
+	commandMu      sync.Mutex
 	mu             sync.Mutex
 	closeOnce      sync.Once
 	closeErr       error
 	connections    map[net.Conn]struct{}
+	commands       chan sequencedCommand
+	done           chan struct{}
+	receipts       map[string]commandReceipt
+	receiptOrder   []string
 }
 
 func NewServer(options ServerOptions) (*Server, error) {
+	if options.IdleTimeout > 0 && (options.OnDaemonStop == nil || options.AuthorizeDaemonStop == nil) {
+		return nil, errors.New("idle shutdown requires daemon stop authorization and callback")
+	}
 	if options.Listener == nil || len(options.Token) != tokenBytes || strings.TrimSpace(options.WorkspaceID) == "" || options.Hub == nil || options.Dispatcher == nil || strings.TrimSpace(options.TransferDir) == "" {
 		return nil, errors.New("IPC server options are incomplete")
 	}
-	return &Server{
-		listener: options.Listener, token: append([]byte(nil), options.Token...), workspaceID: options.WorkspaceID,
+	epoch := strings.TrimSpace(options.DaemonEpoch)
+	if epoch == "" {
+		var err error
+		epoch, err = GenerateNonce()
+		if err != nil {
+			return nil, fmt.Errorf("generate daemon epoch: %w", err)
+		}
+	}
+	server := &Server{
+		listener: options.Listener, token: append([]byte(nil), options.Token...), workspaceID: options.WorkspaceID, daemonEpoch: epoch,
 		hub: options.Hub, dispatcher: options.Dispatcher, transferDir: options.TransferDir,
 		terminalReplay: options.TerminalReplay, onDaemonStop: options.OnDaemonStop,
 		authorizeStop: options.AuthorizeDaemonStop, connections: make(map[net.Conn]struct{}),
-	}, nil
+		commands: make(chan sequencedCommand), done: make(chan struct{}),
+		receipts:    make(map[string]commandReceipt),
+		idleTimeout: options.IdleTimeout, idleSince: time.Now(),
+	}
+	go server.runCommandSequencer()
+	return server, nil
+}
+
+func (server *Server) DaemonEpoch() string {
+	if server == nil {
+		return ""
+	}
+	return server.daemonEpoch
 }
 
 func (server *Server) Serve(ctx context.Context) error {
+	if server.idleTimeout > 0 {
+		go server.watchIdle(ctx)
+	}
 	go func() {
 		<-ctx.Done()
 		server.Close()
@@ -71,15 +124,58 @@ func (server *Server) Serve(ctx context.Context) error {
 			return err
 		}
 		server.mu.Lock()
+		if server.stopping {
+			server.mu.Unlock()
+			connection.Close()
+			return nil
+		}
 		server.connections[connection] = struct{}{}
 		server.mu.Unlock()
 		go server.serveConnection(ctx, connection)
 	}
 }
 
+func (server *Server) watchIdle(ctx context.Context) {
+	ticker := time.NewTicker(min(server.idleTimeout, time.Second))
+	defer ticker.Stop()
+	for {
+		select {
+		case now := <-ticker.C:
+			if server.stopIfIdle(now) {
+				return
+			}
+		case <-ctx.Done():
+			return
+		case <-server.done:
+			return
+		}
+	}
+}
+
+func (server *Server) stopIfIdle(now time.Time) bool {
+	// A disconnected client may still have a mutation in the sequencer.
+	server.commandMu.Lock()
+	defer server.commandMu.Unlock()
+	server.mu.Lock()
+	if server.stopping || len(server.connections) != 0 || now.Sub(server.idleSince) < server.idleTimeout {
+		server.mu.Unlock()
+		return false
+	}
+	if server.authorizeStop(false) != nil {
+		server.mu.Unlock()
+		return false
+	}
+	server.stopping = true
+	server.mu.Unlock()
+	server.onDaemonStop()
+	return true
+}
+
 func (server *Server) Close() error {
 	server.closeOnce.Do(func() {
+		close(server.done)
 		server.mu.Lock()
+		server.stopping = true
 		connections := make([]net.Conn, 0, len(server.connections))
 		for connection := range server.connections {
 			connections = append(connections, connection)
@@ -101,6 +197,7 @@ func (server *Server) serveConnection(parent context.Context, connection net.Con
 		connection.Close()
 		server.mu.Lock()
 		delete(server.connections, connection)
+		server.idleSince = time.Now()
 		server.mu.Unlock()
 	}()
 	ctx, cancel := context.WithCancel(parent)
@@ -122,7 +219,7 @@ func (server *Server) serveConnection(parent context.Context, connection net.Con
 	ack.ClientID = authentication.ClientID
 	ack.WorkspaceID = server.workspaceID
 	ack.Sequence = replay.CurrentSequence
-	ack.Payload = mustJSON(HelloAck{Protocol: ProtocolVersion, WorkspaceID: server.workspaceID, CurrentSequence: replay.CurrentSequence, ReplayAvailable: !replay.ResyncRequired})
+	ack.Payload = mustJSON(HelloAck{Protocol: ProtocolVersion, WorkspaceID: server.workspaceID, DaemonEpoch: server.daemonEpoch, CurrentSequence: replay.CurrentSequence, ReplayAvailable: !replay.ResyncRequired})
 	if err := codec.WriteEnvelope(ack); err != nil {
 		return
 	}
@@ -157,7 +254,7 @@ func (server *Server) serveConnection(parent context.Context, connection net.Con
 				if ctx.Err() != nil {
 					return
 				}
-				response := server.dispatchResponse(request, nil)
+				response := server.dispatchResponse(ctx, request, nil)
 				if ctx.Err() != nil {
 					return
 				}
@@ -177,22 +274,30 @@ func (server *Server) serveConnection(parent context.Context, connection net.Con
 		frame, err := codec.ReadFrame()
 		if err != nil {
 			if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
-				_ = writeProtocolError(codec, "", "read_failed", err)
+				_ = writeProtocolError(codec, "", "read_failed", err, server.hub.CurrentSequence())
 			}
 			return
 		}
 		if frame.Binary != nil {
 			if err := transferManager.WriteChunk(*frame.Binary, frame.Data); err != nil {
-				_ = writeProtocolError(codec, frame.Binary.TransferID, "binary_rejected", err)
+				_ = writeProtocolError(codec, frame.Binary.TransferID, "binary_rejected", err, server.hub.CurrentSequence())
 				return
 			}
 			continue
 		}
 		envelope := frame.Envelope
+		if envelope == nil {
+			return
+		}
+		if envelope.ClientID != authentication.ClientID || envelope.WorkspaceID != server.workspaceID {
+			_ = writeProtocolError(codec, envelope.ID, "actor_identity_mismatch", ErrAuthentication, server.hub.CurrentSequence())
+			return
+		}
 		switch envelope.Kind {
 		case FramePing:
 			pong := NewEnvelope(FramePong)
-			pong.ID = envelope.ID
+			pong.ID, pong.ClientID, pong.WorkspaceID = envelope.ID, authentication.ClientID, server.workspaceID
+			pong.Sequence = server.hub.CurrentSequence()
 			if err := codec.WriteEnvelope(pong); err != nil {
 				return
 			}
@@ -205,8 +310,9 @@ func (server *Server) serveConnection(parent context.Context, connection net.Con
 			}
 			response := NewEnvelope(FrameResponse)
 			response.ID = envelope.ID
+			response.Sequence = server.hub.CurrentSequence()
 			if stopErr != nil {
-				response.Error = &ProtocolError{Code: "daemon_stop_refused", Message: stopErr.Error()}
+				response.Error = &ProtocolError{Code: "daemon_stop_refused", Message: stopErr.Error(), Cursor: response.Sequence}
 			} else {
 				response.Payload = mustJSON(map[string]bool{"stopping": true})
 			}
@@ -226,7 +332,7 @@ func (server *Server) serveConnection(parent context.Context, connection net.Con
 				select {
 				case dashboards <- *envelope:
 				default:
-					if err := writeProtocolError(codec, envelope.ID, "request_busy", errors.New("dashboard refresh already queued")); err != nil {
+					if err := writeProtocolError(codec, envelope.ID, "request_busy", errors.New("dashboard refresh already queued"), server.hub.CurrentSequence()); err != nil {
 						return
 					}
 				}
@@ -236,9 +342,10 @@ func (server *Server) serveConnection(parent context.Context, connection net.Con
 				params, replayErr := decodeParams[idParams](envelope.Payload)
 				response := NewEnvelope(FrameResponse)
 				response.ID, response.Method = envelope.ID, envelope.Method
+				response.Sequence = server.hub.CurrentSequence()
 				chunks := server.terminalReplayChunks(params.ID)
 				if replayErr != nil {
-					response.Error = &ProtocolError{Code: "request_failed", Message: replayErr.Error()}
+					response.Error = &ProtocolError{Code: "request_failed", Message: replayErr.Error(), Cursor: response.Sequence}
 				} else {
 					response.Payload = mustJSON(map[string]int{"chunks": len(chunks)})
 				}
@@ -251,11 +358,17 @@ func (server *Server) serveConnection(parent context.Context, connection net.Con
 				}
 				continue
 			}
-			if err := codec.WriteEnvelope(server.dispatchResponse(*envelope, transferManager)); err != nil {
+			response := server.dispatchResponse(ctx, *envelope, transferManager)
+			if err := codec.WriteEnvelope(response); err != nil {
 				return
 			}
+			if envelope.Method == MethodReconnectSnapshot && response.Error == nil && reconnectSnapshotWantsRefresh(envelope.Payload) {
+				if refresher, ok := server.dispatcher.(interface{ RefreshProjection() }); ok {
+					refresher.RefreshProjection()
+				}
+			}
 		default:
-			if err := writeProtocolError(codec, envelope.ID, "unexpected_frame", fmt.Errorf("unexpected client frame %q", envelope.Kind)); err != nil {
+			if err := writeProtocolError(codec, envelope.ID, "unexpected_frame", fmt.Errorf("unexpected client frame %q", envelope.Kind), server.hub.CurrentSequence()); err != nil {
 				return
 			}
 		}
@@ -269,16 +382,175 @@ func (server *Server) serveConnection(parent context.Context, connection net.Con
 	}
 }
 
-func (server *Server) dispatchResponse(request Envelope, transfers *TransferManager) Envelope {
+func (server *Server) dispatchResponse(ctx context.Context, request Envelope, transfers *TransferManager) Envelope {
+	if !isSequencedMethod(request.Method) {
+		return server.dispatchResponseNow(request, transfers)
+	}
+	job := sequencedCommand{request: request, transfers: transfers, response: make(chan Envelope, 1)}
+	select {
+	case server.commands <- job:
+	case <-ctx.Done():
+		return responseForError(request, "request_cancelled", ctx.Err(), server.hub.CurrentSequence())
+	case <-server.done:
+		return responseForError(request, "daemon_stopped", net.ErrClosed, server.hub.CurrentSequence())
+	}
+	select {
+	case response := <-job.response:
+		return response
+	case <-ctx.Done():
+		return responseForError(request, "request_cancelled", ctx.Err(), server.hub.CurrentSequence())
+	case <-server.done:
+		return responseForError(request, "daemon_stopped", net.ErrClosed, server.hub.CurrentSequence())
+	}
+}
+
+func (server *Server) runCommandSequencer() {
+	for {
+		select {
+		case job := <-server.commands:
+			server.commandMu.Lock()
+			server.mu.Lock()
+			stopping := server.stopping
+			server.mu.Unlock()
+			if stopping {
+				job.response <- responseForError(job.request, "daemon_stopped", net.ErrClosed, server.hub.CurrentSequence())
+			} else {
+				job.response <- server.dispatchResponseNow(job.request, job.transfers)
+			}
+			server.commandMu.Unlock()
+		case <-server.done:
+			return
+		}
+	}
+}
+
+func (server *Server) dispatchResponseNow(request Envelope, transfers *TransferManager) Envelope {
+	receiptKey, digest, receiptBound := commandReceiptIdentity(request)
+	if receiptBound {
+		server.pruneCommandReceipts(time.Now().UTC())
+		if cached, exists := server.receipts[receiptKey]; exists {
+			if cached.digest != digest {
+				return responseForError(request, "request_duplicate", errors.New("mutationId was already used for a different request"), server.hub.CurrentSequence())
+			}
+			response := cloneResponseEnvelope(cached.response)
+			response.ID = request.ID
+			response.Sequence = server.hub.CurrentSequence()
+			if response.Error != nil {
+				response.Error.Cursor = response.Sequence
+			}
+			return response
+		}
+	}
+	snapshotBoundary := server.hub.CurrentSequence()
 	result, err := server.dispatchRequest(request, transfers)
+	if err == nil && (request.Method == MethodReconnectSnapshot || request.Method == MethodResumeSession || request.Method == MethodSelectSession || request.Method == MethodCreateSession) {
+		result = bindReconnectSnapshotBoundary(result, server.daemonEpoch, snapshotBoundary)
+	}
 	response := NewEnvelope(FrameResponse)
 	response.ID, response.Method = request.ID, request.Method
+	response.Sequence = server.hub.CurrentSequence()
 	if err != nil {
-		response.Error = &ProtocolError{Code: "request_failed", Message: err.Error()}
+		response.Error = protocolError(err, response.Sequence)
 	} else {
 		response.Payload = mustJSON(result)
 	}
+	if receiptBound && response.Error == nil {
+		server.receipts[receiptKey] = commandReceipt{digest: digest, response: cloneResponseEnvelope(response), storedAt: time.Now().UTC()}
+		server.receiptOrder = append(server.receiptOrder, receiptKey)
+		server.pruneCommandReceipts(time.Now().UTC())
+	}
 	return response
+}
+
+func commandReceiptIdentity(request Envelope) (string, [sha256.Size]byte, bool) {
+	switch request.Method {
+	case MethodStartTurn, MethodGuide, MethodFollowUp, MethodMutatePromptQueue:
+	default:
+		return "", [sha256.Size]byte{}, false
+	}
+	var identity struct {
+		MutationID string `json:"mutationId"`
+	}
+	if json.Unmarshal(request.Payload, &identity) != nil || strings.TrimSpace(identity.MutationID) == "" {
+		return "", [sha256.Size]byte{}, false
+	}
+	hash := sha256.New()
+	_, _ = hash.Write([]byte(request.Method))
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write(request.Payload)
+	var digest [sha256.Size]byte
+	copy(digest[:], hash.Sum(nil))
+	return request.ClientID + "\x00" + strings.TrimSpace(identity.MutationID), digest, true
+}
+
+func (server *Server) pruneCommandReceipts(now time.Time) {
+	cutoff := now.Add(-commandReceiptTTL)
+	for len(server.receiptOrder) > 0 {
+		key := server.receiptOrder[0]
+		receipt, exists := server.receipts[key]
+		if exists && len(server.receipts) <= maxCommandReceipts && !receipt.storedAt.Before(cutoff) {
+			break
+		}
+		delete(server.receipts, key)
+		server.receiptOrder[0] = ""
+		server.receiptOrder = server.receiptOrder[1:]
+	}
+}
+
+func cloneResponseEnvelope(response Envelope) Envelope {
+	response.Payload = append(json.RawMessage(nil), response.Payload...)
+	if response.Error != nil {
+		copy := *response.Error
+		response.Error = &copy
+	}
+	return response
+}
+
+func protocolError(err error, cursor uint64) *ProtocolError {
+	code := "request_failed"
+	retryable := false
+	switch {
+	case errors.Is(err, azemapp.ErrRunActive):
+		code, retryable = "run_active", true
+	case errors.Is(err, azemapp.ErrStaleRun):
+		code, retryable = "stale_run", true
+	case errors.Is(err, azemapp.ErrGuidanceClosed):
+		code = "guidance_closed"
+	case errors.Is(err, session.ErrPromptQueueRevisionConflict):
+		code, retryable = "revision_conflict", true
+	case errors.Is(err, azemapp.ErrInvalidPromptQueueAction):
+		code = "invalid_action"
+	case errors.Is(err, session.ErrSessionNotFound):
+		code = "not_found"
+	}
+	return &ProtocolError{Code: code, Message: err.Error(), Retryable: retryable, Cursor: cursor}
+}
+
+func protocolErrorForCode(code string, err error, cursor uint64) *ProtocolError {
+	retryable := code == "request_busy" || code == "resync_required"
+	return &ProtocolError{Code: code, Message: err.Error(), Retryable: retryable, Cursor: cursor}
+}
+
+func responseForError(request Envelope, code string, err error, cursor uint64) Envelope {
+	response := NewEnvelope(FrameResponse)
+	response.ID, response.Method, response.Sequence = request.ID, request.Method, cursor
+	response.Error = protocolErrorForCode(code, err, cursor)
+	return response
+}
+
+func isSequencedMethod(method Method) bool {
+	switch method {
+	case MethodReconnectSnapshot, MethodStartTurn, MethodGuide, MethodFollowUp, MethodCancelActive,
+		MethodExecute, MethodImportAttachment, MethodImportClipboardImage, MethodResumeSession,
+		MethodSelectSession, MethodCreateSession, MethodNavigateSessionTree, MethodCreateSessionFork,
+		MethodSetSessionEntryLabel, MethodForkSession, MethodImportSession, MethodExpandSkillInvocation,
+		MethodCollaboration, MethodMutatePromptQueue, MethodCreateProject, MethodOpenProject, MethodOpenProjectSession,
+		MethodBeginAttachmentTransfer, MethodCommitAttachment, MethodAbortAttachment,
+		MethodCreateTerminal, MethodWriteTerminal, MethodResizeTerminal, MethodCloseTerminal:
+		return true
+	default:
+		return false
+	}
 }
 
 func (server *Server) authenticate(codec *Codec) (Authenticate, error) {
@@ -288,7 +560,7 @@ func (server *Server) authenticate(codec *Codec) (Authenticate, error) {
 	}
 	challenge := NewEnvelope(FrameHello)
 	challenge.WorkspaceID = server.workspaceID
-	challenge.Payload = mustJSON(Challenge{Nonce: nonce, WorkspaceID: server.workspaceID, Protocol: ProtocolVersion})
+	challenge.Payload = mustJSON(Challenge{Nonce: nonce, WorkspaceID: server.workspaceID, Protocol: ProtocolVersion, DaemonEpoch: server.daemonEpoch})
 	if err := codec.WriteEnvelope(challenge); err != nil {
 		return Authenticate{}, err
 	}
@@ -303,7 +575,9 @@ func (server *Server) authenticate(codec *Codec) (Authenticate, error) {
 	if err := json.Unmarshal(frame.Envelope.Payload, &authentication); err != nil {
 		return Authenticate{}, ErrAuthentication
 	}
-	if authentication.Protocol != ProtocolVersion || strings.TrimSpace(authentication.ClientID) == "" || !VerifyAuthenticationProof(server.token, nonce, authentication.ClientID, server.workspaceID, authentication.Protocol, authentication.Proof) {
+	if authentication.Protocol != ProtocolVersion || strings.TrimSpace(authentication.ClientID) == "" ||
+		frame.Envelope.ClientID != authentication.ClientID || frame.Envelope.WorkspaceID != server.workspaceID ||
+		!VerifyAuthenticationProof(server.token, nonce, authentication.ClientID, server.workspaceID, authentication.Protocol, authentication.Proof) {
 		return Authenticate{}, ErrAuthentication
 	}
 	return authentication, nil
@@ -455,13 +729,14 @@ func resyncEnvelope(reason string, sequence uint64) Envelope {
 	return envelope
 }
 
-func writeProtocolError(codec *Codec, id, code string, err error) error {
+func writeProtocolError(codec *Codec, id, code string, err error, cursor uint64) error {
 	envelope := NewEnvelope(FrameResponse)
 	envelope.ID = id
 	if envelope.ID == "" {
 		envelope.ID = "transport"
 	}
-	envelope.Error = &ProtocolError{Code: code, Message: err.Error()}
+	envelope.Sequence = cursor
+	envelope.Error = protocolErrorForCode(code, err, cursor)
 	return codec.WriteEnvelope(envelope)
 }
 

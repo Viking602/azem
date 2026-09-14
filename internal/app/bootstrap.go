@@ -24,7 +24,6 @@ import (
 	"github.com/Viking602/azem/internal/recap"
 	"github.com/Viking602/azem/internal/recovery"
 	"github.com/Viking602/azem/internal/rules"
-	"github.com/Viking602/azem/internal/securityscan"
 	"github.com/Viking602/azem/internal/session"
 	"github.com/Viking602/azem/internal/skills"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
@@ -253,18 +252,6 @@ func (b *bootstrapAssembly) buildCore(forceWorkspace, desktopMode bool) error {
 	if err != nil {
 		return err
 	}
-	if b.customTools != nil {
-		b.coding.SetFileMutationBroker(b.customTools)
-		drivers, driverErr := b.customTools.Drivers()
-		if driverErr != nil {
-			_ = b.customTools.Close(context.Background())
-			return driverErr
-		}
-		if err := b.coding.AttachExternalTools(drivers, b.customTools.Close); err != nil {
-			_ = b.customTools.Close(context.Background())
-			return err
-		}
-	}
 	b.subagentRuns, err = agentservice.NewSQLSubagentRunStore(b.store.DB(), b.store.Blobs())
 	if err != nil {
 		return err
@@ -292,8 +279,7 @@ func (b *bootstrapAssembly) wireService() error {
 		}
 	}
 	b.service.AttachPlugins(pluginCatalogEntries(b.pluginCatalog), pluginDiagnostics(b.pluginCatalog))
-	b.service.AttachCommands(b.commandCatalog, append(append(append([]string(nil), b.commandDiagnostics...), b.customDiagnostics...), b.extensionDiagnostics...))
-	b.service.AttachExtensionHost(b.customTools)
+	b.service.AttachCommands(b.commandCatalog, append(append([]string(nil), b.commandDiagnostics...), b.extensionDiagnostics...))
 	b.service.AttachThemes(b.extensionThemes, b.extensionDiagnostics)
 	b.service.AttachPluginRuntime(plugins.Options{
 		HomeDir: b.homeDir, DataDir: b.paths.DataDir, WorkspaceDir: b.paths.Workspace,
@@ -376,28 +362,9 @@ func (b *bootstrapAssembly) wireService() error {
 	if err := b.attachBackground(); err != nil {
 		return err
 	}
-	securityStore, err := securityscan.NewSQLStore(b.store.DB())
-	if err != nil {
+	if err := b.attachSecurity(); err != nil {
 		return err
 	}
-	finalizer, err := securityscan.NewFinalizer()
-	if err != nil {
-		return err
-	}
-	b.securityStore = securityStore
-	b.securityRunner = &securityExecutor{runtime: b.providerRuntime, coding: b.coding}
-	b.securityService, err = securityscan.NewService(securityscan.ServiceOptions{
-		Store: securityStore, Executor: b.securityRunner, BaseContext: b.service.ctx,
-		Snapshotter: securityscan.Snapshotter{DataRoot: b.paths.DataDir}, Finalizer: finalizer,
-		Emit: func(projection securityscan.Projection) {
-			b.service.emit(b.service.ctx, Event{Kind: EventKind("security_scan_state"), State: string(projection.Scan.Status), Security: &projection})
-		},
-	})
-	if err != nil {
-		return err
-	}
-	b.securityRunner.service = b.securityService
-	b.service.AttachSecurity(b.securityService)
 	return b.attachRecovery(teamResumer, runResumer)
 }
 

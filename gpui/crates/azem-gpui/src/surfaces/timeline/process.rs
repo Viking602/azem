@@ -32,9 +32,18 @@ pub(in crate::surfaces) fn tool_group_entry(
         .iter()
         .find_map(|block| (!block.run_id.is_empty()).then_some(block.run_id.as_ref()))
         .unwrap_or(key.as_str());
-    if group.iter().any(|block| {
-        is_process_tool_block(block) && tool_activity_kind(block) == ToolActivityKind::Subagent
-    }) {
+    let has_agents = agents
+        .iter()
+        .any(|agent| agent_matches_group(agent, group, process_run_id));
+    if has_agents
+        && group
+            .iter()
+            .filter(|block| is_process_tool_block(block))
+            .all(|block| {
+                tool_activity_kind(block) == ToolActivityKind::Subagent
+                    && block.state.as_ref() != "failed"
+            })
+    {
         let subagents = subagent_run_card(
             index,
             group,
@@ -68,8 +77,12 @@ pub(in crate::surfaces) fn tool_group_entry(
     } else {
         (None, 0)
     };
-    let expanded = expansion.borrow().is_expanded(&key);
-    let step_count = step_indexes.len();
+    let expanded = expansion.borrow_mut().group_is_expanded(&key, running);
+    let overflow_key = format!("{key}:overflow");
+    let show_all = expansion.borrow().is_expanded(&overflow_key);
+    let visible_indexes = visible_process_steps(blocks, &step_indexes, running && !show_all);
+    let hidden_count = step_indexes.len() - visible_indexes.len();
+    let step_count = visible_indexes.len();
     let body = div()
         .relative()
         .w_full()
@@ -87,7 +100,7 @@ pub(in crate::surfaces) fn tool_group_entry(
             )
         })
         .children(
-            step_indexes
+            visible_indexes
                 .iter()
                 .enumerate()
                 .map(|(row_index, step_index)| {
@@ -101,7 +114,36 @@ pub(in crate::surfaces) fn tool_group_entry(
                         owner.clone(),
                     )
                 }),
-        );
+        )
+        .when(hidden_count > 0, |body| {
+            body.child(
+                div()
+                    .id(("process-overflow", index))
+                    .role(Role::Button)
+                    .aria_label(
+                        locale.format("process.moreTools", &[("count", hidden_count.to_string())]),
+                    )
+                    .tab_stop(true)
+                    .cursor_pointer()
+                    .py_1()
+                    .text_size(px(12.))
+                    .text_color(palette.faint)
+                    .child(
+                        locale.format("process.moreTools", &[("count", hidden_count.to_string())]),
+                    )
+                    .on_click({
+                        let expansion = expansion.clone();
+                        let owner = owner.clone();
+                        move |_, _, cx| {
+                            expansion.borrow_mut().toggle(&overflow_key);
+                            owner.update(cx, |this, cx| {
+                                this.refresh_transcript_layout(index);
+                                cx.notify();
+                            });
+                        }
+                    }),
+            )
+        });
     div()
         .id(("timeline-block", index))
         .role(Role::Article)
@@ -113,16 +155,42 @@ pub(in crate::surfaces) fn tool_group_entry(
         .flex()
         .flex_col()
         .items_center()
-        .child(turn_status_header(
-            index,
-            summary,
-            running,
-            (palette, reduced_motion, transition),
-            Some((key, expanded)),
-            expansion.clone(),
-            owner.clone(),
-        ))
-        .when(expanded, |entry| entry.child(body))
+        .child(
+            div()
+                .id(("tool-group-column", index))
+                .w_full()
+                .min_w_0()
+                .max_w(px(CHAT_COLUMN_MAX_WIDTH))
+                .child(turn_status_header(
+                    index,
+                    summary,
+                    running,
+                    (palette, reduced_motion, transition),
+                    Some((key.clone(), expanded)),
+                    expansion.clone(),
+                    owner.clone(),
+                ))
+                .child(disclosure_body(
+                    key.clone(),
+                    index,
+                    expanded,
+                    reduced_motion,
+                    body,
+                    expansion.clone(),
+                    owner.clone(),
+                ))
+                .when(has_agents, |column| {
+                    column.child(subagent_run_card(
+                        index,
+                        group,
+                        process_run_id,
+                        agents,
+                        (palette, locale),
+                        expansion,
+                        owner,
+                    ))
+                }),
+        )
         .into_any_element()
 }
 
@@ -158,9 +226,10 @@ pub(in crate::surfaces) fn pending_process_entry(
                 .aria_label(summary.clone())
                 .w_full()
                 .max_w(px(CHAT_COLUMN_MAX_WIDTH))
-                .h(px(36.))
+                .min_h(px(36.))
                 .flex()
-                .items_center()
+                .flex_col()
+                .gap_2()
                 .child(animated_activity_label(
                     index,
                     summary,
@@ -178,26 +247,13 @@ pub(in crate::surfaces) fn thinking_process_entry(
     locale: Locale,
     reduced_motion: bool,
     horizontal_gutter: f32,
-    live_elapsed_ms: i64,
+    _live_elapsed_ms: i64,
 ) -> gpui::AnyElement {
     let active = is_active_process_block(block);
-    let elapsed_ms = process_number(block, "elapsedMs").unwrap_or(live_elapsed_ms);
     let label = if active {
-        processing_status(elapsed_ms, locale)
+        locale.text("ui.thinking").to_string()
     } else {
         locale.text("ui.thought").to_string()
-    };
-    let activity = if active {
-        animated_activity_label(index, label.clone(), palette, reduced_motion)
-    } else {
-        div()
-            .min_w_0()
-            .truncate()
-            .text_size(px(12.))
-            .font_weight(gpui::FontWeight::MEDIUM)
-            .text_color(palette.faint)
-            .child(label.clone())
-            .into_any_element()
     };
     div()
         .id(("timeline-block", index))
@@ -214,7 +270,26 @@ pub(in crate::surfaces) fn thinking_process_entry(
                 .max_w(px(CHAT_COLUMN_MAX_WIDTH))
                 .flex()
                 .flex_col()
-                .child(div().h(px(36.)).flex().items_center().child(activity)),
+                .when(active, |body| {
+                    body.child(div().h(px(36.)).flex().items_center().child(
+                        animated_activity_label(
+                            index,
+                            locale.text("ui.thinking").to_string(),
+                            palette,
+                            reduced_motion,
+                        ),
+                    ))
+                })
+                .when(!block.content.trim().is_empty(), |body| {
+                    body.child(process_detail_row(
+                        index,
+                        0,
+                        block,
+                        palette,
+                        locale,
+                        reduced_motion,
+                    ))
+                }),
         )
         .into_any_element()
 }
@@ -249,6 +324,26 @@ pub(in crate::surfaces) fn turn_process_range(
         end,
         process_end,
     })
+}
+
+pub(crate) fn completed_process_range(
+    blocks: &[Block],
+    index: usize,
+) -> Option<std::ops::Range<usize>> {
+    let turn = turn_process_range(blocks, index)?;
+    let final_block = blocks.get(turn.process_end)?;
+    // Fold only a genuinely accepted final answer, never a live candidate or error.
+    if final_block.kind.as_ref() != "assistant"
+        || final_block.text_phase.as_ref() != "final_answer"
+        || !matches!(final_block.state.as_ref(), "completed" | "complete")
+        || index >= turn.process_end
+        || !blocks[turn.start..turn.process_end]
+            .iter()
+            .any(|block| is_process_tool_block(block) || is_thinking_text(block))
+    {
+        return None;
+    }
+    Some(turn.start..turn.process_end)
 }
 
 pub(in crate::surfaces) fn tool_group_range(
@@ -298,30 +393,52 @@ pub(in crate::surfaces) fn tool_group_key(
         )
 }
 
+pub(in crate::surfaces) fn visible_process_steps(
+    blocks: &[Block],
+    indexes: &[usize],
+    capped: bool,
+) -> Vec<usize> {
+    let recent_start = indexes
+        .iter()
+        .rev()
+        .filter(|index| is_process_tool_block(&blocks[**index]))
+        .nth(3)
+        .copied()
+        .unwrap_or(0);
+    indexes
+        .iter()
+        .copied()
+        .filter(|index| {
+            !capped
+                || *index >= recent_start
+                || is_thinking_text(&blocks[*index])
+                || is_active_process_block(&blocks[*index])
+                || blocks[*index].state.as_ref() == "failed"
+        })
+        .collect()
+}
+
 pub(in crate::surfaces) fn process_step_indexes(
     blocks: &[Block],
     range: std::ops::Range<usize>,
 ) -> Vec<usize> {
-    let mut indexes = Vec::with_capacity(range.len());
-    indexes.extend(
-        range
-            .clone()
-            .filter(|index| is_thinking_text(&blocks[*index])),
-    );
-
     let mut seen_tool_calls = HashSet::new();
-    indexes.extend(range.filter(|index| {
-        let block = &blocks[*index];
-        if !is_process_tool_block(block) {
-            return false;
-        }
-        let tool_call_id = block.tool_call_id.as_ref();
-        tool_call_id.is_empty() || seen_tool_calls.insert(tool_call_id)
-    }));
-    indexes
+    range
+        .filter(|index| {
+            let block = &blocks[*index];
+            if is_thinking_text(block) {
+                return true;
+            }
+            if !is_process_tool_block(block) {
+                return false;
+            }
+            let tool_call_id = block.tool_call_id.as_ref();
+            tool_call_id.is_empty() || seen_tool_calls.insert(tool_call_id)
+        })
+        .collect()
 }
 
-fn turn_status_header(
+pub(in crate::surfaces) fn turn_status_header(
     index: usize,
     summary: String,
     running: bool,
@@ -330,18 +447,18 @@ fn turn_status_header(
     expansion: Rc<RefCell<ProcessExpansion>>,
     owner: Entity<AzemWindow>,
 ) -> gpui::AnyElement {
+    let chevron = toggle.as_ref().map(|(key, open)| {
+        expansion
+            .borrow_mut()
+            .disclosure(key, index, *open, style.1)
+            .0
+    });
     let header = div()
         .id(("turn-status", index))
         .aria_label(summary.clone())
         .w_full()
         .max_w(px(CHAT_COLUMN_MAX_WIDTH))
-        .child(turn_status_row(
-            index,
-            summary,
-            running,
-            toggle.as_ref().map(|(_, expanded)| *expanded),
-            style,
-        ));
+        .child(turn_status_row(index, summary, running, chevron, style));
     let Some((toggle_key, expanded)) = toggle else {
         return header.role(Role::Status).into_any_element();
     };
@@ -364,7 +481,7 @@ fn turn_status_row(
     index: usize,
     summary: String,
     running: bool,
-    expanded: Option<bool>,
+    expanded: Option<f32>,
     style: (ThemePalette, bool, (Option<String>, usize)),
 ) -> gpui::AnyElement {
     let (palette, reduced_motion, transition) = style;
@@ -387,16 +504,11 @@ fn turn_status_row(
         .items_center()
         .gap_1()
         .child(div().min_w_0().flex().items_center().child(label))
-        .children(expanded.map(|expanded| {
-            div().flex_shrink_0().child(icon(
-                if expanded {
-                    "chevron-down"
-                } else {
-                    "chevron-right"
-                },
-                13.,
-                palette.faint,
-            ))
+        .children(expanded.map(|progress| {
+            div().flex_shrink_0().child(
+                icon("chevron-right", 13., palette.faint)
+                    .with_transformation(Transformation::rotate(percentage(progress * 0.25))),
+            )
         }))
         .into_any_element()
 }
@@ -549,6 +661,22 @@ pub(in crate::surfaces) fn run_process_summary(
         return latest_process_activity(group, locale)
             .unwrap_or_else(|| processing_status(live_elapsed_ms, locale));
     }
+    if group
+        .iter()
+        .chain(terminal)
+        .any(|block| block.state.as_ref() == "cancelled")
+    {
+        return run_duration_summary(group, terminal, locale);
+    }
+    completed_tool_group_summary(group, locale)
+        .unwrap_or_else(|| run_duration_summary(group, terminal, locale))
+}
+
+pub(in crate::surfaces) fn run_duration_summary(
+    group: &[Block],
+    terminal: Option<&Block>,
+    locale: Locale,
+) -> String {
     let cancelled = group.iter().chain(terminal).any(|block| {
         block.kind.as_ref() == "status"
             && block.title.as_ref() == "run_cancelled"
@@ -601,9 +729,6 @@ pub(in crate::surfaces) fn run_process_summary(
                 ("seconds", remainder.to_string()),
             ],
         );
-    }
-    if let Some(summary) = completed_tool_group_summary(group, locale) {
-        return summary;
     }
     if seconds == 0 {
         return locale.text("ui.worked").to_string();
@@ -668,7 +793,7 @@ fn process_activity_counts(group: &[Block]) -> ProcessActivityCounts {
         }
         match tool_activity_kind(block) {
             ToolActivityKind::Read => counts.read += 1,
-            ToolActivityKind::Edit => counts.edit += 1,
+            ToolActivityKind::Edit => counts.edit += structured_diff_files(block).len().max(1),
             ToolActivityKind::Command | ToolActivityKind::Test => counts.command += 1,
             ToolActivityKind::Search => counts.search += 1,
             ToolActivityKind::WebSearch => counts.web_search += 1,
@@ -794,11 +919,7 @@ pub(in crate::surfaces) fn agent_matches_group(
     }
     let mut group_has_tool_call_ids = false;
     let matches_parent_call = group.iter().any(|block| {
-        let call_id = block
-            .extra
-            .get("toolCallId")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
+        let call_id = block.tool_call_id.as_ref();
         group_has_tool_call_ids |= !call_id.is_empty();
         !call_id.is_empty() && call_id == snapshot_parent_call
     });
@@ -806,6 +927,41 @@ pub(in crate::surfaces) fn agent_matches_group(
         matches_parent_call
     } else {
         agent_belongs_to_run(agent, process_key)
+    }
+}
+
+pub(in crate::surfaces) fn subagent_dispatch_label(
+    agent: &serde_json::Value,
+    group: &[Block],
+    locale: Locale,
+) -> String {
+    let parent_call = agent["parentToolCallId"].as_str().unwrap_or_default();
+    let call = group
+        .iter()
+        .find(|block| !parent_call.is_empty() && block.tool_call_id.as_ref() == parent_call);
+    let role = match call.map(tool_name) {
+        Some(name) if name.starts_with("vibe_") => {
+            let arguments = call.and_then(|call| block_data_value(call, "arguments"));
+            let decoded = arguments
+                .and_then(serde_json::Value::as_str)
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+            match decoded
+                .as_ref()
+                .or(arguments)
+                .and_then(|args| args["cli"].as_str())
+            {
+                Some(cli @ ("fast" | "good")) => format!("Vibe {cli}"),
+                _ => "Vibe".to_string(),
+            }
+        }
+        _ => agent["type"]
+            .as_str()
+            .unwrap_or(locale.text("ui.subagent"))
+            .to_string(),
+    };
+    match agent["model"].as_str().filter(|model| !model.is_empty()) {
+        Some(model) => format!("{role} · {}", crate::humanize_model_id(model)),
+        None => role,
     }
 }
 
@@ -883,23 +1039,22 @@ pub(in crate::surfaces) fn subagent_run_card(
                     .into_iter()
                     .find(|value| !value.is_empty())
                     .unwrap_or_default();
-                let role = [field("type"), id]
-                    .into_iter()
-                    .find(|value| !value.is_empty())
-                    .unwrap_or(locale.text("ui.subagent"));
+                let role = subagent_dispatch_label(agent, group, locale);
                 let block = group.iter().find(|block| block_agent_id(block) == id);
                 let state = resolved_agent_state(block, field("state"));
                 let detail = if state == "failed" {
                     [field("error"), field("summary"), field("description")]
+                } else if is_terminal_agent_state(&state) {
+                    [field("summary"), field("description"), field("activity")]
                 } else {
-                    [field("description"), field("summary"), field("activity")]
+                    [field("activity"), field("summary"), field("description")]
                 }
                 .into_iter()
                 .find(|value| !value.is_empty())
                 .unwrap_or_default();
                 SubagentCardItem {
                     id: id.to_string(),
-                    role: truncate_label(role, 28),
+                    role,
                     detail: truncate_label(detail, 72),
                     state,
                     elapsed_ms: agent
@@ -926,7 +1081,9 @@ pub(in crate::surfaces) fn subagent_run_card(
         .count();
     let cancelled = total.saturating_sub(active + failed + completed);
     let tag_key = format!("subagents:{process_key}:{group_index}");
-    let expanded = expansion.borrow().is_expanded(&tag_key);
+    let expanded = expansion
+        .borrow_mut()
+        .group_is_expanded(&tag_key, active > 0);
     let counted = |count: usize, label: &str| {
         if locale.id().starts_with("zh") {
             format!("{label} {count}")
@@ -1005,6 +1162,8 @@ pub(in crate::surfaces) fn subagent_run_card(
                 .child(
                     div()
                         .flex_shrink_0()
+                        .max_w(px(280.))
+                        .truncate()
                         .px_1()
                         .py(px(2.))
                         .rounded(px(5.))
@@ -1199,7 +1358,11 @@ pub(in crate::surfaces) fn process_step_row(
         format!("row-{row_id}")
     };
     let detail_key = format!("tool-detail:{group_index}:{detail_identity}");
-    let expanded = can_expand && expansion.borrow().is_expanded(&detail_key);
+    let expanded = if detail.as_ref().is_some_and(|detail| detail.is_diff) {
+        expansion.borrow_mut().group_is_expanded(&detail_key, true)
+    } else {
+        can_expand && expansion.borrow().is_expanded(&detail_key)
+    };
     let (row_icon, action, target) = process_step_presentation(block, locale);
     let label = if target.is_empty() {
         action.clone()
@@ -1222,9 +1385,13 @@ pub(in crate::surfaces) fn process_step_row(
     } else {
         palette.muted
     };
-    let click_expansion = expansion;
-    let click_owner = owner;
-    let click_key = detail_key;
+    let chevron = expansion
+        .borrow_mut()
+        .disclosure(&detail_key, group_index, expanded, reduced_motion)
+        .0;
+    let click_expansion = expansion.clone();
+    let click_owner = owner.clone();
+    let click_key = detail_key.clone();
     let row = div()
         .id(("process-step", row_id))
         .aria_label(aria_label)
@@ -1292,15 +1459,10 @@ pub(in crate::surfaces) fn process_step_row(
             palette,
         ))
         .when(can_expand, |row| {
-            row.child(icon(
-                if expanded {
-                    "chevron-down"
-                } else {
-                    "chevron-right"
-                },
-                12.,
-                palette.faint,
-            ))
+            row.child(
+                icon("chevron-right", 12., palette.faint)
+                    .with_transformation(Transformation::rotate(percentage(chevron * 0.25))),
+            )
         });
     let row = if reduced_motion {
         row.into_any_element()
@@ -1322,15 +1484,59 @@ pub(in crate::surfaces) fn process_step_row(
         .flex()
         .flex_col()
         .child(row)
-        .when_some(expanded.then_some(detail).flatten(), |entry, detail| {
-            let content = if detail.is_diff {
-                fenced_tool_detail(&detail.content, "diff")
-            } else if detail.is_code {
-                fenced_tool_detail(&detail.content, "text")
+        .when_some(detail, |entry, detail| {
+            let view = if detail.is_diff {
+                let mut files = structured_diff_files(block);
+                if files.is_empty()
+                    && let Some(paired) = group.iter().find(|candidate| {
+                        candidate.kind.as_ref() == "diff"
+                            && !block.tool_call_id.is_empty()
+                            && candidate.tool_call_id == block.tool_call_id
+                    })
+                {
+                    files = structured_diff_files(paired);
+                }
+                if files.is_empty() {
+                    files.push(super::diff::DiffFile {
+                        path: String::new(),
+                        diff: detail.content,
+                        first_line: None,
+                        kind: super::diff::SourceKind::Diff,
+                    });
+                }
+                super::diff::file_cards(
+                    files,
+                    &detail_key,
+                    group_index,
+                    (palette, locale, reduced_motion),
+                    expansion.clone(),
+                    owner.clone(),
+                )
+            } else if is_read_tool(tool_name(block)) {
+                super::diff::file_cards(
+                    vec![super::diff::source_from_read(
+                        read_source_path(block),
+                        &detail.content,
+                    )],
+                    &detail_key,
+                    group_index,
+                    (palette, locale, reduced_motion),
+                    expansion.clone(),
+                    owner.clone(),
+                )
             } else {
-                detail.content
+                let content = if detail.is_code {
+                    fenced_tool_detail(&detail.content, "text")
+                } else {
+                    detail.content
+                };
+                markdown_view(row_id + 500_000, &content, false, reduced_motion, palette)
             };
-            entry.child(
+            entry.child(disclosure_body(
+                detail_key,
+                group_index,
+                expanded,
+                reduced_motion,
                 div()
                     .id(("process-tool-detail", row_id))
                     .pl(px(22.))
@@ -1341,14 +1547,10 @@ pub(in crate::surfaces) fn process_step_row(
                     } else {
                         palette.ink_soft
                     })
-                    .child(markdown_view(
-                        row_id + 500_000,
-                        &content,
-                        false,
-                        reduced_motion,
-                        palette,
-                    )),
-            )
+                    .child(view),
+                expansion,
+                owner,
+            ))
         })
         .into_any_element()
 }
@@ -1391,10 +1593,50 @@ pub(in crate::surfaces) struct ToolStepDetail {
     pub(in crate::surfaces) is_code: bool,
 }
 
+fn fusion_handoff_detail(block: &Block) -> Option<ToolStepDetail> {
+    let arguments = block_data_value(block, "arguments").and_then(|value| match value {
+        serde_json::Value::String(raw) => serde_json::from_str::<serde_json::Value>(raw).ok(),
+        value => Some(value.clone()),
+    });
+    let result = structured_tool_value(block).or_else(|| serde_json::from_str(&block.content).ok());
+    let mut parts = Vec::new();
+    if let Some(prompt) = arguments
+        .as_ref()
+        .and_then(|value| value["prompt"].as_str())
+    {
+        parts.push(prompt.to_string());
+    }
+    if let Some(error) = result
+        .as_ref()
+        .and_then(|value| value["error"].as_str())
+        .or_else(|| {
+            matches!(
+                block.state.as_ref(),
+                "failed" | "interrupted" | "reconcile_required"
+            )
+            .then_some(block.content.as_str())
+        })
+        .filter(|error| !error.is_empty())
+    {
+        parts.push(error.to_string());
+    }
+    if parts.is_empty() && !block.content.trim().is_empty() {
+        parts.push(block.content.trim().to_string());
+    }
+    (!parts.is_empty()).then(|| ToolStepDetail {
+        content: parts.join("\n\n"),
+        is_diff: false,
+        is_code: false,
+    })
+}
+
 pub(in crate::surfaces) fn tool_step_detail(
     block: &Block,
     group: &[Block],
 ) -> Option<ToolStepDetail> {
+    if tool_name(block) == "sidekick" {
+        return fusion_handoff_detail(block);
+    }
     if block.state.as_ref() == "failed" {
         for key in ["error", "reason", "message", "output"] {
             if let Some(content) = tool_detail_field(block, key) {
@@ -1447,6 +1689,35 @@ pub(in crate::surfaces) fn tool_step_detail(
         }
     }
 
+    if block.state.as_ref() != "failed" && tool_activity_kind(block) == ToolActivityKind::Plan {
+        let value =
+            structured_tool_value(block).or_else(|| serde_json::from_str(&block.content).ok());
+        if let Some(value) = value.filter(|value| value.get("phases").is_some()) {
+            let mut lines = vec![value["goal"].as_str().unwrap_or_default().to_string()];
+            for phase in value["phases"].as_array().into_iter().flatten() {
+                if let Some(title) = phase["title"].as_str() {
+                    lines.push(format!("\n{title}"));
+                }
+                for item in phase["items"].as_array().into_iter().flatten() {
+                    let mark = match item["status"].as_str().unwrap_or_default() {
+                        "completed" => "✓",
+                        "in_progress" => "◉",
+                        "cancelled" => "−",
+                        _ => "○",
+                    };
+                    lines.push(format!(
+                        "- {mark} {}",
+                        item["content"].as_str().unwrap_or_default()
+                    ));
+                }
+            }
+            return Some(ToolStepDetail {
+                content: lines.join("\n"),
+                is_diff: false,
+                is_code: false,
+            });
+        }
+    }
     let content = block.content.trim();
     (!content.is_empty() && !is_bare_tool_status(block, content)).then(|| ToolStepDetail {
         content: content.to_string(),
@@ -1502,52 +1773,78 @@ fn structured_tool_value(block: &Block) -> Option<serde_json::Value> {
     }
 }
 
+fn structured_diff_files(block: &Block) -> Vec<super::diff::DiffFile> {
+    let value = block_data_value(block, "fileChange")
+        .and_then(|value| match value {
+            serde_json::Value::String(value) => serde_json::from_str(value).ok(),
+            value => Some(value.clone()),
+        })
+        .filter(|value| {
+            value["files"].as_array().is_some_and(|files| {
+                files
+                    .iter()
+                    .any(|file| file["diff"].as_str().is_some_and(|diff| !diff.is_empty()))
+            })
+        })
+        .or_else(|| structured_tool_value(block));
+    let Some(value) = value else {
+        return Vec::new();
+    };
+    let items = value
+        .get("files")
+        .or_else(|| value.get("sections"))
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_else(|| vec![value.clone()]);
+    items
+        .iter()
+        .filter_map(|item| {
+            let diff = item["diff"]
+                .as_str()
+                .filter(|diff| !diff.trim().is_empty())?;
+            Some(super::diff::DiffFile {
+                path: item["path"].as_str().unwrap_or_default().to_string(),
+                diff: diff.to_string(),
+                first_line: item["firstChangedLine"]
+                    .as_u64()
+                    .filter(|line| *line > 0)
+                    .and_then(|line| usize::try_from(line).ok()),
+                kind: super::diff::SourceKind::Diff,
+            })
+        })
+        .collect()
+}
+
 fn structured_tool_diff(block: &Block) -> Option<String> {
-    let value = structured_tool_value(block)?;
-    let mut sections = Vec::new();
-    if let Some(items) = value.get("sections").and_then(serde_json::Value::as_array) {
-        for item in items {
-            let diff = item
-                .get("diff")
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|diff| !diff.is_empty());
-            let Some(diff) = diff else {
-                continue;
-            };
-            let path = item
-                .get("path")
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .unwrap_or_default();
-            sections.push(if path.is_empty() {
-                diff.to_string()
+    let sections = structured_diff_files(block)
+        .into_iter()
+        .map(|file| {
+            if file.path.is_empty() {
+                file.diff
             } else {
-                format!("--- {path}\n+++ {path}\n{diff}")
-            });
-        }
-    }
-    if sections.is_empty()
-        && let Some(diff) = value
-            .get("diff")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|diff| !diff.is_empty())
-    {
-        sections.push(diff.to_string());
-    }
+                format!("--- {}\n+++ {}\n{}", file.path, file.path, file.diff)
+            }
+        })
+        .collect::<Vec<_>>();
     (!sections.is_empty()).then(|| sections.join("\n\n"))
 }
 
 fn process_step_presentation(block: &Block, locale: Locale) -> (&'static str, String, String) {
     let kind = tool_activity_kind(block);
     let mut target = truncate_label(&tool_preview(block), 52);
+    if kind == ToolActivityKind::Edit {
+        let count = structured_diff_files(block).len();
+        if count > 1 {
+            target = locale.format("diff.files", &[("count", count.to_string())]);
+        }
+    }
     if kind == ToolActivityKind::Edit
         && let Some((additions, deletions)) = tool_file_change_counts(block)
     {
         target.push_str(&format!("  +{additions} −{deletions}"));
     }
-    (kind.icon(), kind.action(locale).to_string(), target)
+    let (action, icon) = tool_action(tool_name(block), locale);
+    (icon, action.to_string(), target)
 }
 
 pub(in crate::surfaces) fn process_step_label(block: &Block, locale: Locale) -> String {
@@ -1594,24 +1891,40 @@ fn tool_file_change_counts(block: &Block) -> Option<(i64, i64)> {
         serde_json::Value::String(value) => serde_json::from_str(value).ok(),
         value => Some(value.clone()),
     });
-    let file = summary
+    let files = summary
         .as_ref()
         .and_then(|value| value.get("files"))
-        .and_then(serde_json::Value::as_array)
-        .and_then(|files| files.first());
-    let additions = file
-        .and_then(|value| value.get("additions"))
-        .or_else(|| summary.as_ref().and_then(|value| value.get("additions")))
-        .and_then(serde_json::Value::as_i64)
-        .or_else(|| process_number(block, "additions"))
-        .unwrap_or_default();
-    let deletions = file
-        .and_then(|value| value.get("deletions"))
-        .or_else(|| summary.as_ref().and_then(|value| value.get("deletions")))
-        .and_then(serde_json::Value::as_i64)
-        .or_else(|| process_number(block, "deletions"))
-        .unwrap_or_default();
+        .and_then(serde_json::Value::as_array);
+    let count = |key: &str| {
+        summary
+            .as_ref()
+            .and_then(|value| value.get(key))
+            .and_then(serde_json::Value::as_i64)
+            .or_else(|| files.map(|files| files.iter().filter_map(|file| file[key].as_i64()).sum()))
+            .or_else(|| process_number(block, key))
+            .unwrap_or_default()
+    };
+    let additions = count("additions");
+    let deletions = count("deletions");
     (additions > 0 || deletions > 0).then_some((additions, deletions))
+}
+
+pub(in crate::surfaces) fn fusion_source_label(block: &Block) -> Option<&str> {
+    (block_data_value(block, "fusionRole").and_then(serde_json::Value::as_str) == Some("sidekick"))
+        .then(|| block_data_value(block, "sourceLabel").and_then(serde_json::Value::as_str))
+        .flatten()
+}
+
+pub(in crate::surfaces) fn fusion_source_caption(
+    block: &Block,
+    palette: ThemePalette,
+) -> Option<gpui::Div> {
+    fusion_source_label(block).map(|label| {
+        div()
+            .text_size(px(11.))
+            .text_color(palette.faint)
+            .child(label.to_string())
+    })
 }
 
 pub(in crate::surfaces) fn process_detail_row(
@@ -1661,12 +1974,14 @@ pub(in crate::surfaces) fn process_detail_row(
         })
         .text_size(px(palette.chat_font_size))
         .line_height(px(palette.chat_font_size * 1.6))
-        .child(markdown_view(
+        .children(fusion_source_caption(block, palette))
+        .child(crate::markdown::markdown_view_styled(
             row_id,
             block.content.as_ref(),
             active,
             reduced_motion,
             palette,
+            is_thinking_text(block),
         ))
         .into_any_element()
 }
@@ -1788,7 +2103,13 @@ fn tool_activity_kind_from_name(name: &str) -> ToolActivityKind {
         || normalized.contains("screenshot")
     {
         ToolActivityKind::Browser
-    } else if normalized.contains("subagent") || normalized.ends_with("agent") {
+    } else if normalized.contains("subagent")
+        || normalized.ends_with("agent")
+        || matches!(
+            normalized.as_str(),
+            "vibe_spawn" | "vibe_send" | "vibe_wait" | "vibe_list" | "vibe_kill"
+        )
+    {
         ToolActivityKind::Subagent
     } else if normalized.contains("search")
         || normalized.contains("grep")
@@ -1804,12 +2125,38 @@ fn tool_activity_kind_from_name(name: &str) -> ToolActivityKind {
 }
 
 pub(in crate::surfaces) fn tool_action(name: &str, locale: Locale) -> (&'static str, &'static str) {
+    if name == "sidekick" {
+        return (locale.text("ui.fusionHandoff"), "arrow-right");
+    }
     let kind = tool_activity_kind_from_name(name);
     (kind.action(locale), kind.icon())
 }
 
 fn is_read_tool(name: &str) -> bool {
     tool_activity_kind_from_name(name) == ToolActivityKind::Read
+}
+
+fn read_source_path(block: &Block) -> String {
+    let path_from = |value: &serde_json::Value| {
+        value
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(str::to_string)
+    };
+    if let Some(path) = structured_tool_value(block).as_ref().and_then(path_from) {
+        return path;
+    }
+    match block_data_value(block, "arguments") {
+        Some(serde_json::Value::String(raw)) => serde_json::from_str(raw)
+            .ok()
+            .as_ref()
+            .and_then(path_from)
+            .unwrap_or_default(),
+        Some(value) => path_from(value).unwrap_or_default(),
+        None => String::new(),
+    }
 }
 
 fn is_shell_tool(name: &str) -> bool {
@@ -2083,6 +2430,18 @@ fn file_change_card(
                     })),
             )
         })
+        .when_some(
+            tool_step_detail(block, &[]).filter(|detail| detail.is_diff),
+            |card, detail| {
+                card.child(markdown_view(
+                    row_id + 600_000,
+                    &fenced_tool_detail(&detail.content, "diff"),
+                    false,
+                    true,
+                    palette,
+                ))
+            },
+        )
         .into_any_element()
 }
 

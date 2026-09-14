@@ -21,6 +21,7 @@ type Endpoint struct {
 	Protocol    int       `json:"protocol"`
 	WorkspaceID string    `json:"workspaceId"`
 	Workspace   string    `json:"workspace"`
+	DaemonEpoch string    `json:"daemonEpoch"`
 	Address     string    `json:"address"`
 	TokenFile   string    `json:"tokenFile"`
 	PID         int       `json:"pid"`
@@ -109,6 +110,33 @@ func WriteEndpointFile(path string, endpoint Endpoint) error {
 }
 
 func ReadEndpointFile(path string) (Endpoint, error) {
+	endpoint, err := readEndpointFile(path)
+	if err != nil {
+		return endpoint, err
+	}
+	if endpoint.Protocol != ProtocolVersion || endpoint.WorkspaceID == "" || endpoint.DaemonEpoch == "" || endpoint.Address == "" || endpoint.TokenFile == "" || endpoint.PID <= 0 {
+		return endpoint, errors.New("IPC endpoint metadata is incomplete")
+	}
+	return endpoint, nil
+}
+
+// ReadLegacyEndpointFile reads an older endpoint shape only so a new launcher
+// can ask an idle daemon to stop before upgrading. Runtime clients must use
+// ReadEndpointFile.
+func ReadLegacyEndpointFile(path string) (Endpoint, error) {
+	endpoint, err := readEndpointFile(path)
+	if err != nil {
+		return endpoint, err
+	}
+	legacyProtocol := endpoint.Protocol > 0 && endpoint.Protocol < ProtocolVersion
+	preEpochCurrent := endpoint.Protocol == ProtocolVersion && endpoint.DaemonEpoch == ""
+	if (!legacyProtocol && !preEpochCurrent) || endpoint.WorkspaceID == "" || endpoint.Address == "" || endpoint.TokenFile == "" || endpoint.PID <= 0 {
+		return endpoint, errors.New("legacy IPC endpoint metadata is incomplete")
+	}
+	return endpoint, nil
+}
+
+func readEndpointFile(path string) (Endpoint, error) {
 	var endpoint Endpoint
 	info, err := os.Stat(path)
 	if err != nil {
@@ -125,9 +153,6 @@ func ReadEndpointFile(path string) (Endpoint, error) {
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&endpoint); err != nil {
 		return endpoint, err
-	}
-	if endpoint.Protocol != ProtocolVersion || endpoint.WorkspaceID == "" || endpoint.Address == "" || endpoint.TokenFile == "" || endpoint.PID <= 0 {
-		return endpoint, errors.New("IPC endpoint metadata is incomplete")
 	}
 	return endpoint, nil
 }

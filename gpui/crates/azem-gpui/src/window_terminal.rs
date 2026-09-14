@@ -105,6 +105,22 @@ impl AzemWindow {
     }
 
     pub(super) fn request_surface(&mut self, surface: Surface) {
+        if surface == Surface::PullRequests {
+            if self
+                .pending_requests
+                .values()
+                .any(|pending| matches!(pending, PendingRequest::PullRequests))
+            {
+                return;
+            }
+            self.state.pull_requests.loading = true;
+            self.state.pull_requests.error = "".into();
+        }
+        if surface == Surface::Projects {
+            self.request_surface(Surface::Changes);
+            self.request_surface(Surface::PullRequests);
+            return;
+        }
         if surface == Surface::Security {
             self.runtime.request(
     				Method::Execute,
