@@ -5,6 +5,7 @@ mod localization;
 mod markdown;
 mod model_selection;
 mod runtime_connection;
+mod selectable_text;
 mod state;
 mod surfaces;
 mod terminal_emulator;
@@ -80,7 +81,7 @@ use gpui::{
 };
 use gpui_platform::application;
 use localization::{Labels, Locale, labels};
-use model_selection::{ModelModes, cursor_selection, model_choices, model_modes};
+use model_selection::{ModelModes, model_choices, model_modes, variant_selection};
 use runtime_connection::{
     RuntimeConnection, RuntimeMessage, RuntimeOptions, restore_desktop_workspace,
 };
@@ -225,13 +226,52 @@ fn side_panel_max_width(workspace_width: f32) -> Option<f32> {
     (available >= SIDE_PANEL_MIN_WIDTH).then_some(available)
 }
 
-fn side_panel_width_for_workspace(workspace_width: f32) -> Option<f32> {
+fn side_panel_width_for_workspace(workspace_width: f32, preferred: Option<f32>) -> Option<f32> {
+    let desired = preferred
+        .filter(|width| width.is_finite() && *width > 0.)
+        .unwrap_or(workspace_width / 2.);
     side_panel_max_width(workspace_width)
-        .map(|maximum| (workspace_width / 2.).clamp(SIDE_PANEL_MIN_WIDTH, maximum))
+        .map(|maximum| desired.clamp(SIDE_PANEL_MIN_WIDTH, maximum))
 }
 
 fn environment_panel_fits(workspace_width: f32, side_panel_width: f32) -> bool {
     workspace_width - side_panel_width - ENVIRONMENT_PANEL_RESERVED_WIDTH >= MAIN_TEXT_MIN_WIDTH
+}
+
+struct EnvironmentPanelLayout {
+    right_inset: f32,
+    tuck_progress: f32,
+    opacity: f32,
+    reserved_width: f32,
+}
+
+fn environment_panel_layout(
+    workspace_width: f32,
+    panel_width: f32,
+    visible_width: f32,
+    alongside_visibility: f32,
+    environment_visibility: f32,
+) -> Option<EnvironmentPanelLayout> {
+    if environment_visibility <= 0. || !environment_panel_fits(workspace_width, 0.) {
+        return None;
+    }
+    let visible_width = visible_width.clamp(0., panel_width);
+    let visibility = environment_visibility.clamp(0., 1.)
+        * if panel_width == 0. {
+            1.
+        } else {
+            1. - (visible_width / panel_width) * (1. - alongside_visibility.clamp(0., 1.))
+        };
+    let tuck_progress = 1. - visibility;
+    Some(EnvironmentPanelLayout {
+        right_inset: visible_width,
+        tuck_progress,
+        // Keep the card readable as it slips under the foreground panel; fade at the end.
+        opacity: 1. - tuck_progress.powi(3),
+        // Use the same progress in both directions, including a reversed close.
+        reserved_width: (visible_width + ENVIRONMENT_PANEL_RESERVED_WIDTH * visibility)
+            .min(workspace_width - MAIN_TEXT_MIN_WIDTH),
+    })
 }
 
 fn chat_column_gutter(content_width: f32) -> f32 {
@@ -256,6 +296,8 @@ const APPROVAL_MODES: [(&str, &str, &str); 3] = [
 ];
 
 enum PendingRequest {
+    OpenProject,
+    WorkflowMode(String),
     ApprovalDecision {
         approval_id: String,
     },
@@ -776,8 +818,11 @@ struct AzemWindow {
     surface_motion: SurfaceMotion,
     popup_motions: HashMap<&'static str, PopupMotion>,
     sidebar_open: bool,
+    sidebar_width: f32,
     sidebar_visible_width: f32,
     sidebar_animation: Option<(Instant, f32)>,
+    sidebar_resize_drag: Option<SidePanelResizeDrag>,
+    sidebar_resize_focus: FocusHandle,
     runtime: RuntimeConnection,
     runtime_options: Rc<RefCell<RuntimeOptions>>,
     runtime_generation: u64,
@@ -823,6 +868,7 @@ struct AzemWindow {
     side_panel_add_menu_open: bool,
     side_panel_closing: bool,
     side_panel_width: f32,
+    session_side_panel_widths: HashMap<String, f32>,
     side_panel_visible_width: f32,
     side_panel_animation_started: Option<Instant>,
     side_panel_animation_from: f32,
@@ -830,6 +876,12 @@ struct AzemWindow {
     terminal_open: bool,
     terminal_input: Entity<TextInput>,
     terminal_scroll: ScrollHandle,
+    workspace_changes_scroll: gpui::UniformListScrollHandle,
+    workspace_source: surfaces::WorkspaceSource,
+    workspace_overview_scroll: gpui::UniformListScrollHandle,
+    workspace_tree_scroll: ScrollHandle,
+    workspace_preview_scroll: ScrollHandle,
+    workspace_image: Option<std::sync::Arc<gpui::Image>>,
     terminal_emulators: HashMap<String, TerminalEmulator>,
     process_expansion: Rc<RefCell<ProcessExpansion>>,
     transcript_list: ListState,
@@ -840,7 +892,7 @@ struct AzemWindow {
     startup_started: Instant,
     snapshot_ready_logged: bool,
     provider_catalog_logged: bool,
-    show_all_sessions: bool,
+    sidebar_tree: SidebarTreeState,
     window_state_path: Option<PathBuf>,
     window_size: Size<Pixels>,
     window_placement: Option<WindowPlacement>,
@@ -937,13 +989,26 @@ fn transcript_layout_changed(
 
 impl Drop for AzemWindow {
     fn drop(&mut self) {
+        self.persist_window_state();
+        self.runtime.detach();
+    }
+}
+
+impl AzemWindow {
+    fn persist_window_state(&self) {
         let _ = self
             .window_state_path
             .as_deref()
-            .map(|path| save_window_size(path, self.window_size, self.window_placement.as_ref()))
+            .map(|path| {
+                save_window_size(
+                    path,
+                    self.window_size,
+                    self.window_placement.as_ref(),
+                    &self.session_side_panel_widths,
+                )
+            })
             .transpose()
             .inspect_err(|error| tracing::warn!(%error, "persist GPUI window placement"));
-        self.runtime.detach();
     }
 }
 
@@ -1321,6 +1386,10 @@ fn context_segment_color(index: usize, category: &str, palette: ThemePalette) ->
 
 fn format_context_tokens(tokens: i64) -> String {
     let tokens = tokens.max(0);
+    if tokens >= 1_000_000 {
+        let millions = format!("{:.2}", tokens as f64 / 1_000_000.);
+        return format!("{}M", millions.trim_end_matches('0').trim_end_matches('.'));
+    }
     if tokens < 1_000 {
         return tokens.to_string();
     }
@@ -1359,6 +1428,27 @@ fn context_ring_svg(fraction: f32, palette: ThemePalette) -> gpui::Svg {
         } else {
             palette.ink
         })
+}
+
+fn selected_model_display_name(
+    providers: &[serde_json::Value],
+    provider_id: &str,
+    model_id: &str,
+) -> String {
+    providers
+        .iter()
+        .find(|provider| provider["id"].as_str() == Some(provider_id))
+        .and_then(|provider| {
+            model_choices(provider, model_id, "")
+                .into_iter()
+                .find(|choice| choice.selected)
+        })
+        .map(|choice| {
+            choice
+                .family_name
+                .unwrap_or_else(|| catalog_model_name(choice.model, model_id))
+        })
+        .unwrap_or_else(|| humanize_model_id(model_id))
 }
 
 fn catalog_model_name(model: &serde_json::Value, model_id: &str) -> String {
@@ -1519,6 +1609,22 @@ fn reasoning_index_from_position(
     (ratio * (count - 1) as f32).round() as usize
 }
 
+fn model_reasoning_display_name(modes: &ModelModes, fallback: &str, locale: Locale) -> String {
+    let mut label = reasoning_display_name(
+        if modes.reasoning.is_empty() {
+            fallback
+        } else {
+            &modes.reasoning
+        },
+        locale,
+    );
+    if modes.fast {
+        label.push_str(" · ");
+        label.push_str(locale.text("model.fast"));
+    }
+    label
+}
+
 fn reasoning_display_name(reasoning: &str, locale: Locale) -> String {
     const LABELS: [(&str, &str); 10] = [
         ("none", "reasoning.off"),
@@ -1614,10 +1720,33 @@ fn load_window_size(path: &std::path::Path) -> Option<Size<Pixels>> {
     decode_window_size(&fs::read_to_string(path).ok()?)
 }
 
+fn load_session_side_panel_widths(path: &std::path::Path) -> HashMap<String, f32> {
+    let widths = (|| -> anyhow::Result<HashMap<String, f32>> {
+        let value: serde_json::Value = serde_json::from_slice(&fs::read(path)?)?;
+        Ok(value["sessionSidePanelWidths"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter_map(|(session, value)| {
+                let width = value.as_f64()? as f32;
+                (!session.is_empty() && width.is_finite() && width > 0.)
+                    .then(|| (session.clone(), width))
+            })
+            .collect())
+    })();
+    widths.unwrap_or_else(|error| {
+        if path.exists() {
+            tracing::warn!(%error, "load GPUI session panel widths");
+        }
+        HashMap::new()
+    })
+}
+
 fn save_window_size(
     path: &std::path::Path,
     window_size: Size<Pixels>,
     placement: Option<&WindowPlacement>,
+    session_side_panel_widths: &HashMap<String, f32>,
 ) -> std::io::Result<()> {
     fs::create_dir_all(path.parent().unwrap_or_else(|| std::path::Path::new(".")))?;
     let temporary = path.with_extension("json.tmp");
@@ -1627,6 +1756,7 @@ fn save_window_size(
             "width": f32::from(window_size.width),
             "height": f32::from(window_size.height),
             "display": placement,
+            "sessionSidePanelWidths": session_side_panel_widths,
         }))?,
     )?;
     fs::rename(temporary, path)
@@ -1685,7 +1815,8 @@ fn open_main_window(
                 cx.observe_window_activation(window, |this: &mut AzemWindow, window, cx| {
                     if !window.is_window_active() {
                         this.reasoning_drag = None;
-                        this.side_panel_resize_drag = None;
+                        this.finish_side_panel_resize();
+                        this.finish_sidebar_resize(cx);
                     }
                     cx.notify();
                 })
@@ -1767,6 +1898,7 @@ fn main() {
     application.run(move |cx| {
         cx.set_app_identity("dev.azem.gpui", "Azem GPUI");
         text_input::init(cx);
+        selectable_text::init(cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.bind_keys([
             KeyBinding::new("cmd-q", Quit, None),

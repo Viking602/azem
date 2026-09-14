@@ -446,7 +446,7 @@ func runtimeRevisionFiles(workspace string, records []session.ToolRecord) ([]ses
 	mutating := false
 	var latestMutationAt time.Time
 	for _, record := range records {
-		if record.State != session.ToolCompleted {
+		if record.State != session.ToolCompleted || isDirectoryRead(record.Name, record.Structured) {
 			continue
 		}
 		recordMutated := toolRecordMutated(record)
@@ -462,7 +462,7 @@ func runtimeRevisionFiles(workspace string, records []session.ToolRecord) ([]ses
 				continue
 			}
 			entry := owned[path]
-			if observation.Operation == "read" || observation.Operation == "format" && !recordMutated {
+			if !fileObservationMutated(observation, recordMutated) {
 				entry.observed = true
 			} else {
 				entry.touched = true
@@ -480,16 +480,14 @@ func runtimeRevisionFiles(workspace string, records []session.ToolRecord) ([]ses
 	}
 	sort.Strings(paths)
 	remaining := int64(maxWorkspaceTotalBytes)
+	mediaRemaining := int64(32 << 20)
 	files := make([]session.WorkRevisionFileV1, 0, len(paths))
 	captureErrors := make([]string, 0)
 	for _, path := range paths {
-		payload, err := readWorkspaceEvidence(workspace, path, &remaining)
-		digest := ""
-		if err == nil {
-			digest = sha256Hex(payload)
-		} else if os.IsNotExist(err) {
+		digest, err := hashWorkspaceEvidence(workspace, path, &remaining, &mediaRemaining)
+		if os.IsNotExist(err) {
 			digest = sha256Hex([]byte("deleted\x00" + path))
-		} else {
+		} else if err != nil {
 			captureErrors = append(captureErrors, "Capture current bytes for "+path)
 			continue
 		}
@@ -498,10 +496,28 @@ func runtimeRevisionFiles(workspace string, records []session.ToolRecord) ([]ses
 	return files, mutating, latestMutationAt, captureErrors
 }
 
+func fileObservationMutated(observation session.FileObservation, recordMutated bool) bool {
+	switch observation.Operation {
+	case "read":
+		return false
+	case "format":
+		return recordMutated
+	default:
+		return true
+	}
+}
+
 func toolRecordMutated(record session.ToolRecord) bool {
 	switch record.Name {
 	case "coding.edit_hashline", "coding.replace", "coding.write_file", "coding.delete_file":
 		return true
+	case "generate_image", "tts":
+		return true
+	case "ast_edit":
+		var result struct {
+			Sections []json.RawMessage `json:"sections"`
+		}
+		return json.Unmarshal(record.Structured, &result) == nil && len(result.Sections) > 0
 	case "coding.gofmt":
 		var result struct {
 			Changed *bool `json:"changed"`
@@ -586,7 +602,7 @@ func evaluateRuntimeChecks(snapshot runtimeEvidenceSnapshot) runtimeCheckState {
 			}
 		} else if check.Kind == "artifact" && strings.HasPrefix(check.ArtifactRef, "file:") {
 			path := strings.TrimPrefix(check.ArtifactRef, "file:")
-			record = matchingReadbackRecord(path, snapshot.revision.Files, snapshot.records, snapshot.latestMutationAt)
+			record = matchingReadbackRecord(path, snapshot.revision.Files, snapshot.records)
 		}
 		if record == nil {
 			state.status = ""
@@ -780,7 +796,7 @@ func matchingGofmtRecords(check session.VerificationCheckV1, files []session.Wor
 	return matches, true
 }
 
-func matchingReadbackRecord(path string, files []session.WorkRevisionFileV1, records []session.ToolRecord, after time.Time) *session.ToolRecord {
+func matchingReadbackRecord(path string, files []session.WorkRevisionFileV1, records []session.ToolRecord) *session.ToolRecord {
 	sha := ""
 	for _, file := range files {
 		if file.Path == path {
@@ -788,6 +804,10 @@ func matchingReadbackRecord(path string, files []session.WorkRevisionFileV1, rec
 			break
 		}
 	}
+	if sha == "" {
+		return nil
+	}
+	after := fileMutationBoundary(path, records)
 	var matched *session.ToolRecord
 	for index := range records {
 		record := &records[index]
@@ -801,6 +821,27 @@ func matchingReadbackRecord(path string, files []session.WorkRevisionFileV1, rec
 		}
 	}
 	return matched
+}
+
+func fileMutationBoundary(path string, records []session.ToolRecord) time.Time {
+	var after time.Time
+	for _, record := range records {
+		if record.State != session.ToolCompleted {
+			continue
+		}
+		mutated := toolRecordMutated(record)
+		// Without file observations a known mutation cannot be scoped safely.
+		affectsFile := mutated && len(record.Observations) == 0
+		for _, observation := range record.Observations {
+			if filepath.ToSlash(filepath.Clean(observation.Path)) == path && fileObservationMutated(observation, mutated) {
+				affectsFile = true
+			}
+		}
+		if affectsFile && record.CompletedAt.After(after) {
+			after = record.CompletedAt
+		}
+	}
+	return after
 }
 
 func toolCommand(record session.ToolRecord) string {
@@ -920,6 +961,10 @@ func runtimeVerificationResult(snapshot runtimeEvidenceSnapshot, status string, 
 	}
 }
 
+const verificationCommandGuidance = "Run each listed command verbatim in a separate coding.shell call, preserving its working directory and environment. " +
+	"Do not append echo, join separate checks with ; or &&, or substitute a different package manager; the tool already records the exit status. " +
+	"Resolve the listed missing checks before retrying completion. "
+
 func verificationRetryMessage(snapshot runtimeEvidenceSnapshot, missing []string) string {
 	if len(missing) == 0 {
 		missing = []string{"Record current criterion-linked verification evidence"}
@@ -929,7 +974,7 @@ func verificationRetryMessage(snapshot runtimeEvidenceSnapshot, missing []string
 		"Do not initialize or replace the session Todo for this retry. If an existing Todo has open items, update those items in place. " +
 		"After these checks, answer the original user request using the implementation and verified evidence from the entire run, including work completed before this retry. " +
 		"The final report must not describe this retry as a separate user turn or imply that earlier implementation and checks did not happen. " +
-		"Run or perform each missing check, inspect failures, and only then answer:\n- " + strings.Join(missing, "\n- ")
+		verificationCommandGuidance + "Run or perform each missing check, inspect failures, and only then answer:\n- " + strings.Join(missing, "\n- ")
 }
 
 func guardrailTodoItems(todo session.TodoList, enforceSessionTodo bool) []session.TodoItem {
@@ -999,5 +1044,5 @@ func verifyTodoCompletion(ctx context.Context, sessions *session.Service, worksp
 	if len(missing) == 0 {
 		missing = []string{"Inspect and fix the failed verification checks before marking this item done"}
 	}
-	return fmt.Errorf("keep the final Todo item in progress; complete verification before calling done again:\n- %s", strings.Join(missing, "\n- "))
+	return fmt.Errorf("keep the final Todo item in progress; complete verification before calling done. %s\n- %s", verificationCommandGuidance, strings.Join(missing, "\n- "))
 }

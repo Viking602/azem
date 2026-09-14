@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Viking602/azem/internal/provider/toolnames"
 	"io"
 	"maps"
 
@@ -17,7 +18,7 @@ import (
 
 type streamAdapter struct {
 	inner    sdk.Stream
-	names    *toolNames
+	names    *toolnames.Names
 	response sdk.ResponseMetadata
 	toolUse  bool
 }

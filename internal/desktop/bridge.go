@@ -58,6 +58,7 @@ type Snapshot struct {
 	Model                    string                  `json:"model"`
 	Reasoning                string                  `json:"reasoning"`
 	AgentMode                string                  `json:"agentMode"`
+	WorkflowMode             string                  `json:"workflowMode"`
 	Language                 string                  `json:"language"`
 	ApprovalMode             string                  `json:"approvalMode"`
 	AutoReviewAvailable      bool                    `json:"autoReviewAvailable"`
@@ -333,7 +334,8 @@ func (b *Bridge) baseSnapshot() Snapshot {
 		Workspace: b.workspace, CurrentBranch: currentBranch, SessionID: b.sessionID,
 		Provider: b.cfg.Defaults.Provider, Model: b.cfg.Defaults.Model,
 		Reasoning: b.cfg.Defaults.Reasoning, AgentMode: b.cfg.Defaults.AgentMode,
-		Language: b.cfg.Defaults.Language, ApprovalMode: b.cfg.Defaults.ApprovalMode, AutoReviewAvailable: autoReviewAvailable,
+		WorkflowMode: b.runtime.WorkflowMode(),
+		Language:     b.cfg.Defaults.Language, ApprovalMode: b.cfg.Defaults.ApprovalMode, AutoReviewAvailable: autoReviewAvailable,
 		QueueMode:                b.cfg.Defaults.QueueMode,
 		SubagentConcurrency:      b.cfg.Agents.Subagents.MaxConcurrency,
 		SubagentMaxDepth:         b.cfg.Agents.Subagents.MaxDepth,
@@ -1024,8 +1026,8 @@ func allowedAction(kind azemapp.ActionKind) bool {
 		azemapp.ActionListThemes,
 		azemapp.ActionListSkills, azemapp.ActionListPlugins, azemapp.ActionSetPluginImported, azemapp.ActionListHooks, azemapp.ActionSetPluginHooksTrusted, azemapp.ActionSetHookEnabled, azemapp.ActionReloadSkills, azemapp.ActionSetSkillEnabled,
 		azemapp.ActionListMemories, azemapp.ActionRemember, azemapp.ActionForgetMemory,
-		azemapp.ActionShowRecap, azemapp.ActionListModels, azemapp.ActionListModelProviders, azemapp.ActionDiscoverProviderModels, azemapp.ActionSetModelProvider, azemapp.ActionSetModelEnabled,
-		azemapp.ActionListModelRoutes, azemapp.ActionSetModelRoute,
+		azemapp.ActionShowRecap, azemapp.ActionListModels, azemapp.ActionListModelProviders, azemapp.ActionDiscoverProviderModels, azemapp.ActionSetModelProvider, azemapp.ActionSetModelEnabled, azemapp.ActionSetModelExtendedContext,
+		azemapp.ActionListModelRoutes, azemapp.ActionSetModelRoute, azemapp.ActionSetSessionMode, azemapp.ActionSetWorkflowMode,
 		azemapp.ActionResetModelRoute, azemapp.ActionSetSubagentConcurrency,
 		azemapp.ActionSetSubagentDepth, azemapp.ActionSetShellConcurrency, azemapp.ActionSetShellMaxWallClock, azemapp.ActionSetSubagentAwait, azemapp.ActionSetSubagentIdle,
 		azemapp.ActionSetChatGPTFastMode, azemapp.ActionSetSessionPreferences, azemapp.ActionListBackground,

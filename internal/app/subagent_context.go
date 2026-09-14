@@ -34,6 +34,13 @@ func (c subagentTurnContext) Build(ctx context.Context, request hyagent.Request)
 	if instructions := strings.TrimSpace(c.instructions); instructions != "" {
 		messages = append(messages, message.NewText(message.RoleSystem, instructions))
 	}
+	for _, seeded := range c.seed {
+		if seeded.Role != message.RoleSystem || agentruntime.MessageVisibilityOf(seeded) == agentruntime.MessageVisibilityPrivate {
+			messages = append(messages, seeded)
+		}
+	}
+	// Current hook/deadline context belongs to this handoff. Keeping older
+	// private messages in place preserves the provider's cached history prefix.
 	if privateContext := strings.TrimSpace(c.privateContext); privateContext != "" {
 		value := message.NewText(message.RoleSystem, "[Trusted SubagentStart hook context]\n"+privateContext)
 		markPrivateMessage(&value)
@@ -43,11 +50,6 @@ func (c subagentTurnContext) Build(ctx context.Context, request hyagent.Request)
 		value := message.NewText(message.RoleSystem, "[Trusted runtime deadline]\n"+text)
 		markPrivateMessage(&value)
 		messages = append(messages, value)
-	}
-	for _, seeded := range c.seed {
-		if seeded.Role != message.RoleSystem {
-			messages = append(messages, seeded)
-		}
 	}
 	if goal := strings.TrimSpace(request.Prompt); goal != "" {
 		messages = append(messages, message.NewText(message.RoleUser, goal))
@@ -78,14 +80,31 @@ func (c subagentTurnContext) CompactTo(ctx context.Context, history []message.Me
 }
 
 func effectiveSubagentTools(roleTools []string, capability string) map[string]bool {
-	readOnly := map[string]bool{"coding.list_files": true, "coding.glob": true, "coding.read_file": true, "coding.search": true, agentservice.ToolASTGrep: true, agentservice.ToolLSP: true, agentservice.ToolWebSearch: true, agentservice.ToolGitHub: true, agentservice.ToolRecall: true, "coding.git_diff": true}
+	readOnly := map[string]bool{"coding.list_files": true, "coding.glob": true, "coding.read_file": true, "coding.search": true, agentservice.ToolRecall: true, "coding.git_diff": true}
 	modes := map[string]map[string]bool{
 		"read-only":  readOnly,
-		"read-write": {"coding.list_files": true, "coding.glob": true, "coding.read_file": true, "coding.search": true, agentservice.ToolASTGrep: true, agentservice.ToolLSP: true, agentservice.ToolWebSearch: true, agentservice.ToolGitHub: true, agentservice.ToolRecall: true, "coding.git_diff": true, "coding.edit_hashline": true, "coding.replace": true, "coding.write_file": true, "coding.delete_file": true, "coding.gofmt": true},
-		"execute":    {"coding.list_files": true, "coding.glob": true, "coding.read_file": true, "coding.search": true, agentservice.ToolASTGrep: true, agentservice.ToolLSP: true, agentservice.ToolWebSearch: true, agentservice.ToolGitHub: true, agentservice.ToolRecall: true, "coding.git_diff": true, "coding.go_test": true, "coding.shell": true, agentservice.ToolDebug: true, agentservice.ToolEval: true, agentservice.ToolBrowser: true, agentservice.ToolComputer: true, agentservice.ToolHub: true},
-		"all":        {"coding.list_files": true, "coding.glob": true, "coding.read_file": true, "coding.search": true, agentservice.ToolASTGrep: true, agentservice.ToolLSP: true, agentservice.ToolWebSearch: true, agentservice.ToolGitHub: true, agentservice.ToolRecall: true, "coding.git_diff": true, "coding.edit_hashline": true, "coding.replace": true, "coding.write_file": true, "coding.delete_file": true, "coding.gofmt": true, "coding.go_test": true, "coding.shell": true, agentservice.ToolDebug: true, agentservice.ToolEval: true, agentservice.ToolBrowser: true, agentservice.ToolComputer: true, agentservice.ToolHub: true, agentservice.ToolGenerateImage: true, agentservice.ToolTTS: true, agentservice.ToolRetain: true, agentservice.ToolMemoryEdit: true},
+		"read-write": {"coding.list_files": true, "coding.glob": true, "coding.read_file": true, "coding.search": true, agentservice.ToolRecall: true, "coding.git_diff": true, "coding.edit_hashline": true, "coding.replace": true, "coding.write_file": true, "coding.delete_file": true, "coding.gofmt": true},
+		"execute":    {"coding.list_files": true, "coding.glob": true, "coding.read_file": true, "coding.search": true, agentservice.ToolRecall: true, "coding.git_diff": true, "coding.go_test": true, "coding.shell": true, agentservice.ToolHub: true},
+		"all":        {"coding.list_files": true, "coding.glob": true, "coding.read_file": true, "coding.search": true, agentservice.ToolRecall: true, "coding.git_diff": true, "coding.edit_hashline": true, "coding.replace": true, "coding.write_file": true, "coding.delete_file": true, "coding.gofmt": true, "coding.go_test": true, "coding.shell": true, agentservice.ToolHub: true, agentservice.ToolRetain: true, agentservice.ToolMemoryEdit: true},
 	}
 	allowed := make(map[string]bool)
+	for _, mode := range modes {
+		for _, name := range []string{agentservice.ToolASTGrep, agentservice.ToolInspectImage, agentservice.ToolWebSearch, agentservice.ToolReflect} {
+			mode[name] = true
+		}
+	}
+	for _, capability := range []string{"read-write", "all"} {
+		modes[capability][agentservice.ToolASTEdit] = true
+		modes[capability][agentservice.ToolTTS] = true
+	}
+	for _, capability := range []string{"execute", "all"} {
+		for _, name := range []string{agentservice.ToolEval, agentservice.ToolLSP, agentservice.ToolBrowser, agentservice.ToolComputer, agentservice.ToolDebug} {
+			modes[capability][name] = true
+		}
+	}
+	for _, name := range []string{agentservice.ToolGitHub, agentservice.ToolGenerateImage, agentservice.ToolLearn} {
+		modes["all"][name] = true
+	}
 	for _, name := range roleTools {
 		if modes[capability][name] {
 			allowed[name] = true
@@ -96,6 +115,11 @@ func effectiveSubagentTools(roleTools []string, capability string) map[string]bo
 
 func subagentMayMutateWorkspace(profile effectiveSubagentProfile) bool {
 	tools := effectiveSubagentTools(profile.Tools, profile.CapabilityMode)
+	for _, name := range []string{agentservice.ToolASTEdit, agentservice.ToolTTS, agentservice.ToolGenerateImage, agentservice.ToolEval, agentservice.ToolLSP, agentservice.ToolBrowser, agentservice.ToolComputer, agentservice.ToolDebug, agentservice.ToolHub, agentservice.ToolGitHub} {
+		if tools[name] {
+			return true
+		}
+	}
 	return tools["coding.edit_hashline"] || tools["coding.replace"] || tools["coding.write_file"] ||
 		tools["coding.delete_file"] || tools["coding.gofmt"] || tools["coding.shell"]
 }

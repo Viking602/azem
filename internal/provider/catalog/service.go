@@ -21,6 +21,7 @@ import (
 )
 
 const (
+	DefaultEnabledModelLimit     = 5
 	DefaultChatGPTCatalogURL     = "https://chatgpt.com/backend-api/codex/models"
 	DefaultGrokCatalogURL        = "https://cli-chat-proxy.grok.com/v1/models"
 	DefaultGrokLanguageModelsURL = "https://cli-chat-proxy.grok.com/v1/language-models"
@@ -35,8 +36,10 @@ type Model struct {
 	Name                 string         `json:"name,omitempty"`
 	Description          string         `json:"description,omitempty"`
 	ContextWindow        int            `json:"contextWindow,omitempty"`
+	ExtendedContext      bool           `json:"extendedContext,omitempty"`
 	MaxOutputTokens      int            `json:"maxOutputTokens,omitempty"`
 	CursorMaxMode        bool           `json:"cursorMaxMode,omitempty"`
+	DevinRouter          bool           `json:"devinRouter,omitempty"`
 	ReasoningLevels      []string       `json:"reasoningLevels,omitempty"`
 	DefaultReasoning     string         `json:"defaultReasoning,omitempty"`
 	SupportsTools        bool           `json:"supportsTools"`
@@ -123,6 +126,10 @@ func NewService(db *sql.DB, authentication *auth.Service) *Service {
 }
 
 func (s *Service) EnrichWithModelsDev(ctx context.Context, result Result) Result {
+	if result.Provider == "devin" {
+		// CLI capabilities and exact effort variants come from the account response.
+		return result
+	}
 	metadata, err := s.modelsDev(ctx)
 	if err != nil {
 		result.Warning = joinWarnings(result.Warning, "models.dev metadata unavailable: "+err.Error())
@@ -693,6 +700,25 @@ func (s *Service) save(ctx context.Context, result Result, etag string) error {
 	}
 	defer tx.Rollback()
 	queries := dbgen.New(s.db).WithTx(tx)
+	previous, err := queries.ListCatalog(ctx, dbgen.ListCatalogParams{ProviderID: result.Provider, AccountID: result.AccountID})
+	if err != nil {
+		return err
+	}
+	availability := make(map[string]bool, len(previous))
+	for _, row := range previous {
+		var model Model
+		if err := json.Unmarshal(row.Data, &model); err != nil {
+			return err
+		}
+		availability[model.ID] = model.Disabled
+	}
+	for i := range result.Models {
+		disabled, known := availability[result.Models[i].ID]
+		if !known {
+			disabled = len(result.Models) > DefaultEnabledModelLimit
+		}
+		result.Models[i].Disabled = disabled
+	}
 	if err := queries.DeleteCatalog(ctx, dbgen.DeleteCatalogParams{ProviderID: result.Provider, AccountID: result.AccountID}); err != nil {
 		return err
 	}
@@ -702,6 +728,22 @@ func (s *Service) save(ctx context.Context, result Result, etag string) error {
 			return err
 		}
 		if err := queries.InsertCatalogModel(ctx, dbgen.InsertCatalogModelParams{ProviderID: result.Provider, AccountID: result.AccountID, ModelID: model.ID, Etag: etag, FetchedAt: result.FetchedAt.UnixNano(), ExpiresAt: result.ExpiresAt.UnixNano(), Data: data}); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// EnableSubscriptionModels clears discovery defaults for an explicit user choice.
+// Like disabled_models, the choice applies to every cached account of the provider.
+func (s *Service) EnableSubscriptionModels(ctx context.Context, provider string, modelIDs []string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, id := range modelIDs {
+		if _, err := tx.ExecContext(ctx, `UPDATE model_catalog SET data = json_set(data, '$.disabled', json('false')) WHERE provider_id = ? AND model_id = ?`, provider, id); err != nil {
 			return err
 		}
 	}

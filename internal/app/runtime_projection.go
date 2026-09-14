@@ -240,10 +240,14 @@ func (s *Service) RuntimeProjection(ctx context.Context, sessionID string) (Runt
 }
 
 func (s *Service) sessionProjection(ctx context.Context, projection session.Projection) (SessionProjection, error) {
+	agents, err := s.projectFusionSession(ctx, &projection)
+	if err != nil {
+		return SessionProjection{}, err
+	}
 	blocks := make([]TranscriptBlock, len(projection.Blocks))
 	for index, block := range projection.Blocks {
 		blocks[index] = TranscriptBlock{
-			ID: fmt.Sprintf("block:%d", block.Sequence), Sequence: block.Sequence,
+			ID: firstNonempty(block.Data["fusionBlockId"], fmt.Sprintf("block:%d", block.Sequence)), Sequence: block.Sequence,
 			Kind: block.Kind, RunID: block.RunID, AgentID: block.AgentID,
 			ToolCallID: block.ParentToolCallID, Title: block.Title, Content: block.Content,
 			TextPhase: block.TextPhase, State: block.State, Collapsed: block.Collapsed,
@@ -268,7 +272,6 @@ func (s *Service) sessionProjection(ctx context.Context, projection session.Proj
 	if err != nil {
 		return SessionProjection{}, err
 	}
-	agents := s.subagentSnapshots(ctx, projection.Session.ID)
 	if agents == nil {
 		agents = []AgentSnapshotPayload{}
 	}
@@ -293,7 +296,7 @@ func (s *Service) durableOperationsForRun(ctx context.Context, sessionID, runID 
 func activeOperationsFromToolRecords(records []session.ToolRecord, runID string) []ActiveOperation {
 	result := make([]ActiveOperation, 0)
 	for _, record := range records {
-		if record.RunID != runID || terminalToolRecordState(record.State) {
+		if record.RunID != runID || record.Name == "sidekick" || terminalToolRecordState(record.State) {
 			continue
 		}
 		target := ""
@@ -537,7 +540,11 @@ func (s *Service) observeRuntimeProjectionLocked(event Event) {
 			s.activeRunProjection.GuidanceOpen = false
 		}
 	}
-	s.updateLiveProjectionLocked(event)
+	// Fusion prose already has an execution transcript projection. Keeping a
+	// second accumulator here would mix it with the lead's live text.
+	if event.Data["fusionBlockId"] == "" {
+		s.updateLiveProjectionLocked(event)
+	}
 	s.updateActiveOperationLocked(event)
 }
 

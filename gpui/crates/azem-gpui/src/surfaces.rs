@@ -34,9 +34,25 @@ use crate::{
 
 pub(super) const SIDEBAR_WIDTH: f32 = 246.;
 pub(crate) const SIDE_PANEL_TRANSITION: Duration = Duration::from_millis(300);
-const ENVIRONMENT_PANEL_RETURN_TRANSITION: Duration = Duration::from_millis(500);
+// Shared density for workspace navigation and content surfaces.
+const WORKSPACE_CONTROL: f32 = 28.;
+const WORKSPACE_ROW: f32 = 32.;
+const WORKSPACE_TOOLBAR: f32 = 40.;
+const WORKSPACE_TEXT: f32 = 13.;
+const WORKSPACE_META: f32 = 12.;
+const WORKSPACE_TITLE: f32 = 15.;
+const WORKSPACE_PAGE_TITLE: f32 = 22.;
+const WORKSPACE_ICON: f32 = 16.;
+const WORKSPACE_INSET: f32 = 20.;
+const WORKSPACE_RAIL: f32 = 360.;
+const WORKSPACE_RADIUS: f32 = 6.;
+mod control_motion;
 mod environment;
+pub(crate) use control_motion::{SelectionMotion, control_animation};
+mod file_icons;
 mod navigation;
+mod navigation_motion;
+pub(super) use navigation_motion::SidebarTreeState;
 mod projects;
 mod pull_requests;
 mod security;
@@ -56,7 +72,9 @@ pub(super) use security::security_surface;
 pub(super) use settings::{ModelCapabilityTooltip, extension_confirmation, settings_surface};
 pub(super) use timeline::process::{completed_process_range, needs_pending_process};
 pub(super) use timeline::timeline_entry;
-pub(super) use workspace::{workspace_changes_surface, workspace_files_surface};
+pub(super) use workspace::{
+    WorkspaceSource, workspace_changes_surface, workspace_files_surface, workspace_image,
+};
 
 use settings::{format_usage_duration, pick, settings_card_header};
 use timeline::process::{
@@ -66,8 +84,7 @@ use timeline::process::{
 
 #[cfg(test)]
 use environment::{
-    environment_panel_return_spring, environment_snapshot, plan_item_animates,
-    projected_agent_blocks, recap_copy, todo_status_mark,
+    environment_snapshot, plan_item_animates, projected_agent_blocks, recap_copy, todo_status_mark,
 };
 #[cfg(test)]
 use security::{security_compact_text, security_progress_fraction};
@@ -78,8 +95,8 @@ use settings::{
     marketplace_entries, model_capability_label, model_discovery_request, model_matches_query,
     model_provider_action, model_provider_save_request, plugin_import_action, plugin_logo,
     provider_base_url, provider_detail_subtitle, provider_matches_query, provider_quota_remaining,
-    settings_route_model_name, settings_route_title, settings_search_matches,
-    settings_section_parts, usage_activity_level, usage_heatmap,
+    provider_quota_windows, settings_route_model_name, settings_route_title,
+    settings_search_matches, settings_section_parts, usage_activity_level, usage_heatmap,
 };
 #[cfg(test)]
 use timeline::process::{
@@ -97,10 +114,6 @@ use timeline::{
 
 #[cfg(test)]
 mod tests;
-
-fn pretty_value(value: &serde_json::Value) -> String {
-    serde_json::to_string_pretty(value).unwrap_or_default()
-}
 
 fn picker_menu_position(bounds: gpui::Bounds<Pixels>, below: bool) -> gpui::Point<Pixels> {
     gpui::point(

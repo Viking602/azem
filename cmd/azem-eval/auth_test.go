@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	authservice "github.com/Viking602/azem/internal/auth"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 )
 
@@ -51,7 +52,7 @@ func TestSyncAuthCopiesNewerGrokCredentialWithoutOpeningDestAsRuntimeStore(t *te
 		t.Fatal(err)
 	}
 	if _, err := dst.DB().ExecContext(ctx, `INSERT INTO accounts(id, provider_id, email, display_name, plan, credential_ref, status, created_at, updated_at)
-		VALUES('acct', 'grok', 'eval@example.com', 'Eval', 'SuperGrokPro', 'sqlite', 'active', 1, 2)`); err != nil {
+		VALUES('acct', 'grok', 'eval@example.com', 'Eval', 'SuperGrokPro', 'keychain:grok:acct', 'active', 1, 2)`); err != nil {
 		t.Fatal(err)
 	}
 	oldBlob := mustAuthBlob(t, "old", "old-refresh", now.Add(-time.Hour))
@@ -76,13 +77,17 @@ func TestSyncAuthCopiesNewerGrokCredentialWithoutOpeningDestAsRuntimeStore(t *te
 		t.Fatal(err)
 	}
 	defer reopened.Close(ctx)
-	var data string
-	if err := reopened.DB().QueryRowContext(ctx, `SELECT data FROM auth_credentials WHERE account_id = 'acct'`).Scan(&data); err != nil {
+	var data, reference string
+	if err := reopened.DB().QueryRowContext(ctx, `SELECT c.data,a.credential_ref FROM auth_credentials c JOIN accounts a ON a.provider_id=c.provider_id AND a.id=c.account_id WHERE c.account_id='acct'`).Scan(&data, &reference); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(data, "fresh") || !strings.Contains(data, "rotated-refresh") {
 		t.Fatalf("dest credential = %s", data)
 	}
+	if reference != "keychain:grok:acct" {
+		t.Fatalf("existing credential binding changed: %q", reference)
+	}
+
 }
 
 func TestSyncAuthInsertsMissingDestinationAccount(t *testing.T) {
@@ -90,10 +95,6 @@ func TestSyncAuthInsertsMissingDestinationAccount(t *testing.T) {
 	srcPath := filepath.Join(t.TempDir(), "src.db")
 	dstPath := filepath.Join(t.TempDir(), "dst.db")
 	src, err := sqlitestore.Open(ctx, srcPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dst, err := sqlitestore.Open(ctx, dstPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,9 +108,6 @@ func TestSyncAuthInsertsMissingDestinationAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := src.Close(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := dst.Close(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if err := syncAuth(srcPath, dstPath); err != nil {
@@ -127,6 +125,26 @@ func TestSyncAuthInsertsMissingDestinationAccount(t *testing.T) {
 	if email != "eval@example.com" || status != "active" {
 		t.Fatalf("dest account email=%q status=%q", email, status)
 	}
+	read := func() {
+		t.Helper()
+		store, err := authservice.NewRoutedStore(reopened.DB(), "sqlite", map[string]authservice.CredentialStore{"sqlite": authservice.NewSQLiteStore(reopened.DB())})
+		if err != nil {
+			t.Fatal(err)
+		}
+		credential, err := store.Get(ctx, "grok", "acct")
+		if err != nil || credential.AccessToken != "fresh" {
+			t.Fatalf("synced credential is not routable: %v", err)
+		}
+	}
+	read()
+	if _, err := reopened.DB().ExecContext(ctx, `UPDATE accounts SET credential_ref='sqlite' WHERE id='acct'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := syncAuth(srcPath, dstPath); err != nil {
+		t.Fatal(err)
+	}
+	read()
+
 }
 
 func TestSyncAuthKeepsDestinationAccountWhenSourceAccountIsMissing(t *testing.T) {
@@ -234,7 +252,7 @@ func TestSyncAuthSkipsReauthRequiredSource(t *testing.T) {
 
 func mustAuthBlob(t *testing.T, access, refresh string, expires time.Time) []byte {
 	t.Helper()
-	data, err := json.Marshal(authCredentialBlob{AccessToken: access, RefreshToken: refresh, ExpiresAt: expires})
+	data, err := json.Marshal(authservice.Credential{Provider: "grok", AccountID: "acct", AccessToken: access, RefreshToken: refresh, ExpiresAt: expires})
 	if err != nil {
 		t.Fatal(err)
 	}

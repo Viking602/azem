@@ -173,6 +173,7 @@ type subagentParentRuntime struct {
 	MaxChildren          int
 	ObservePath          func(string)
 	DirectorReadOnly     bool
+	PersistentKey        string
 	Budget               agentruntime.TaskBudget
 	ObserveTool          func(string)
 }
@@ -252,7 +253,7 @@ type subagentRuntime struct {
 	changed          chan struct{}
 	peerMailboxes    map[string][]hubPeerMessage
 	peerChanged      chan struct{}
-	vibe             map[string]vibeRecord
+	vibe             map[vibeSessionKey]vibeRecord
 	peerNext         uint64
 	idleCheckEvery   time.Duration
 	wg               sync.WaitGroup
@@ -273,7 +274,7 @@ func newSubagentRuntime(parent context.Context, cfg config.SubagentConfig, store
 		terminalFallback: make(map[string]agentservice.SubagentSnapshot),
 		hosts:            make(map[string]providerHost), evidenceStatus: make(map[string]string),
 		wakeInFlight: make(map[string]bool), changed: make(chan struct{}),
-		peerMailboxes: make(map[string][]hubPeerMessage), peerChanged: make(chan struct{}), vibe: make(map[string]vibeRecord),
+		peerMailboxes: make(map[string][]hubPeerMessage), peerChanged: make(chan struct{}), vibe: make(map[vibeSessionKey]vibeRecord),
 	}
 	runtime.wg.Add(1)
 	go runtime.watchIdle()
@@ -361,6 +362,12 @@ func (r *subagentRuntime) recoverInterrupted(parent subagentParentRuntime) error
 		profile.AccountID = run.AccountID
 		profile.Model = firstNonempty(run.Model, profile.Model)
 		profile.Reasoning = firstNonempty(run.Reasoning, profile.Reasoning)
+		if parent.PersistentKey != "" {
+			if run.Description != parent.PersistentKey {
+				continue
+			}
+			profile.AccountID, profile.Reasoning = parent.AccountID, parent.Reasoning
+		}
 		profile.CapabilityMode = run.CapabilityMode
 		profile.RequestedIsolation = run.RequestedIsolation
 		profile.Isolation = run.Isolation
@@ -433,7 +440,9 @@ func (r *subagentRuntime) restoreParked(parent subagentParentRuntime) error {
 	}
 	activeNames := make(map[string]bool, len(r.active))
 	for _, active := range r.active {
-		activeNames[strings.ToLower(active.name)] = true
+		if active.run.SessionID == parent.SessionID {
+			activeNames[strings.ToLower(active.name)] = true
+		}
 	}
 	for _, run := range runs {
 		if !subagentTerminal(run.State) {
@@ -450,7 +459,7 @@ func (r *subagentRuntime) restoreParked(parent subagentParentRuntime) error {
 		var existingID string
 		var existing *parkedSubagent
 		for parkedID, candidate := range r.parked {
-			if strings.EqualFold(candidate.name, name) {
+			if candidate.run.SessionID == parent.SessionID && strings.EqualFold(candidate.name, name) {
 				existingID, existing = parkedID, candidate
 				break
 			}
@@ -581,6 +590,9 @@ func (r *subagentRuntime) spawn(input subagentSpawnInput, parent subagentParentR
 	if err != nil {
 		return agentservice.SubagentRun{}, err
 	}
+	if parent.PersistentKey != "" {
+		profile.Provider, profile.AccountID, profile.Model, profile.Reasoning = parent.ProviderID, parent.AccountID, parent.ModelID, parent.Reasoning
+	}
 	outputContract, err := compileStructuredSubagentContract(input.OutputSchema, input.SchemaMode)
 	if err != nil {
 		return agentservice.SubagentRun{}, err
@@ -592,7 +604,7 @@ func (r *subagentRuntime) spawn(input subagentSpawnInput, parent subagentParentR
 	}
 	r.mu.Lock()
 	for _, current := range r.active {
-		if name != "" && strings.EqualFold(current.name, name) {
+		if current.run.SessionID == parent.SessionID && name != "" && strings.EqualFold(current.name, name) {
 			r.mu.Unlock()
 			return agentservice.SubagentRun{}, fmt.Errorf("subagent name %q is already active", name)
 		}
@@ -634,7 +646,6 @@ func (r *subagentRuntime) spawn(input subagentSpawnInput, parent subagentParentR
 			return run, err
 		}
 	}
-	childCtx, cancel := context.WithCancel(r.ctx)
 	if name == "" {
 		name = id
 	}
@@ -644,6 +655,7 @@ func (r *subagentRuntime) spawn(input subagentSpawnInput, parent subagentParentR
 			return agentservice.SubagentRun{}, fmt.Errorf("queue initial peer message: %w", err)
 		}
 	}
+	childCtx, cancel := context.WithCancel(r.ctx)
 	active := &activeSubagent{
 		run: run, profile: profile, prompt: input.Prompt, outputContract: outputContract, name: name, control: control, parent: parent, ctx: childCtx, cancel: cancel,
 		done: make(chan struct{}), toolNames: make(map[string]struct{}), lastVisibleAt: time.Now(),
@@ -758,7 +770,7 @@ func (r *subagentRuntime) resolveProfile(input subagentSpawnInput, parent subage
 		capability = "read-only"
 		isolation = "none"
 	}
-	cwd := parent.WorkspaceRoot
+	cwd := canonicalWorkspaceAnchor(parent.WorkspaceRoot)
 	if input.CWD != "" {
 		resolved, resolveErr := resolveSubagentCWD(parent.WorkspaceRoot, input.CWD)
 		if resolveErr != nil {
@@ -853,7 +865,17 @@ func (r *subagentRuntime) resolveResumeProfile(sourceID string, parent subagentP
 	if !subagentTerminal(source.State) {
 		return effectiveSubagentProfile{}, fmt.Errorf("resume source %q is not terminal", sourceID)
 	}
-	seed, err := sanitizedResumeSeed(source.Transcript)
+	var seed []message.Message
+	if parent.PersistentKey != "" {
+		// The durable name binds the account; SubagentRun.AccountID itself is
+		// runtime-only and is not stored by SQLSubagentRunStore.
+		if source.Description != parent.PersistentKey || source.Provider != parent.ProviderID || source.Model != parent.ModelID || source.Reasoning != parent.Reasoning {
+			return effectiveSubagentProfile{}, fmt.Errorf("Sidekick resume identity does not match the configured session and account route")
+		}
+		seed, err = fusionResumeSeed(r.ctx, source.Transcript, parent)
+	} else {
+		seed, err = sanitizedResumeSeed(source.Transcript)
+	}
 	if err != nil {
 		return effectiveSubagentProfile{}, fmt.Errorf("resume source %q: %w", sourceID, err)
 	}
@@ -1168,12 +1190,6 @@ func (r *subagentRuntime) execute(id string) {
 	governed := make([]tool.Driver, 0, len(workspaceDrivers))
 	toolNames := make([]string, 0, len(workspaceDrivers))
 	for _, driver := range workspaceDrivers {
-		if profile.CapabilityMode == "read-only" || profile.CapabilityMode == "execute" {
-			driver = agentservice.ReadOnlyLSPDriver(driver)
-		}
-		if profile.CapabilityMode == "read-only" || profile.CapabilityMode == "read-write" {
-			driver = agentservice.ReadOnlyGitHubDriver(driver)
-		}
 		definition := driver.Definition()
 		if !allowed[definition.Name] || (parent.AllowedTools != nil && !parent.AllowedTools[definition.Name]) {
 			continue
@@ -1378,7 +1394,7 @@ func (r *subagentRuntime) execute(id string) {
 	}
 	engine.ToolMode = tool.ModeParallel
 	parallelToolCalls := true
-	engine.PromptCacheKey = childRun.RunID
+	engine.PromptCacheKey = firstNonempty(parent.PersistentKey, childRun.RunID)
 	engine.ParallelToolCalls = &parallelToolCalls
 	var cursorHost cursordriver.ExecHost
 	if profile.Provider == "cursor" {
@@ -1388,7 +1404,7 @@ func (r *subagentRuntime) execute(id string) {
 	}
 	engine = bindProviderRequestScope(engine, providerAttachmentRoot(parent.Host), cursorHost)
 	engine.Hooks = engine.Hooks.Prepend(editRecoveryHook{run: childRun})
-	engine = bindTurnControl(engine, active.control)
+	engine = bindTurnControl(engine, active.control, time.Time{})
 	if guardrail := structuredSubagentGuardrail(active.outputContract); guardrail != nil {
 		engine.OutputGuardrails = append(engine.OutputGuardrails, guardrail)
 	}
@@ -1469,7 +1485,27 @@ func (r *subagentRuntime) execute(id string) {
 	restartingAttempt := false
 	guardRetryPending := false
 	turnUsedTool := false
+	var fusionTimeline *durableToolTimeline
+	if parent.PersistentKey != "" && parent.Host != nil {
+		fusionTimeline = newDurableToolTimeline(parent.Host.Sessions(), profile.CWD, parent.SessionID, childRun.RunID)
+	}
 	sink := hyagent.SinkFunc(func(frameCtx context.Context, frame hyagent.Frame) error {
+		if fusionTimeline != nil {
+			switch frame.Kind {
+			case hyagent.FrameToolCall:
+				if frame.ToolCall != nil {
+					if err := fusionTimeline.start(frameCtx, *frame.ToolCall); err != nil {
+						return err
+					}
+				}
+			case hyagent.FrameToolResult:
+				if frame.ToolResult != nil {
+					if _, _, err := fusionTimeline.finish(frameCtx, *frame.ToolResult); err != nil {
+						return err
+					}
+				}
+			}
+		}
 		if (restartingAttempt || guardRetryPending) && frame.Kind != hyagent.FrameError {
 			r.mu.Lock()
 			if current := r.active[id]; current != nil && !current.terminalizing {
@@ -1782,7 +1818,15 @@ func (r *subagentRuntime) terminalize(id string, request terminalRequest) {
 	activity := active.activity
 	disableHooks := active.parent.DisableHooks
 	worktreeRepoRoot := active.profile.WorktreeRepoRoot
+	fusion := active.parent.PersistentKey != ""
 	r.mu.Unlock()
+	if fusion && parentHost != nil && parentHost.Sessions() != nil && run.ChildRunID != "" {
+		settleCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := parentHost.Sessions().InterruptRunningToolRecordsForRun(settleCtx, run.ChildRunID, run.FinishedAt); err != nil {
+			run.State, run.Error = agentservice.SubagentFailed, err.Error()
+		}
+		cancel()
+	}
 	agentTranscriptPath, transcriptWriteErr := writeSubagentHookTranscript(r.worktreeRoot, run.ID, run.Transcript)
 	if transcriptWriteErr != nil {
 		run.Warning = appendWarning(run.Warning, "write hook transcript: "+transcriptWriteErr.Error())
@@ -1842,7 +1886,7 @@ func (r *subagentRuntime) terminalize(id string, request terminalRequest) {
 		r.parked = make(map[string]*parkedSubagent)
 	}
 	for parkedID, parked := range r.parked {
-		if strings.EqualFold(parked.name, active.name) {
+		if parked.run.SessionID == active.run.SessionID && strings.EqualFold(parked.name, active.name) {
 			delete(r.parked, parkedID)
 		}
 	}

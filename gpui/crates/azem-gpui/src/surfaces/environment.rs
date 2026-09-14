@@ -1,13 +1,4 @@
 use super::*;
-pub(super) fn environment_panel_return_spring(progress: f32) -> f32 {
-    if progress >= 1. {
-        1.
-    } else {
-        let phase = 5.5 * progress;
-        1. - (-4. * progress).exp() * (phase.cos() + 0.73 * phase.sin())
-    }
-}
-
 #[derive(Debug, Default)]
 pub(super) struct EnvironmentSnapshot {
     pub(super) has_subagents: bool,
@@ -365,16 +356,10 @@ pub(crate) fn environment_panel(
     this: &AzemWindow,
     palette: ThemePalette,
     labels: Labels,
-    right_inset: f32,
+    layout: &crate::EnvironmentPanelLayout,
     cx: &mut Context<AzemWindow>,
 ) -> gpui::AnyElement {
     let state = &this.state;
-    let reduced_motion = state
-        .settings
-        .appearance
-        .get("reducedMotion")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
     let snapshot = environment_snapshot(state);
     let locale = Locale::resolve(&state.settings.language);
     let panel = div()
@@ -426,9 +411,7 @@ pub(crate) fn environment_panel(
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.settings_open = true;
                             this.settings_provider = None;
-                            if this.state.catalogs.providers.is_empty() {
-                                this.refresh_model_catalog();
-                            }
+                            this.refresh_model_catalog();
                             cx.notify();
                         }))
                         .child(icon("settings", 14., palette.muted)),
@@ -484,48 +467,28 @@ pub(crate) fn environment_panel(
         .child(environment_label(locale.text("ui.recap"), palette))
         .child(recap_panel(&state.runtime.recap, palette, locale))
         .into_any_element();
-    let reveal = div()
-        .w(px(312.))
-        .max_h(px(520.))
-        .flex()
-        .justify_end()
-        .child(
-            div()
-                .w(px(312.))
-                .flex_shrink_0()
-                .flex()
-                .justify_end()
-                .child(panel),
-        );
-    let reveal = if reduced_motion {
-        reveal.into_any_element()
-    } else {
-        reveal
-            .with_animation(
-                "environment-panel-return",
-                Animation::new(ENVIRONMENT_PANEL_RETURN_TRANSITION)
-                    .with_easing(environment_panel_return_spring),
-                |panel, progress| {
-                    panel
-                        .w(px(312. * progress.max(0.)))
-                        .opacity(progress.clamp(0., 1.))
-                },
-            )
-            .into_any_element()
-    };
-    div()
+    let view = div()
         .id("environment-panel")
         .role(Role::Region)
         .aria_label(locale.text("ui.environment"))
         .absolute()
-        .top(px(12.))
-        .right(px(right_inset))
+        .top(px(12. + 18. * layout.tuck_progress))
+        .right(px(layout.right_inset
+            - crate::ENVIRONMENT_PANEL_RESERVED_WIDTH
+                * layout.tuck_progress))
         .w(px(312.))
         .max_h(px(520.))
         .flex()
         .justify_end()
-        .child(reveal)
-        .into_any_element()
+        .child(panel);
+    popup_transition(
+        view,
+        crate::PopupMotion {
+            open: this.environment_open,
+            opacity: layout.opacity,
+            ..Default::default()
+        },
+    )
 }
 
 pub(crate) fn side_panel(
@@ -644,7 +607,7 @@ fn side_panel_resize_handle(
                 .absolute()
                 .top(px(0.))
                 .bottom(px(0.))
-                .left(px(3.))
+                .left(px(0.))
                 .w(px(1.))
                 .bg(palette.border),
         )

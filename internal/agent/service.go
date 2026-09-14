@@ -76,6 +76,7 @@ type Service struct {
 	shellPolicy        string
 	allowNetwork       string
 	shellRuntime       *shellRuntime
+	native             *nativeHost
 	toolGovernor       toolPolicyGovernor
 	teamMaxConcurrency int
 	teamMaxTicks       int
@@ -83,7 +84,6 @@ type Service struct {
 	memory             *memory.Service
 	resources          *resource.Router
 	hashlineClipboard  *hashlineClipboard
-	ast                *astBridge
 	ctx                context.Context
 	cancel             context.CancelFunc
 	wg                 sync.WaitGroup
@@ -91,10 +91,8 @@ type Service struct {
 	closed             bool
 	closeDone          chan struct{}
 	closeErr           error
-	lsp                *lspBridgeRuntime
 	jobs               *backgroundJobManager
 	hubPeers           *hubPeerBrokerRef
-	fileBroker         *fileMutationBrokerRef
 	singleRunMu        sync.Mutex
 	singleRuns         map[string]activeRun
 	approvalMu         sync.Mutex
@@ -103,15 +101,14 @@ type Service struct {
 	externalClosers    []func(context.Context) error
 }
 
-const hashlineEditToolDescription = `Apply a Hashline patch to existing files. Reuse exact [PATH#TAG] headers and N:TEXT anchors from the latest read/search/edit result. Input is:
+const hashlineEditToolDescription = `Apply a Hashline patch to existing files. Reuse exact [PATH#TAG] headers and N:TEXT anchors from the latest read/search/edit result. Example replacing line 1 (substitute the actual path and tag):
 *** Begin Patch
 [path#ABCD]
-PUT N.=M:
-+final content
-CUT N.=M
-PUT <N: or PUT >N: for insertion; PUT >$: for tail insertion; PUT N*: or CUT N* for a syntactic block. CUT may capture @name and colonless PUT may paste it; named registers persist across calls. REM deletes the section file. MV DEST moves it after prior edits.
+PUT 1.=1:
++replacement text
 *** End Patch
-All line numbers name the original snapshot. Colon PUT body rows each start with + and contain final content only. Register PUT/CUT/REM/MV have no body. Never send unified @@ hunks, -old/context rows, or widen ranges over lines that remain unchanged. Re-read only unseen or renumbered lines, stale/conflicting tags, or surprising results.`
+Both delimiter lines are required exactly as shown. All line numbers name the original snapshot. PUT N.=M: replaces inclusive lines N through M, where M >= N. For insertion use PUT <N:, PUT >N:, or PUT >$: (tail); never invent an empty/inverted range. PUT N*: replaces a syntactic block. Colon PUT body rows each start with + and contain final content only.
+CUT N.=M or CUT N* deletes lines/blocks and may capture @name; colonless PUT may paste registers, which persist across calls. REM deletes the section file. MV DEST moves it after prior edits. Register PUT/CUT/REM/MV have no body. Never send unified @@ hunks, -old/context rows, or widen ranges over lines that remain unchanged. Re-read only unseen or renumbered lines, stale/conflicting tags, or surprising results.`
 
 const hashlineRetryGuidance = `Required Hashline retry format:
 *** Begin Patch
@@ -381,7 +378,7 @@ func NewService(store runtimeStore, workspaceRoot string, options ...ServiceOpti
 		store: store, workspace: workspace, workspaceRoot: workspace.Root(), policy: policy,
 		allowWrite: settings.allowWrite, shellPolicy: settings.shellPolicy, allowNetwork: settings.network,
 		teamMaxConcurrency: settings.teamMaxConcurrency, teamMaxTicks: settings.teamMaxTicks,
-		skills: settings.skills, resources: settings.resources, memory: settings.memory, hashlineClipboard: newHashlineClipboard(), ast: newASTBridge(), lsp: newLSPBridgeRuntime(), jobs: newBackgroundJobManager(serviceCtx), hubPeers: &hubPeerBrokerRef{}, fileBroker: &fileMutationBrokerRef{},
+		skills: settings.skills, resources: settings.resources, memory: settings.memory, hashlineClipboard: newHashlineClipboard(), jobs: newBackgroundJobManager(serviceCtx), hubPeers: &hubPeerBrokerRef{},
 		ctx: serviceCtx, cancel: serviceCancel,
 		singleRuns:         make(map[string]activeRun),
 		recoveredApprovals: make(map[string]map[string]recoveredApprovalDecision),
@@ -397,18 +394,7 @@ func NewService(store runtimeStore, workspaceRoot string, options ...ServiceOpti
 			service.shellRuntime.shutdown()
 		}
 		_ = service.jobs.shutdown(context.Background())
-		_ = service.lsp.Close(context.Background())
 	}()
-	if settings.resources != nil && settings.resources.Handler("xd") == nil {
-		if err := settings.resources.Register("xd", newASTXDevHandler(service.ast, settings.resources)); err != nil {
-			return nil, fmt.Errorf("register xd resources: %w", err)
-		}
-	}
-	if settings.resources != nil && settings.resources.Handler("ssh") == nil {
-		if err := settings.resources.Register("ssh", newSSHResourceHandler(service.lsp, settings.network)); err != nil {
-			return nil, fmt.Errorf("register ssh resources: %w", err)
-		}
-	}
 	if settings.resources != nil && settings.memory != nil && settings.resources.Handler("memory") == nil {
 		if err := settings.resources.Register("memory", memoryResourceHandler{memory: settings.memory}); err != nil {
 			return nil, fmt.Errorf("register memory resources: %w", err)
@@ -456,12 +442,6 @@ func (s *Service) endRuntimeWork() {
 func (s *Service) SetHubPeerBroker(broker HubPeerBroker) {
 	if s != nil {
 		s.hubPeers.set(broker)
-	}
-}
-
-func (s *Service) SetFileMutationBroker(broker FileMutationBroker) {
-	if s != nil {
-		s.fileBroker.set(broker)
 	}
 }
 
@@ -1858,10 +1838,10 @@ func (s *Service) WorkspaceDrivers(ctx context.Context, root string) ([]tool.Dri
 
 	var editDriver tool.Driver
 	if s.allowWrite {
-		editDriver = newHashlineDriver(absoluteRoot, snapshotDriver, s.hashlineClipboard, s.fileBroker)
+		editDriver = newHashlineDriver(absoluteRoot, snapshotDriver, s.hashlineClipboard)
 		drivers = append(drivers,
 			editDriver,
-			newWriteDriver(absoluteRoot, snapshotDriver, s.resources, s.fileBroker),
+			newWriteDriver(absoluteRoot, snapshotDriver, s.resources),
 			gofmtDriver{workspace: workspace},
 		)
 	}
@@ -1870,20 +1850,11 @@ func (s *Service) WorkspaceDrivers(ctx context.Context, root string) ([]tool.Dri
 		drivers = append(drivers, gitDiffDriver{root: absoluteRoot})
 	}
 	drivers = append(drivers, newReliableSearchDriver(absoluteRoot, snapshotDriver, s.resources))
-	drivers = append(drivers, newASTGrepDriver(absoluteRoot, s.ast, snapshotDriver, s.resources))
 	drivers = append(drivers, newGlobDriver(workspace))
-	drivers = append(drivers, newLSPDriver(absoluteRoot, s.lsp, false))
-	drivers = append(drivers, newDebugDriver(absoluteRoot, s.lsp, false))
-	drivers = append(drivers, newEvalDriver(absoluteRoot, s.lsp))
-	drivers = append(drivers, newBrowserDriver(absoluteRoot, s.lsp, s.allowNetwork))
-	drivers = append(drivers, newComputerDriver(absoluteRoot, s.lsp))
-	drivers = append(drivers, newWebSearchDriver(absoluteRoot, s.lsp, s.allowNetwork))
-	drivers = append(drivers, newGitHubDriver(absoluteRoot, s.lsp, s.allowNetwork))
-	hub := newHubDriver(absoluteRoot, s.lsp, s.jobs)
+	hub := newHubDriver(absoluteRoot, s.jobs)
 	hub.peers = s.hubPeers
+	hub.native, hub.shellPolicy, hub.networkPolicy = s.nativeToolHost(), s.shellPolicy, s.allowNetwork
 	drivers = append(drivers, hub)
-	drivers = append(drivers, newImageGenDriver(absoluteRoot, s.lsp, s.allowNetwork))
-	drivers = append(drivers, newTTSDriver(absoluteRoot, s.lsp))
 	drivers = append(drivers, newMemoryToolDrivers(s.memory)...)
 	if s.allowWrite {
 		if readDriver != nil && editDriver != nil {
@@ -1894,6 +1865,7 @@ func (s *Service) WorkspaceDrivers(ctx context.Context, root string) ([]tool.Dri
 	if s.shellPolicy != "deny" {
 		drivers = append(drivers, newRuntimeShellDriver(absoluteRoot, s.shellPolicy, s.allowNetwork, s.shellRuntime, s.jobs))
 	}
+	drivers = append(drivers, s.nativeToolDrivers(absoluteRoot, editDriver)...)
 	if workspace.Root() == s.workspaceRoot {
 		s.externalMu.Lock()
 		drivers = append(drivers, s.externalDrivers...)
@@ -2126,10 +2098,6 @@ func (s *Service) shutdown(ctx context.Context) error {
 	if s.jobs != nil {
 		jobsErr = s.jobs.shutdown(ctx)
 	}
-	var lspErr error
-	if s.lsp != nil {
-		lspErr = s.lsp.Close(ctx)
-	}
 	if s.shellRuntime != nil {
 		s.shellRuntime.shutdown()
 	}
@@ -2150,14 +2118,14 @@ func (s *Service) shutdown(ctx context.Context) error {
 	}()
 	select {
 	case <-ctx.Done():
-		return errors.Join(ctx.Err(), durableErr, jobsErr, lspErr, externalErr)
+		return errors.Join(ctx.Err(), durableErr, jobsErr, externalErr)
 	case <-shellDone:
 	}
 	var storeErr error
 	if closer, ok := s.store.(agentruntime.ProviderCloser); ok {
 		storeErr = closer.Close(ctx)
 	}
-	return errors.Join(durableErr, jobsErr, lspErr, externalErr, storeErr)
+	return errors.Join(durableErr, jobsErr, externalErr, storeErr)
 }
 
 // ActiveShellExecutions returns a race-safe point-in-time status view.
@@ -2165,7 +2133,14 @@ func (s *Service) ActiveShellExecutions() []ShellExecutionSnapshot {
 	if s == nil || s.shellRuntime == nil {
 		return nil
 	}
-	return s.shellRuntime.snapshot()
+	result := s.shellRuntime.snapshot()
+	s.externalMu.Lock()
+	host := s.native
+	s.externalMu.Unlock()
+	if host != nil {
+		result = append(result, host.activeProcesses()...)
+	}
+	return result
 }
 
 // UpdateShellMaxConcurrency changes the foreground shell admission limit for

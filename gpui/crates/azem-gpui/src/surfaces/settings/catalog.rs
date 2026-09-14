@@ -89,23 +89,17 @@ pub(super) fn settings_catalog_body(
             .get("quotaAvailable")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
-        let quota_remaining = provider_quota_remaining(&provider).unwrap_or(0.);
-        let quota_period = provider
-            .get("quotaPeriod")
-            .and_then(serde_json::Value::as_str)
+        let quota_windows = provider_quota_windows(&provider);
+        let quota_warning = provider["quotaWarning"]
+            .as_str()
             .unwrap_or_default()
-            .to_string();
-        let quota_balance = provider
-            .get("quotaBalance")
-            .and_then(serde_json::Value::as_str)
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or("0.00")
-            .to_string();
-        let models = provider
-            .get("models")
-            .and_then(serde_json::Value::as_array)
-            .cloned()
-            .unwrap_or_default();
+            .to_owned();
+        let quota_balance = provider["quotaBalance"]
+            .as_str()
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
+        let models = crate::model_selection::catalog_models(&provider);
         let enabled_count = models
             .iter()
             .filter(|model| {
@@ -151,8 +145,7 @@ pub(super) fn settings_catalog_body(
                         .map(|row_index| {
                             let mut row = div().w_full().h(px(144.)).flex().gap(px(12.));
                             for column in 0..2 {
-                                let Some((index, model)) =
-                                    model_rows.get(row_index * 2 + column)
+                                let Some((index, model)) = model_rows.get(row_index * 2 + column)
                                 else {
                                     row = row.child(div().min_w_0().flex_1());
                                     continue;
@@ -168,11 +161,26 @@ pub(super) fn settings_catalog_body(
                                     .and_then(serde_json::Value::as_bool)
                                     .unwrap_or(false);
                                 let capabilities = model_capability_keys(model, subscription);
-                                let provider_target = model_provider_id.clone();
-                                let model_target = model_id.clone();
-                                let session_target = model_session_id.clone();
+                                let extended_context = model["extendedContext"] == true;
+                                let extended_context_label = format!(
+                                    "{} · {}",
+                                    model_name,
+                                    locale.text("ui.extendedContext")
+                                );
+                                let context_request = model_extended_context_request(
+                                    model,
+                                    &model_provider_id,
+                                    &model_session_id,
+                                );
+                                let availability_request = model_availability_request(
+                                    model,
+                                    &model_provider_id,
+                                    &model_session_id,
+                                );
+                                let variant_count =
+                                    model["modelIds"].as_array().map_or(0, Vec::len);
                                 let card = div()
-                                    .id(("provider-model-card", *index))
+                                    .id(format!("provider-model-card-{model_provider_id}-{model_id}"))
                                     .w_full()
                                     .h(px(132.))
                                     .p(px(15.))
@@ -224,7 +232,7 @@ pub(super) fn settings_catalog_body(
                                                     )
                                                     .child(
                                                         div()
-                                                            .id(("model-enabled", *index))
+                                                            .id(format!("model-enabled-{model_provider_id}-{model_id}"))
                                                             .role(Role::Button)
                                                             .aria_label(if disabled {
                                                                 locale.text("ui.enableModel")
@@ -233,54 +241,123 @@ pub(super) fn settings_catalog_body(
                                                             })
                                                             .aria_selected(!disabled)
                                                             .tab_stop(true)
-                                                            .w(px(38.))
-                                                            .h(px(22.))
-                                                            .rounded_full()
-                                                            .bg(if disabled {
-                                                                palette.border_strong
-                                                            } else {
-                                                                palette.positive
-                                                            })
-                                                            .p(px(2.))
-                                                            .flex()
-                                                            .justify_end()
-                                                            .when(disabled, |toggle| {
-                                                                toggle.justify_start()
-                                                            })
                                                             .cursor_pointer()
-                                                            .on_click(cx.listener(move |
-                                                                this, _, _, cx,
-                                                            | {
-                                                                this.runtime.request(
-                                                                    Method::Execute,
-                                                                    json!({
-                                                                        "kind": "set_model_enabled",
-                                                                        "sessionId": session_target,
-                                                                        "target": provider_target,
-                                                                        "name": model_target,
-                                                                        "decision": disabled.to_string(),
-                                                                    }),
-                                                                );
-                                                                cx.notify();
-                                                            }))
-                                                            .child(
-                                                                div()
-                                                                    .size(px(18.))
-                                                                    .rounded_full()
-                                                                    .bg(palette.paper),
-                                                            ),
+                                                            .on_click(cx.listener(
+                                                                move |this, _, _, cx| {
+                                                                    this.runtime.request(
+                                                                        Method::Execute,
+                                                                        availability_request
+                                                                            .clone(),
+                                                                    );
+                                                                    cx.notify();
+                                                                },
+                                                            ))
+                                                            .child(settings_switch(!disabled, palette, cx)),
                                                     ),
                                             ),
                                     )
+                                    .when(variant_count > 1 || model["noZdr"] == true, |card| {
+                                        let enabled_variants =
+                                            model["enabledVariantCount"].as_u64().unwrap_or(0);
+                                        let mut inventory = locale.format(
+                                            "model.variantCount",
+                                            &[("count", variant_count.to_string())],
+                                        );
+                                        if enabled_variants > 0
+                                            && enabled_variants < variant_count as u64
+                                        {
+                                            inventory.push_str(&format!(
+                                                " · {enabled_variants}/{variant_count} {}",
+                                                locale.text("ui.enabled")
+                                            ));
+                                        }
+                                        if model["noZdr"] == true {
+                                            inventory.push_str(" · ");
+                                            inventory.push_str(locale.text("model.dataRetention"));
+                                        }
+                                        card.child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(palette.muted)
+                                                .child(inventory),
+                                        )
+                                    })
                                     .child(div().flex_1())
-                                    .when(!capabilities.is_empty(), |card| {
-                                        card.child(settings_model_capabilities(
-                                            &capabilities,
-                                            *index,
-                                            palette,
-                                            locale,
-                                        ))
-                                    });
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_wrap()
+                                            .items_center()
+                                            .gap(px(6.))
+                                            .when(!capabilities.is_empty(), |footer| {
+                                                footer.child(settings_model_capabilities(
+                                                    &capabilities,
+                                                    *index,
+                                                    palette,
+                                                    locale,
+                                                ))
+                                            })
+                                            .when_some(context_request, |footer, request| {
+                                                footer.child(
+                                                    div()
+                                                        .id(format!("context-selector-{model_provider_id}-{model_id}"))
+                                                        .relative()
+                                                        .ml_auto()
+                                                        .h(px(28.))
+                                                        .p(px(2.))
+                                                        .rounded(px(8.))
+                                                        .border_1()
+                                                        .border_color(palette.border)
+                                                        .bg(palette.paper_muted)
+                                                        .flex()
+                                                        .items_center()
+                                                        .gap(px(2.))
+                                                        .child(
+                                                            div()
+                                                                .absolute()
+                                                                .top(px(3.))
+                                                                .w(px(44.))
+                                                                .h(px(22.))
+                                                                .rounded(px(5.))
+                                                                .bg(palette.paper)
+                                                                .with_spring("context-indicator", control_animation(if extended_context { 1. } else { 0. }, cx), |indicator, phase| {
+                                                                    indicator.left(px(3. + 46. * phase))
+                                                                }),
+                                                        )
+                                                        .children([("272K", false), ("1M", true)].into_iter().map(|(label, extended)| {
+                                                            let selected = extended_context == extended;
+                                                            let request = request.clone();
+                                                            div()
+                                                                .id(format!("model-context-{model_provider_id}-{model_id}-{label}"))
+                                                                .role(Role::Button)
+                                                                .aria_label(format!("{extended_context_label} · {label}"))
+                                                                .aria_selected(selected)
+                                                                .tab_stop(true)
+                                                                .h(px(22.))
+                                                                .w(px(44.))
+                                                                .flex_shrink_0()
+                                                                .px(px(8.))
+                                                                .rounded(px(5.))
+                                                                .text_size(px(11.))
+                                                                .font_weight(gpui::FontWeight::MEDIUM)
+                                                                .text_color(if selected { palette.ink } else { palette.muted })
+                                                                .flex()
+                                                                .items_center()
+                                                                .justify_center()
+                                                                .cursor_pointer()
+                                                                .hover(move |style| style.text_color(palette.ink))
+                                                                .active(|style| style.opacity(0.7))
+                                                                .when(!selected, |segment| {
+                                                                    segment.on_click(cx.listener(move |this, _, _, cx| {
+                                                                        this.runtime.request(Method::Execute, request.clone());
+                                                                        cx.notify();
+                                                                    }))
+                                                                })
+                                                                .child(label)
+                                                        })),
+                                                )
+                                            }),
+                                    );
                                 row = row.child(div().min_w_0().flex_1().child(card));
                             }
                             row
@@ -435,27 +512,13 @@ pub(super) fn settings_catalog_body(
                                         })
                                         .aria_selected(enabled)
                                         .tab_stop(true)
-                                        .w(px(38.))
-                                        .h(px(22.))
-                                        .rounded_full()
-                                        .bg(if enabled {
-                                            palette.positive
-                                        } else {
-                                            palette.border_strong
-                                        })
-                                        .p(px(2.))
-                                        .flex()
-                                        .justify_end()
-                                        .when(!enabled, |toggle| toggle.justify_start())
                                         .cursor_pointer()
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.native_settings.catalog_enabled =
                                                 !this.native_settings.catalog_enabled;
                                             cx.notify();
                                         }))
-                                        .child(
-                                            div().size(px(18.)).rounded_full().bg(palette.paper),
-                                        ),
+                                        .child(settings_switch(enabled, palette, cx)),
                                 )
                             }),
                     ),
@@ -470,6 +533,14 @@ pub(super) fn settings_catalog_body(
                     cx,
                 ))
             })
+            .when(!quota_warning.is_empty(), |detail| {
+                detail.child(
+                    div()
+                        .text_sm()
+                        .text_color(palette.muted)
+                        .child(quota_warning),
+                )
+            })
             .when(quota_available, |detail| {
                 detail.child(
                     div()
@@ -483,65 +554,32 @@ pub(super) fn settings_catalog_body(
                         .flex()
                         .flex_col()
                         .gap_3()
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .text_color(palette.ink)
-                                        .text_sm()
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .child(locale.format(
-                                            "ui.weeklyAllowanceArg0Remaining",
-                                            &[("arg0", format!("{:.0}", quota_remaining))],
-                                        )),
-                                )
-                                .when(!quota_period.is_empty(), |row| {
-                                    row.child(
+                        .children(quota_windows.into_iter().map(
+                            |(period, remaining, resets_at)| {
+                                quota_window(&period, remaining, resets_at, palette, locale)
+                            },
+                        ))
+                        .when(!quota_balance.is_empty(), |card| {
+                            card.child(div().h(px(1.)).bg(palette.border)).child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .child(
                                         div()
-                                            .text_color(palette.faint)
+                                            .flex_1()
+                                            .text_color(palette.muted)
                                             .text_xs()
-                                            .child(quota_period),
+                                            .child(locale.text("ui.extraCredits")),
                                     )
-                                }),
-                        )
-                        .child(
-                            div()
-                                .w_full()
-                                .h(px(6.))
-                                .rounded_full()
-                                .bg(palette.paper_muted)
-                                .overflow_hidden()
-                                .child(
-                                    div()
-                                        .w(relative((quota_remaining / 100.) as f32))
-                                        .h_full()
-                                        .rounded_full()
-                                        .bg(palette.positive),
-                                ),
-                        )
-                        .child(div().h(px(1.)).bg(palette.border))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .text_color(palette.muted)
-                                        .text_xs()
-                                        .child(locale.text("ui.extraCredits")),
-                                )
-                                .child(
-                                    div()
-                                        .text_color(palette.positive)
-                                        .text_sm()
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .child(format!("US${quota_balance}")),
-                                ),
-                        ),
+                                    .child(
+                                        div()
+                                            .text_color(palette.positive)
+                                            .text_sm()
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .child(format!("US${quota_balance}")),
+                                    ),
+                            )
+                        }),
                 )
             })
             .child(
@@ -749,6 +787,11 @@ pub(super) fn settings_catalog_body(
                                         let selected_provider_json = provider.clone();
                                         move |this, _, _, cx| {
                                             this.settings_provider = Some(selected_id.clone());
+                                            if selected_provider_json["subscription"].as_bool()
+                                                == Some(true)
+                                            {
+                                                this.refresh_model_catalog();
+                                            }
                                             this.load_catalog_provider_fields(
                                                 &selected_provider_json,
                                                 cx,
@@ -894,6 +937,38 @@ pub(super) fn settings_catalog_body(
         )
         .child(detail)
         .into_any_element()
+}
+
+pub(in crate::surfaces) fn model_availability_request(
+    model: &serde_json::Value,
+    provider_id: &str,
+    session_id: &str,
+) -> serde_json::Value {
+    json!({
+        "kind": "set_model_enabled",
+        "sessionId": session_id,
+        "target": provider_id,
+        "decision": (model["disabled"] == true).to_string(),
+        "payload": {"modelIds": model.get("modelIds").cloned().unwrap_or_else(|| json!([model["id"]]))},
+    })
+}
+
+fn model_extended_context_request(
+    model: &serde_json::Value,
+    provider_id: &str,
+    session_id: &str,
+) -> Option<serde_json::Value> {
+    (provider_id == "chatgpt"
+        && matches!(model["id"].as_str(), Some("gpt-5.6-sol" | "gpt-6-astra")))
+    .then(|| {
+        json!({
+            "kind": "set_model_extended_context",
+            "sessionId": session_id,
+            "target": provider_id,
+            "name": model["id"],
+            "decision": (model["extendedContext"] != true).to_string(),
+        })
+    })
 }
 
 pub(in crate::surfaces) fn model_matches_query(model: &serde_json::Value, query: &str) -> bool {
@@ -1290,6 +1365,7 @@ fn provider_detail_name(provider: &serde_json::Value, provider_id: &str) -> Stri
         "chatgpt" => "ChatGPT".to_string(),
         "grok" => "Grok".to_string(),
         "cursor" => "Cursor".to_string(),
+        "devin" => "Devin".to_string(),
         _ => provider_display_name(provider, provider_id),
     }
 }
@@ -1304,6 +1380,7 @@ fn provider_preference_rank(provider_id: &str, display_name: &str) -> usize {
         "chatgpt",
         "grok",
         "cursor",
+        "devin",
         "deepseek",
         "kimi for coding",
         "opencode go",
@@ -1386,6 +1463,95 @@ pub(in crate::surfaces) fn provider_quota_remaining(provider: &serde_json::Value
         .and_then(serde_json::Value::as_f64)
         .unwrap_or(0.);
     Some((100. - used).clamp(0., 100.))
+}
+
+pub(in crate::surfaces) fn provider_quota_windows(
+    provider: &serde_json::Value,
+) -> Vec<(String, f64, i64)> {
+    let Some(remaining) = provider_quota_remaining(provider) else {
+        return Vec::new();
+    };
+    let windows: Vec<_> = provider["quotaBreakdown"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|window| {
+            let id = window["id"].as_str()?;
+            if !matches!(id, "daily" | "weekly") {
+                return None;
+            }
+            Some((
+                id.to_owned(),
+                (100. - window["usedPercent"].as_f64().unwrap_or(0.)).clamp(0., 100.),
+                window["resetsAt"].as_i64().unwrap_or(0),
+            ))
+        })
+        .collect();
+    if windows.is_empty() {
+        vec![(
+            provider["quotaPeriod"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+            remaining,
+            provider["quotaResetsAt"].as_i64().unwrap_or(0),
+        )]
+    } else {
+        windows
+    }
+}
+
+fn quota_window(
+    period: &str,
+    remaining: f64,
+    resets_at: i64,
+    palette: ThemePalette,
+    locale: Locale,
+) -> gpui::Div {
+    let key = match period {
+        "daily" => "ui.dailyAllowanceArg0Remaining",
+        "weekly" => "ui.weeklyAllowanceArg0Remaining",
+        "monthly" => "ui.monthlyAllowanceArg0Remaining",
+        _ => "ui.allowanceArg0Remaining",
+    };
+    let reset = (resets_at > 0)
+        .then(|| DateTime::from_timestamp(resets_at, 0))
+        .flatten()
+        .map(|time| time.with_timezone(&Local).format("%m-%d %H:%M").to_string());
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(
+            div()
+                .text_color(palette.ink)
+                .text_sm()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .child(locale.format(key, &[("arg0", format!("{remaining:.0}"))])),
+        )
+        .child(
+            div()
+                .w_full()
+                .h(px(6.))
+                .rounded_full()
+                .bg(palette.paper_muted)
+                .overflow_hidden()
+                .child(
+                    div()
+                        .w(relative((remaining / 100.) as f32))
+                        .h_full()
+                        .rounded_full()
+                        .bg(palette.positive),
+                ),
+        )
+        .when_some(reset, |row, time| {
+            row.child(
+                div()
+                    .text_color(palette.faint)
+                    .text_xs()
+                    .child(locale.format("ui.quotaResetsAt", &[("time", time)])),
+            )
+        })
 }
 
 fn format_credit_balance(balance: &str) -> String {
@@ -1535,4 +1701,104 @@ fn push_unique(values: &mut Vec<String>, value: &str) {
 
 pub(in crate::surfaces) fn pick<T>(condition: bool, yes: T, no: T) -> T {
     if condition { yes } else { no }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extended_context_switch_targets_only_the_two_chatgpt_models() {
+        for model_id in ["gpt-5.6-sol", "gpt-6-astra"] {
+            for enabled in [false, true] {
+                let model = json!({"id": model_id, "extendedContext": enabled, "disabled": true});
+                assert_eq!(
+                    model_extended_context_request(&model, "chatgpt", "session-1"),
+                    Some(json!({
+                        "kind": "set_model_extended_context", "sessionId": "session-1",
+                        "target": "chatgpt", "name": model_id, "decision": (!enabled).to_string(),
+                    }))
+                );
+                for provider in ["cursor", "devin", "openai", "grok"] {
+                    assert!(
+                        model_extended_context_request(&model, provider, "session-1").is_none()
+                    );
+                }
+            }
+        }
+        assert!(
+            model_extended_context_request(&json!({"id": "gpt-5.6-luna"}), "chatgpt", "session-1")
+                .is_none()
+        );
+        let mut state = AppState::default();
+        state.apply_direct_event(json!({"kind": "model_providers", "modelProviders": [{
+            "id": "chatgpt", "models": [{"id": "gpt-6-astra"}]
+        }]}));
+        for enabled in [true, false] {
+            let window = if enabled { 1_050_000 } else { 272_000 };
+            let model = json!({"id": "gpt-6-astra", "extendedContext": enabled,
+                "contextWindow": window, "supportsTools": true});
+            state.apply_direct_event(json!({"kind": "model_catalog", "data": {
+                "provider": "chatgpt", "models": json!([model]).to_string()
+            }}));
+            let row = &state.catalogs.providers[0]["models"][0];
+            assert_eq!(row["contextWindow"], window);
+            assert_eq!(row["extendedContext"], enabled);
+            assert_eq!(
+                model_extended_context_request(row, "chatgpt", "session-1").unwrap()["decision"],
+                (!enabled).to_string()
+            );
+        }
+    }
+
+    #[test]
+    fn catalog_switch_and_search_keep_every_variant_in_the_family() {
+        for provider_id in ["devin", "cursor"] {
+            let mut provider = json!({"id": provider_id, "enabled": false, "models": [
+                {"id":"gpt-6-astra-low", "name":"GPT-6 Astra Low Thinking", "disabled":true},
+                {"id":"gpt-6-astra-high-fast", "name":"GPT-6 Astra High Thinking Fast", "disabled":true,
+                 "aliases":["legacy-high"], "capabilities":["fast"], "inputModalities":["image"]},
+                {"id":"other-model", "name":"Other Model", "disabled":true}
+            ]});
+            if provider_id == "cursor" {
+                provider["models"][1]["name"] = json!("GPT-6 Astra High Thinking Fast (NO ZDR)");
+            }
+            for enabled_count in 0..=2 {
+                for index in 0..2 {
+                    provider["models"][index]["disabled"] = json!(index >= enabled_count);
+                }
+                let rows = crate::model_selection::catalog_models(&provider);
+                assert_eq!(rows.len(), 2);
+                let matches: Vec<_> = rows
+                    .iter()
+                    .filter(|model| model_matches_query(model, "legacy-high"))
+                    .collect();
+                assert_eq!(matches.len(), 1);
+                let family = matches[0];
+                assert_eq!(catalog_model_name(family, ""), "GPT-6 Astra");
+                assert!(model_matches_query(family, "gpt-6-astra-high-fast"));
+                assert_eq!(family["enabledVariantCount"], enabled_count);
+                assert_eq!(family["disabled"], enabled_count == 0);
+                assert_eq!(family["noZdr"], provider_id == "cursor");
+                assert!(model_capability_keys(family, true).contains(&"in:image".to_owned()));
+                assert_eq!(
+                    model_availability_request(family, provider_id, "session-1"),
+                    json!({
+                        "kind":"set_model_enabled", "sessionId":"session-1", "target":provider_id,
+                        "decision":(enabled_count == 0).to_string(),
+                        "payload":{"modelIds":["gpt-6-astra-low", "gpt-6-astra-high-fast"]}
+                    })
+                );
+                assert_eq!(rows[1]["disabled"], true);
+            }
+        }
+        let generic =
+            json!({"id":"custom", "models":[{"id":"gpt-low", "name":"GPT Low", "disabled":true}]});
+        let rows = crate::model_selection::catalog_models(&generic);
+        assert_eq!(rows, *generic["models"].as_array().unwrap());
+        assert_eq!(
+            model_availability_request(&rows[0], "custom", "session-1")["payload"]["modelIds"],
+            json!(["gpt-low"])
+        );
+    }
 }

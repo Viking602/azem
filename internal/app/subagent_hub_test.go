@@ -148,7 +148,7 @@ func TestAgentHubSendRevivesParkedAgentWithStableName(t *testing.T) {
 	if _, err := runtime.Drivers(secondParent); err != nil {
 		t.Fatal(err)
 	}
-	sent, err := runtime.ExecuteHubPeer(ctx, agentservice.HubPeerRequest{Operation: "send", Caller: agentservice.Invocation{AgentID: "azem-main", TeamRunID: "parent-two"}, Params: map[string]any{
+	sent, err := runtime.ExecuteHubPeer(ctx, agentservice.HubPeerRequest{Operation: "send", ToolCallID: "resume-call", Caller: agentservice.Invocation{AgentID: "azem-main", TeamRunID: "parent-two"}, Params: map[string]any{
 		"to": "Researcher", "message": "Inspect the new evidence",
 	}})
 	if err != nil || sent.IsError {
@@ -177,6 +177,9 @@ func TestAgentHubSendRevivesParkedAgentWithStableName(t *testing.T) {
 	snapshots := runtime.Query(ctx, "session", []string{revivedID}, 2*time.Second)
 	if len(snapshots) != 1 || !snapshots[0].Found || snapshots[0].Run.State != agentservice.SubagentCompleted {
 		t.Fatalf("revived peer completion = %#v", snapshots)
+	}
+	if snapshots[0].Run.ParentToolCallID != "resume-call" {
+		t.Fatalf("revived peer lost its dispatch call: %q", snapshots[0].Run.ParentToolCallID)
 	}
 	runs, err := store.List(ctx, "session")
 	if err != nil || len(runs) != 2 {

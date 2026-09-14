@@ -255,7 +255,7 @@ func testReplaceDriver(t *testing.T, dir string) tool.Driver {
 		t.Fatal("read driver unavailable")
 	}
 	readDriver := newReadDriver(dir, snapshotRead, nil, "deny")
-	editDriver := newHashlineDriver(dir, snapshotRead, newHashlineClipboard(), nil)
+	editDriver := newHashlineDriver(dir, snapshotRead, newHashlineClipboard())
 	return newReplaceDriver(readDriver, editDriver)
 }
 

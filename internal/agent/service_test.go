@@ -1170,15 +1170,16 @@ func TestCallerCancellationKeepsRunNonterminalAndRequiresReconcile(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	stale := *resumed
-	stale.resumeTarget.CheckpointSequence++
-	mismatched, mismatchErr := service.ExecuteRun(ctx, &stale, hyagent.Engine{
+	originalTarget := resumed.resumeTarget
+	resumed.resumeTarget.CheckpointSequence++
+	mismatched, mismatchErr := service.ExecuteRun(ctx, resumed, hyagent.Engine{
 		Provider: scripted.New([]hyprovider.Event{
 			{Kind: hyprovider.EventTextDelta, Text: "must not run", TextPhase: hyprovider.TextPhaseFinalAnswer},
 			{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonComplete},
 		}),
 		Model: "blocking",
 	}, nil)
+	resumed.resumeTarget = originalTarget
 	if !errors.Is(mismatchErr, durable.ErrResumeTargetMismatch) || mismatched.State != ExecutionSuspended {
 		t.Fatalf("stale resume target outcome=%+v error=%v", mismatched, mismatchErr)
 	}

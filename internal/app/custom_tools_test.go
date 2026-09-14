@@ -10,62 +10,7 @@ import (
 
 	"github.com/Viking602/azem/internal/commands"
 	"github.com/Viking602/azem/internal/config"
-	"github.com/Viking602/azem/internal/customtools"
 )
-
-func TestProviderRuntimeExecutesDiscoveredCustomTool(t *testing.T) {
-	module := filepath.Join(t.TempDir(), "custom.ts")
-	if err := os.WriteFile(module, []byte(`
-export default () => ({
-  name: "custom_echo",
-  description: "Echo through the custom host",
-  approval: "read",
-  parameters: {type:"object", properties:{value:{type:"string"}}, required:["value"], additionalProperties:false},
-  async execute(id, params, onUpdate) {
-    onUpdate({content:[{type:"text",text:"custom update"}]});
-    return {content:[{type:"text",text:"custom:" + params.value}], details:{call:id}};
-  }
-});
-`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	harness := newSkillRuntimeHarness(t, "---\nname: demo\ndescription: stable catalog\n---\nstable body\n", nil, func(call int, body string, writer http.ResponseWriter) {
-		switch call {
-		case 1:
-			if !strings.Contains(body, `"name":"custom_echo"`) {
-				t.Errorf("custom tool is absent from provider request: %s", body)
-			}
-			writeProviderToolCall(writer, "custom-response-1", "custom-call", "custom_echo", `{"value":"hello"}`)
-		case 2:
-			if !strings.Contains(body, "custom:hello") {
-				t.Errorf("custom tool result is absent from continuation: %s", body)
-			}
-			writeProviderText(writer, "custom-response-2", "custom tool completed")
-		default:
-			t.Errorf("unexpected provider call %d", call)
-			writeProviderText(writer, "custom-extra", "unexpected")
-		}
-	})
-	host, err := customtools.New(context.Background(), harness.workspace, []string{module})
-	if err != nil {
-		t.Fatal(err)
-	}
-	drivers, err := host.Drivers()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := harness.coding.AttachExternalTools(drivers, host.Close); err != nil {
-		t.Fatal(err)
-	}
-	runID, err := harness.service.StartConfiguredTurn(TurnRequest{SessionID: "custom-tools", Prompt: "use custom echo", Provider: "chatgpt", Model: "gpt-skill", Reasoning: "minimal", AgentMode: "single"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	waitForProviderRun(t, harness.service, runID)
-	if got := harness.calls.Load(); got != 2 {
-		t.Fatalf("provider calls = %d, want 2", got)
-	}
-}
 
 func TestConfiguredTurnExpandsCustomSlashCommandBeforePersistence(t *testing.T) {
 	commandRoot := t.TempDir()

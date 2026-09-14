@@ -12,6 +12,7 @@ import (
 	agentservice "github.com/Viking602/azem/internal/agent"
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/session"
+	"github.com/Viking602/venat/message"
 	"github.com/Viking602/venat/tool"
 )
 
@@ -23,6 +24,10 @@ const (
 	vibeRegistryArtifactKind = session.InternalArtifactKindPrefix + "vibe-registry-v1"
 	vibeListTool             = "vibe_list"
 )
+
+type vibeSessionKey struct {
+	sessionID, name string
+}
 
 type vibeRecord struct {
 	Name       string `json:"id"`
@@ -46,6 +51,25 @@ type vibeDriver struct {
 	runtime   *subagentRuntime
 	parent    subagentParentRuntime
 	routes    config.VibeConfig
+}
+
+const vibeInstructions = `[Trusted Vibe mode]
+You are the read-only director. Never edit files, run commands, grep, build, or verify by execution yourself.
+Drive persistent fast and good worker sessions with vibe_spawn/send/wait/kill/list.
+Workers start blank; give complete briefs, file ownership, constraints, and acceptance checks.
+Keep one session per workstream and send follow-ups to that same name. Work concurrently.
+Use fast for well-specified work and good for design, difficult debugging, and reviewing fast output.
+Wait only when blocked on results; the first settled worker returns while others continue.
+Verify worker claims by reading changed files before accepting them. You own the final answer.`
+
+func legacyVibeCheckpoint(messages []message.Message) bool {
+	for _, current := range messages {
+		if current.Role == message.RoleSystem && isPrivateMessage(current) &&
+			strings.HasPrefix(current.Text, "[Trusted private hook context]\n") && strings.Contains(current.Text, "[Trusted Vibe mode]") {
+			return true
+		}
+	}
+	return false
 }
 
 func vibeDirectorWorkspaceTool(name string) bool {
@@ -136,7 +160,7 @@ func (driver *vibeDriver) spawn(ctx context.Context, call tool.Call) tool.Result
 		return vibeError(call, fmt.Errorf("name must contain 1-48 letters, numbers, underscores, or hyphens"))
 	}
 	driver.runtime.mu.Lock()
-	if record, exists := driver.runtime.vibe[strings.ToLower(input.Name)]; exists && record.State != "dead" {
+	if record, exists := driver.runtime.vibe[vibeSessionKey{driver.parent.SessionID, strings.ToLower(input.Name)}]; exists && record.State != "dead" {
 		driver.runtime.mu.Unlock()
 		return vibeError(call, fmt.Errorf("vibe session %q already exists; use vibe_send", input.Name))
 	}
@@ -157,9 +181,9 @@ func (driver *vibeDriver) spawn(ctx context.Context, call tool.Call) tool.Result
 	record := vibeRecord{Name: input.Name, CLI: input.CLI, RunID: run.ID, State: "running", Model: firstNonempty(route.Model, driver.parent.ModelID)}
 	driver.runtime.mu.Lock()
 	if driver.runtime.vibe == nil {
-		driver.runtime.vibe = make(map[string]vibeRecord)
+		driver.runtime.vibe = make(map[vibeSessionKey]vibeRecord)
 	}
-	driver.runtime.vibe[strings.ToLower(input.Name)] = record
+	driver.runtime.vibe[vibeSessionKey{driver.parent.SessionID, strings.ToLower(input.Name)}] = record
 	driver.runtime.mu.Unlock()
 	if err := driver.persistRegistry(ctx); err != nil {
 		driver.runtime.Cancel(driver.parent.SessionID, run.ID)
@@ -188,7 +212,7 @@ func (driver *vibeDriver) send(ctx context.Context, call tool.Call) tool.Result 
 	if driver.activeRunID(input.Session) != "" {
 		mode = "steered"
 	}
-	response, err := driver.runtime.ExecuteHubPeer(ctx, agentservice.HubPeerRequest{Operation: "send", Caller: agentservice.Invocation{AgentID: "azem-main", TeamRunID: driver.parent.ParentRunID}, Params: map[string]any{"to": input.Session, "message": input.Message}})
+	response, err := driver.runtime.ExecuteHubPeer(ctx, agentservice.HubPeerRequest{Operation: "send", ToolCallID: call.ID, Caller: agentservice.Invocation{AgentID: "azem-main", TeamRunID: driver.parent.ParentRunID}, Params: map[string]any{"to": input.Session, "message": input.Message}})
 	if err != nil || response.IsError {
 		if err == nil {
 			err = fmt.Errorf("%s", response.Content)
@@ -238,7 +262,7 @@ func (driver *vibeDriver) wait(ctx context.Context, call tool.Call) tool.Result 
 	if input.Timeout > 0 {
 		timeout = time.Duration(input.Timeout) * time.Second
 	}
-	snapshots := driver.runtime.Query(ctx, driver.parent.SessionID, ids, timeout)
+	snapshots := driver.runtime.query(ctx, driver.parent.SessionID, ids, timeout, true)
 	settled := make([]map[string]any, 0)
 	stillRunning := make([]string, 0)
 	for _, snapshot := range snapshots {
@@ -247,7 +271,10 @@ func (driver *vibeDriver) wait(ctx context.Context, call tool.Call) tool.Result 
 			continue
 		}
 		if snapshot.Found && subagentTerminal(snapshot.Run.State) {
-			record.State, record.Turns, record.LastOutput, record.LastError = "idle", record.Turns+1, snapshot.Run.Output, snapshot.Run.Error
+			if record.State != "idle" {
+				record.Turns++
+			}
+			record.State, record.LastOutput, record.LastError = "idle", snapshot.Run.Output, snapshot.Run.Error
 			driver.saveRecord(record)
 			settled = append(settled, map[string]any{"id": name, "status": snapshot.Run.State, "resultText": snapshot.Run.Output, "error": snapshot.Run.Error})
 		} else {
@@ -287,7 +314,7 @@ func (driver *vibeDriver) kill(ctx context.Context, call tool.Call) tool.Result 
 	}
 	driver.runtime.mu.Lock()
 	for id, parked := range driver.runtime.parked {
-		if strings.EqualFold(parked.name, input.Session) {
+		if parked.run.SessionID == driver.parent.SessionID && strings.EqualFold(parked.name, input.Session) {
 			delete(driver.runtime.parked, id)
 		}
 	}
@@ -324,7 +351,7 @@ func (driver *vibeDriver) screens(filter []string) []vibeRecord {
 	}
 	result := make([]vibeRecord, 0, len(driver.runtime.vibe))
 	for key, record := range driver.runtime.vibe {
-		if len(allowed) > 0 && !allowed[key] {
+		if key.sessionID != driver.parent.SessionID || len(allowed) > 0 && !allowed[key.name] {
 			continue
 		}
 		if runID := driver.activeRunIDLocked(record.Name); runID != "" {
@@ -340,14 +367,17 @@ func (driver *vibeDriver) screens(filter []string) []vibeRecord {
 func (driver *vibeDriver) record(name string) (vibeRecord, bool) {
 	driver.runtime.mu.Lock()
 	defer driver.runtime.mu.Unlock()
-	record, exists := driver.runtime.vibe[strings.ToLower(name)]
+	record, exists := driver.runtime.vibe[vibeSessionKey{driver.parent.SessionID, strings.ToLower(name)}]
 	return record, exists
 }
 
 func (driver *vibeDriver) recordByRun(runID string) (string, vibeRecord, bool) {
 	driver.runtime.mu.Lock()
 	defer driver.runtime.mu.Unlock()
-	for _, record := range driver.runtime.vibe {
+	for key, record := range driver.runtime.vibe {
+		if key.sessionID != driver.parent.SessionID {
+			continue
+		}
 		if record.RunID == runID {
 			return record.Name, record, true
 		}
@@ -356,11 +386,14 @@ func (driver *vibeDriver) recordByRun(runID string) (string, vibeRecord, bool) {
 }
 
 func (driver *vibeDriver) saveRecord(record vibeRecord) {
+	if record.Name == "" {
+		return
+	}
 	driver.runtime.mu.Lock()
 	if driver.runtime.vibe == nil {
-		driver.runtime.vibe = make(map[string]vibeRecord)
+		driver.runtime.vibe = make(map[vibeSessionKey]vibeRecord)
 	}
-	driver.runtime.vibe[strings.ToLower(record.Name)] = record
+	driver.runtime.vibe[vibeSessionKey{driver.parent.SessionID, strings.ToLower(record.Name)}] = record
 	driver.runtime.mu.Unlock()
 }
 
@@ -388,16 +421,16 @@ func restoreVibeRegistry(runtime *subagentRuntime, parent subagentParentRuntime)
 	if state.Version != 1 {
 		return fmt.Errorf("Vibe registry version %d is unsupported", state.Version)
 	}
-	runtime.mu.Lock()
-	if runtime.vibe == nil {
-		runtime.vibe = make(map[string]vibeRecord)
-	}
+	driver := &vibeDriver{runtime: runtime, parent: parent}
 	for _, record := range state.Records {
-		if record.Name != "" {
-			runtime.vibe[strings.ToLower(record.Name)] = record
+		run, err := runtime.store.Get(runtime.ctx, record.RunID)
+		if err != nil {
+			return fmt.Errorf("load Vibe worker owner: %w", err)
+		}
+		if run.SessionID == parent.SessionID {
+			driver.saveRecord(record)
 		}
 	}
-	runtime.mu.Unlock()
 	return nil
 }
 
@@ -407,7 +440,10 @@ func (driver *vibeDriver) persistRegistry(ctx context.Context) error {
 	}
 	driver.runtime.mu.Lock()
 	records := make([]vibeRecord, 0, len(driver.runtime.vibe))
-	for _, record := range driver.runtime.vibe {
+	for key, record := range driver.runtime.vibe {
+		if key.sessionID != driver.parent.SessionID {
+			continue
+		}
 		records = append(records, record)
 	}
 	driver.runtime.mu.Unlock()
@@ -424,7 +460,7 @@ func (driver *vibeDriver) persistRegistry(ctx context.Context) error {
 
 func (driver *vibeDriver) activeRunIDLocked(name string) string {
 	for id, active := range driver.runtime.active {
-		if strings.EqualFold(active.name, name) {
+		if active.run.SessionID == driver.parent.SessionID && strings.EqualFold(active.name, name) {
 			return id
 		}
 	}

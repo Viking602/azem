@@ -52,7 +52,7 @@ func TestDiscoveredContextFilesJoinStaticInstructionIdentity(t *testing.T) {
 	projection, err := harness.service.sessions.LoadProjection(context.Background(), "context-files")
 	requireAppTestNoError(t, err)
 	projectInstructions := contextfiles.Render(result) + "\n\n" + rules.Render(ruleResult, contextfiles.Render(result))
-	_, expected := turnInstructionsWithProject(false, projectInstructions)
+	_, expected := turnInstructionsWithProject(false, projectInstructions, "single")
 	if projection.ModelHistory.InstructionFingerprint != expected || projection.ModelHistory.StaticPrefixHash == mainInstructionFingerprint {
 		t.Fatalf("context instruction identity = %#v, want %s", projection.ModelHistory, expected)
 	}

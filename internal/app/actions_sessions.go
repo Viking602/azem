@@ -135,6 +135,10 @@ func (s *Service) executeManualCompaction(ctx context.Context, sessionID string)
 		return err
 	}
 	projection.Usage = cleared
+	agents, err := s.projectFusionSession(ctx, &projection)
+	if err != nil {
+		return err
+	}
 	blocks, err := json.Marshal(projection.Blocks)
 	if err != nil {
 		return err
@@ -149,7 +153,7 @@ func (s *Service) executeManualCompaction(ctx context.Context, sessionID string)
 	}
 	s.emit(ctx, Event{
 		Kind: EventSessionLoaded, SessionID: sessionID, State: "compacted",
-		Data: sessionProjectionData(projection, string(blocks)), AgentSnapshots: s.subagentSnapshots(ctx, sessionID), Todo: &todo, Recap: currentRecap,
+		Data: sessionProjectionData(projection, string(blocks)), AgentSnapshots: agents, Todo: &todo, Recap: currentRecap,
 	})
 	_ = s.emitContextProfile(ctx, sessionID)
 	_ = s.dispatchLifecycle(ctx, hooks.PostCompact, s.hookMetadata(sessionID, ""), func(e *hooks.Envelope) {

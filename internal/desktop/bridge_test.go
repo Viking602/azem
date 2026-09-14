@@ -526,8 +526,11 @@ func TestAllowedDesktopActions(t *testing.T) {
 	if !allowedAction(azemapp.ActionSetQueueMode) {
 		t.Fatal("queue mode must be configurable from the desktop")
 	}
-	if !allowedAction(azemapp.ActionSetSessionPreferences) {
+	if !allowedAction(azemapp.ActionSetSessionPreferences) || !allowedAction(azemapp.ActionSetSessionMode) {
 		t.Fatal("session preferences must be configurable from the desktop")
+	}
+	if !allowedAction(azemapp.ActionSetModelExtendedContext) {
+		t.Fatal("model extended context must be configurable from the desktop")
 	}
 	if !allowedAction(azemapp.ActionSetChatGPTFastMode) {
 		t.Fatal("ChatGPT fast mode must be configurable from the desktop")

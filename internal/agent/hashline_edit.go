@@ -88,7 +88,6 @@ type hashlineDriver struct {
 	root         string
 	snapshotRead tool.Driver
 	clipboard    *hashlineClipboard
-	broker       *fileMutationBrokerRef
 }
 
 type hashlineInput struct {
@@ -148,11 +147,11 @@ type originalFileState struct {
 	mode os.FileMode
 }
 
-func newHashlineDriver(root string, snapshotRead tool.Driver, clipboard *hashlineClipboard, broker *fileMutationBrokerRef) tool.Driver {
+func newHashlineDriver(root string, snapshotRead tool.Driver, clipboard *hashlineClipboard) tool.Driver {
 	if clipboard == nil {
 		clipboard = newHashlineClipboard()
 	}
-	return &hashlineDriver{root: root, snapshotRead: snapshotRead, clipboard: clipboard, broker: broker}
+	return &hashlineDriver{root: root, snapshotRead: snapshotRead, clipboard: clipboard}
 }
 
 func (driver *hashlineDriver) Definition() tool.Definition {
@@ -175,11 +174,11 @@ func (driver *hashlineDriver) Execute(ctx context.Context, call tool.Call, sink 
 	defer driver.clipboard.editMu.Unlock()
 	var input hashlineInput
 	if err := json.Unmarshal(call.Arguments, &input); err != nil {
-		return hashlineError(call, fmt.Errorf("decode arguments: %w", err)), nil
+		return hashlineSyntaxError(call, fmt.Errorf("decode arguments: %w", err)), nil
 	}
 	patch, err := parseHashlinePatch(input.Input)
 	if err != nil {
-		return hashlineError(call, err), nil
+		return hashlineSyntaxError(call, err), nil
 	}
 	root, err := os.OpenRoot(driver.root)
 	if err != nil {
@@ -327,7 +326,7 @@ func parseHashlineLocator(value string, allowGap bool) (hashlineLocator, error) 
 		}
 		end, err := positiveLine(right)
 		if err != nil || end < start {
-			return hashlineLocator{}, errors.New("range end must be at or after its start")
+			return hashlineLocator{}, errors.New("range end must be at or after its start; for insertion use PUT <N:, PUT >N:, or PUT >$: instead of an inverted range")
 		}
 		return hashlineLocator{kind: "range", start: start, end: end}, nil
 	}
@@ -596,15 +595,7 @@ func validateHashlineDestinations(root *os.Root, prepared []*hashlinePreparedFil
 }
 
 func (driver *hashlineDriver) commitPatch(ctx context.Context, root *os.Root, prepared []*hashlinePreparedFile) error {
-	err := driver.commitPatchLocal(ctx, root, prepared)
-	if err == nil || !permissionMutationError(err) {
-		return err
-	}
-	broker := driver.broker.get()
-	if broker == nil {
-		return err
-	}
-	return driver.commitPatchBroker(ctx, root, prepared, broker, err)
+	return driver.commitPatchLocal(ctx, root, prepared)
 }
 
 func (driver *hashlineDriver) commitPatchLocal(ctx context.Context, root *os.Root, prepared []*hashlinePreparedFile) error {
@@ -679,111 +670,6 @@ func (driver *hashlineDriver) commitPatchLocal(ctx context.Context, root *os.Roo
 			return combineRollbackError(err, rollbackErr)
 		}
 		mutated = append(mutated, file.source)
-	}
-	return nil
-}
-
-func (driver *hashlineDriver) commitPatchBroker(ctx context.Context, root *os.Root, prepared []*hashlinePreparedFile, broker FileMutationBroker, originalCause error) error {
-	originals := make(map[string]originalFileState, len(prepared))
-	outputs := make(map[string]*hashlinePreparedFile)
-	for _, file := range prepared {
-		current, err := root.ReadFile(filepath.FromSlash(file.source))
-		if err != nil || string(current) != string(file.rawOriginal) {
-			return fmt.Errorf("%s changed while the brokered patch was prepared", file.source)
-		}
-		originals[file.source] = originalFileState{data: append([]byte(nil), file.rawOriginal...), mode: file.mode}
-		if !file.remove {
-			outputs[file.destination] = file
-		}
-	}
-	writeTargets := make(map[string]string, len(outputs))
-	for destination := range outputs {
-		resolved, err := brokerDestination(driver.root, destination, true)
-		if err != nil {
-			return originalCause
-		}
-		writeTargets[destination] = resolved
-	}
-	deleteTargets := make(map[string]string)
-	for _, file := range prepared {
-		if outputs[file.source] != nil {
-			continue
-		}
-		resolved, err := brokerDestination(driver.root, file.source, false)
-		if err != nil {
-			return originalCause
-		}
-		deleteTargets[file.source] = resolved
-	}
-	destinations := make([]string, 0, len(outputs))
-	for destination := range outputs {
-		destinations = append(destinations, destination)
-	}
-	sort.Strings(destinations)
-	mutated := make([]string, 0, len(destinations)+len(deleteTargets))
-	sessionID := brokerCallerSession(ctx)
-	fail := func() error {
-		if rollbackErr := rollbackBrokeredHashlineFiles(ctx, broker, driver.root, originals, mutated, originalCause, sessionID); rollbackErr != nil {
-			return combineRollbackError(originalCause, rollbackErr)
-		}
-		return originalCause
-	}
-	for _, destination := range destinations {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		handled, _ := broker.BrokerWrite(ctx, writeTargets[destination], []byte(outputs[destination].final), originalCause, sessionID)
-		if !handled {
-			return fail()
-		}
-		mutated = append(mutated, destination)
-	}
-	sources := make([]string, 0, len(deleteTargets))
-	for source := range deleteTargets {
-		sources = append(sources, source)
-	}
-	sort.Strings(sources)
-	for _, source := range sources {
-		handled, _ := broker.BrokerDelete(ctx, deleteTargets[source], originalCause, sessionID, true)
-		if !handled {
-			return fail()
-		}
-		mutated = append(mutated, source)
-	}
-	return nil
-}
-
-func rollbackBrokeredHashlineFiles(ctx context.Context, broker FileMutationBroker, rootPath string, originals map[string]originalFileState, mutated []string, cause error, sessionID string) error {
-	var failures []string
-	seen := make(map[string]bool, len(mutated))
-	for index := len(mutated) - 1; index >= 0; index-- {
-		path := mutated[index]
-		if seen[path] {
-			continue
-		}
-		seen[path] = true
-		original, existed := originals[path]
-		if existed {
-			destination, err := brokerDestination(rootPath, path, true)
-			if err == nil {
-				handled, brokerErr := broker.BrokerWrite(ctx, destination, original.data, cause, sessionID)
-				if handled && brokerErr == nil {
-					continue
-				}
-			}
-		} else {
-			destination, err := brokerDestination(rootPath, path, false)
-			if err == nil {
-				handled, brokerErr := broker.BrokerDelete(ctx, destination, cause, sessionID, true)
-				if handled && brokerErr == nil {
-					continue
-				}
-			}
-		}
-		failures = append(failures, path)
-	}
-	if len(failures) > 0 {
-		return fmt.Errorf("extension broker could not restore %s", strings.Join(failures, ", "))
 	}
 	return nil
 }
@@ -978,7 +864,11 @@ func hashlineClipboardScope(ctx context.Context, root string) string {
 }
 
 func hashlineError(call tool.Call, err error) tool.Result {
-	return tool.Result{ToolCallID: call.ID, Name: call.Name, Content: "edit_hashline rejected: " + err.Error() + ". Re-read affected lines and use their current [PATH#TAG].", IsError: true}
+	return addHashlineRetryGuidance(call, tool.Result{ToolCallID: call.ID, Name: call.Name, Content: "edit_hashline rejected: " + err.Error() + ".", IsError: true})
+}
+
+func hashlineSyntaxError(call tool.Call, err error) tool.Result {
+	return hashlineError(call, fmt.Errorf("%w. No files changed; correct the syntax and reuse the current tags", err))
 }
 
 func joinHashlineInts(values []int) string {

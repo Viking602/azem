@@ -32,9 +32,18 @@ pub(in crate::surfaces) fn tool_group_entry(
         .iter()
         .find_map(|block| (!block.run_id.is_empty()).then_some(block.run_id.as_ref()))
         .unwrap_or(key.as_str());
-    if group.iter().any(|block| {
-        is_process_tool_block(block) && tool_activity_kind(block) == ToolActivityKind::Subagent
-    }) {
+    let has_agents = agents
+        .iter()
+        .any(|agent| agent_matches_group(agent, group, process_run_id));
+    if has_agents
+        && group
+            .iter()
+            .filter(|block| is_process_tool_block(block))
+            .all(|block| {
+                tool_activity_kind(block) == ToolActivityKind::Subagent
+                    && block.state.as_ref() != "failed"
+            })
+    {
         let subagents = subagent_run_card(
             index,
             group,
@@ -162,14 +171,25 @@ pub(in crate::surfaces) fn tool_group_entry(
                     owner.clone(),
                 ))
                 .child(disclosure_body(
-                    key,
+                    key.clone(),
                     index,
                     expanded,
                     reduced_motion,
                     body,
-                    expansion,
-                    owner,
-                )),
+                    expansion.clone(),
+                    owner.clone(),
+                ))
+                .when(has_agents, |column| {
+                    column.child(subagent_run_card(
+                        index,
+                        group,
+                        process_run_id,
+                        agents,
+                        (palette, locale),
+                        expansion,
+                        owner,
+                    ))
+                }),
         )
         .into_any_element()
 }
@@ -899,11 +919,7 @@ pub(in crate::surfaces) fn agent_matches_group(
     }
     let mut group_has_tool_call_ids = false;
     let matches_parent_call = group.iter().any(|block| {
-        let call_id = block
-            .extra
-            .get("toolCallId")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
+        let call_id = block.tool_call_id.as_ref();
         group_has_tool_call_ids |= !call_id.is_empty();
         !call_id.is_empty() && call_id == snapshot_parent_call
     });
@@ -911,6 +927,41 @@ pub(in crate::surfaces) fn agent_matches_group(
         matches_parent_call
     } else {
         agent_belongs_to_run(agent, process_key)
+    }
+}
+
+pub(in crate::surfaces) fn subagent_dispatch_label(
+    agent: &serde_json::Value,
+    group: &[Block],
+    locale: Locale,
+) -> String {
+    let parent_call = agent["parentToolCallId"].as_str().unwrap_or_default();
+    let call = group
+        .iter()
+        .find(|block| !parent_call.is_empty() && block.tool_call_id.as_ref() == parent_call);
+    let role = match call.map(tool_name) {
+        Some(name) if name.starts_with("vibe_") => {
+            let arguments = call.and_then(|call| block_data_value(call, "arguments"));
+            let decoded = arguments
+                .and_then(serde_json::Value::as_str)
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+            match decoded
+                .as_ref()
+                .or(arguments)
+                .and_then(|args| args["cli"].as_str())
+            {
+                Some(cli @ ("fast" | "good")) => format!("Vibe {cli}"),
+                _ => "Vibe".to_string(),
+            }
+        }
+        _ => agent["type"]
+            .as_str()
+            .unwrap_or(locale.text("ui.subagent"))
+            .to_string(),
+    };
+    match agent["model"].as_str().filter(|model| !model.is_empty()) {
+        Some(model) => format!("{role} · {}", crate::humanize_model_id(model)),
+        None => role,
     }
 }
 
@@ -988,23 +1039,22 @@ pub(in crate::surfaces) fn subagent_run_card(
                     .into_iter()
                     .find(|value| !value.is_empty())
                     .unwrap_or_default();
-                let role = [field("type"), id]
-                    .into_iter()
-                    .find(|value| !value.is_empty())
-                    .unwrap_or(locale.text("ui.subagent"));
+                let role = subagent_dispatch_label(agent, group, locale);
                 let block = group.iter().find(|block| block_agent_id(block) == id);
                 let state = resolved_agent_state(block, field("state"));
                 let detail = if state == "failed" {
                     [field("error"), field("summary"), field("description")]
+                } else if is_terminal_agent_state(&state) {
+                    [field("summary"), field("description"), field("activity")]
                 } else {
-                    [field("description"), field("summary"), field("activity")]
+                    [field("activity"), field("summary"), field("description")]
                 }
                 .into_iter()
                 .find(|value| !value.is_empty())
                 .unwrap_or_default();
                 SubagentCardItem {
                     id: id.to_string(),
-                    role: truncate_label(role, 28),
+                    role,
                     detail: truncate_label(detail, 72),
                     state,
                     elapsed_ms: agent
@@ -1031,7 +1081,9 @@ pub(in crate::surfaces) fn subagent_run_card(
         .count();
     let cancelled = total.saturating_sub(active + failed + completed);
     let tag_key = format!("subagents:{process_key}:{group_index}");
-    let expanded = expansion.borrow().is_expanded(&tag_key);
+    let expanded = expansion
+        .borrow_mut()
+        .group_is_expanded(&tag_key, active > 0);
     let counted = |count: usize, label: &str| {
         if locale.id().starts_with("zh") {
             format!("{label} {count}")
@@ -1110,6 +1162,8 @@ pub(in crate::surfaces) fn subagent_run_card(
                 .child(
                     div()
                         .flex_shrink_0()
+                        .max_w(px(280.))
+                        .truncate()
                         .px_1()
                         .py(px(2.))
                         .rounded(px(5.))
@@ -1539,10 +1593,50 @@ pub(in crate::surfaces) struct ToolStepDetail {
     pub(in crate::surfaces) is_code: bool,
 }
 
+fn fusion_handoff_detail(block: &Block) -> Option<ToolStepDetail> {
+    let arguments = block_data_value(block, "arguments").and_then(|value| match value {
+        serde_json::Value::String(raw) => serde_json::from_str::<serde_json::Value>(raw).ok(),
+        value => Some(value.clone()),
+    });
+    let result = structured_tool_value(block).or_else(|| serde_json::from_str(&block.content).ok());
+    let mut parts = Vec::new();
+    if let Some(prompt) = arguments
+        .as_ref()
+        .and_then(|value| value["prompt"].as_str())
+    {
+        parts.push(prompt.to_string());
+    }
+    if let Some(error) = result
+        .as_ref()
+        .and_then(|value| value["error"].as_str())
+        .or_else(|| {
+            matches!(
+                block.state.as_ref(),
+                "failed" | "interrupted" | "reconcile_required"
+            )
+            .then_some(block.content.as_str())
+        })
+        .filter(|error| !error.is_empty())
+    {
+        parts.push(error.to_string());
+    }
+    if parts.is_empty() && !block.content.trim().is_empty() {
+        parts.push(block.content.trim().to_string());
+    }
+    (!parts.is_empty()).then(|| ToolStepDetail {
+        content: parts.join("\n\n"),
+        is_diff: false,
+        is_code: false,
+    })
+}
+
 pub(in crate::surfaces) fn tool_step_detail(
     block: &Block,
     group: &[Block],
 ) -> Option<ToolStepDetail> {
+    if tool_name(block) == "sidekick" {
+        return fusion_handoff_detail(block);
+    }
     if block.state.as_ref() == "failed" {
         for key in ["error", "reason", "message", "output"] {
             if let Some(content) = tool_detail_field(block, key) {
@@ -1749,7 +1843,8 @@ fn process_step_presentation(block: &Block, locale: Locale) -> (&'static str, St
     {
         target.push_str(&format!("  +{additions} −{deletions}"));
     }
-    (kind.icon(), kind.action(locale).to_string(), target)
+    let (action, icon) = tool_action(tool_name(block), locale);
+    (icon, action.to_string(), target)
 }
 
 pub(in crate::surfaces) fn process_step_label(block: &Block, locale: Locale) -> String {
@@ -1814,6 +1909,24 @@ fn tool_file_change_counts(block: &Block) -> Option<(i64, i64)> {
     (additions > 0 || deletions > 0).then_some((additions, deletions))
 }
 
+pub(in crate::surfaces) fn fusion_source_label(block: &Block) -> Option<&str> {
+    (block_data_value(block, "fusionRole").and_then(serde_json::Value::as_str) == Some("sidekick"))
+        .then(|| block_data_value(block, "sourceLabel").and_then(serde_json::Value::as_str))
+        .flatten()
+}
+
+pub(in crate::surfaces) fn fusion_source_caption(
+    block: &Block,
+    palette: ThemePalette,
+) -> Option<gpui::Div> {
+    fusion_source_label(block).map(|label| {
+        div()
+            .text_size(px(11.))
+            .text_color(palette.faint)
+            .child(label.to_string())
+    })
+}
+
 pub(in crate::surfaces) fn process_detail_row(
     group_index: usize,
     row_index: usize,
@@ -1861,6 +1974,7 @@ pub(in crate::surfaces) fn process_detail_row(
         })
         .text_size(px(palette.chat_font_size))
         .line_height(px(palette.chat_font_size * 1.6))
+        .children(fusion_source_caption(block, palette))
         .child(crate::markdown::markdown_view_styled(
             row_id,
             block.content.as_ref(),
@@ -1989,7 +2103,13 @@ fn tool_activity_kind_from_name(name: &str) -> ToolActivityKind {
         || normalized.contains("screenshot")
     {
         ToolActivityKind::Browser
-    } else if normalized.contains("subagent") || normalized.ends_with("agent") {
+    } else if normalized.contains("subagent")
+        || normalized.ends_with("agent")
+        || matches!(
+            normalized.as_str(),
+            "vibe_spawn" | "vibe_send" | "vibe_wait" | "vibe_list" | "vibe_kill"
+        )
+    {
         ToolActivityKind::Subagent
     } else if normalized.contains("search")
         || normalized.contains("grep")
@@ -2005,6 +2125,9 @@ fn tool_activity_kind_from_name(name: &str) -> ToolActivityKind {
 }
 
 pub(in crate::surfaces) fn tool_action(name: &str, locale: Locale) -> (&'static str, &'static str) {
+    if name == "sidekick" {
+        return (locale.text("ui.fusionHandoff"), "arrow-right");
+    }
     let kind = tool_activity_kind_from_name(name);
     (kind.action(locale), kind.icon())
 }

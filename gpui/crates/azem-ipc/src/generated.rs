@@ -252,6 +252,8 @@ pub enum ActionKind {
     SetModelProvider,
     #[serde(rename = "set_model_enabled")]
     SetModelEnabled,
+    #[serde(rename = "set_model_extended_context")]
+    SetModelExtendedContext,
     #[serde(rename = "list_model_routes")]
     ListModelRoutes,
     #[serde(rename = "set_model_route")]
@@ -274,6 +276,10 @@ pub enum ActionKind {
     SetChatgptFastMode,
     #[serde(rename = "set_session_preferences")]
     SetSessionPreferences,
+    #[serde(rename = "set_session_mode")]
+    SetSessionMode,
+    #[serde(rename = "set_workflow_mode")]
+    SetWorkflowMode,
     #[serde(rename = "list_background")]
     ListBackground,
     #[serde(rename = "start_background")]

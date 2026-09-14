@@ -370,10 +370,8 @@ func TestFinalTodoCompletionWaitsForVerification(t *testing.T) {
 	if _, err := sessions.Ensure(ctx, session.Session{ID: "s"}); err != nil {
 		t.Fatal(err)
 	}
-	checked := 0
 	ready := false
 	driver := &todoDriver{sessionID: "s", store: sessions, beforeComplete: func(context.Context) error {
-		checked++
 		if !ready {
 			return errors.New("verification still missing")
 		}
@@ -390,10 +388,18 @@ func TestFinalTodoCompletionWaitsForVerification(t *testing.T) {
 		result, _ := driver.Execute(ctx, tool.Call{ID: "done", Name: "todo", Arguments: args}, nil)
 		return result
 	}
-	if result := done(); result.IsError || checked != 0 {
-		t.Fatalf("early item: %+v checks=%d", result, checked)
+	if result := done(); result.IsError || !strings.Contains(result.Content, "verification still missing") {
+		t.Fatalf("early item: %+v", result)
 	}
 	before, _ := sessions.LoadTodo(ctx, "s")
+	preview, _ := driver.Execute(ctx, tool.Call{ID: "verify", Name: "todo", Arguments: json.RawMessage(`{"op":"verify"}`)}, nil)
+	if preview.IsError || !strings.Contains(preview.Content, `"ready":false`) {
+		t.Fatalf("verification preview: %+v", preview)
+	}
+	unchanged, _ := sessions.LoadTodo(ctx, "s")
+	if unchanged.Revision != before.Revision {
+		t.Fatal("read-only verification changed Todo")
+	}
 	if result := done(); !result.IsError {
 		t.Fatal("final item completed without verification")
 	}
@@ -406,7 +412,7 @@ func TestFinalTodoCompletionWaitsForVerification(t *testing.T) {
 		t.Fatal(result.Content)
 	}
 	after, _ = sessions.LoadTodo(ctx, "s")
-	if len(incompleteTodoItems(after)) != 0 || checked != 2 {
+	if len(incompleteTodoItems(after)) != 0 {
 		t.Fatal("verified final item did not complete")
 	}
 }

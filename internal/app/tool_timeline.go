@@ -30,6 +30,47 @@ const (
 
 var errWorkspaceEvidenceLimit = errors.New("workspace evidence limit exceeded")
 
+// Hash full files incrementally without applying the inline text preview limit.
+// Media retains its separate budget; source/data files share the text budget.
+func hashWorkspaceEvidence(workspace, path string, textRemaining, mediaRemaining *int64) (string, error) {
+	remaining, fileLimit := textRemaining, int64(maxWorkspaceTotalBytes)
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".png", ".jpg", ".jpeg", ".gif", ".aiff", ".wav":
+		remaining, fileLimit = mediaRemaining, 32<<20
+	}
+	if !session.ValidRelativePath(filepath.ToSlash(path)) || remaining == nil || *remaining <= 0 {
+		return "", errWorkspaceEvidenceLimit
+	}
+	root, err := os.OpenRoot(workspace)
+	if err != nil {
+		return "", err
+	}
+	defer root.Close()
+	file, err := root.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return "", err
+	}
+	limit := min(*remaining, fileLimit)
+	if !info.Mode().IsRegular() || info.Size() > limit {
+		return "", errWorkspaceEvidenceLimit
+	}
+	digest := sha256.New()
+	count, err := io.Copy(digest, io.LimitReader(file, limit+1))
+	if err != nil {
+		return "", err
+	}
+	if count > limit {
+		return "", errWorkspaceEvidenceLimit
+	}
+	*remaining -= count
+	return hex.EncodeToString(digest.Sum(nil)), nil
+}
+
 func readWorkspaceEvidence(root, file string, remaining *int64) ([]byte, error) {
 	if remaining == nil || *remaining <= 0 {
 		return nil, errWorkspaceEvidenceLimit
@@ -238,8 +279,9 @@ func (t *durableToolTimeline) fileObservations(name string, arguments, structure
 	}
 	observations = normalized
 	remaining := int64(maxWorkspaceTotalBytes)
+	mediaRemaining := int64(32 << 20)
 	for index := range observations {
-		value, err := readWorkspaceEvidence(t.workspace, observations[index].Path, &remaining)
+		digest, err := hashWorkspaceEvidence(t.workspace, observations[index].Path, &remaining, &mediaRemaining)
 		if observations[index].Operation == "delete" {
 			switch {
 			case errors.Is(err, os.ErrNotExist):
@@ -255,7 +297,7 @@ func (t *durableToolTimeline) fileObservations(name string, arguments, structure
 			observations[index].ErrorCode = workspaceLimitOrCaptureCode(err)
 			continue
 		}
-		observations[index].SHA256 = sha256Hex(value)
+		observations[index].SHA256 = digest
 	}
 	return observations
 }
@@ -302,19 +344,35 @@ func observationPathInWorkspace(workspace, raw string) (string, bool) {
 }
 
 func requestedFileObservations(name string, arguments, structured json.RawMessage) []session.FileObservation {
+	if isDirectoryRead(name, structured) {
+		return nil
+	}
 	type inputValue struct {
-		Path      string   `json:"path"`
-		Paths     []string `json:"paths"`
-		Input     string   `json:"input"`
-		StartLine int      `json:"startLine"`
-		EndLine   int      `json:"endLine"`
+		Path       string   `json:"path"`
+		Paths      []string `json:"paths"`
+		Input      string   `json:"input"`
+		StartLine  int      `json:"startLine"`
+		EndLine    int      `json:"endLine"`
+		OutputPath string   `json:"output_path"`
 	}
 	var input inputValue
 	_ = json.Unmarshal(arguments, &input)
 	operation := ""
 	switch name {
-	case agentservice.ToolReadFile:
+	case agentservice.ToolReadFile, agentservice.ToolInspectImage:
 		operation = "read"
+	case agentservice.ToolASTEdit:
+		var result struct {
+			Sections []json.RawMessage `json:"sections"`
+		}
+		if json.Unmarshal(structured, &result) != nil || len(result.Sections) == 0 {
+			return nil
+		}
+		input.Path, input.Paths = "", nil
+		operation = "edit"
+	case agentservice.ToolGenerateImage, agentservice.ToolTTS:
+		input.Path, input.Paths = input.OutputPath, nil
+		operation = "write"
 	case agentservice.ToolEditHashline, "coding.replace":
 		operation = "edit"
 	case agentservice.ToolWriteFile:
@@ -364,6 +422,18 @@ func requestedFileObservations(name string, arguments, structured json.RawMessag
 	}
 	sort.Slice(observations, func(i, j int) bool { return observations[i].Path < observations[j].Path })
 	return observations
+}
+
+// Native read_file returns directory listings as successful reads, but they
+// contain entry names rather than file bytes. Retain them in the tool record.
+func isDirectoryRead(name string, structured json.RawMessage) bool {
+	if name != agentservice.ToolReadFile {
+		return false
+	}
+	var result struct {
+		Kind string `json:"kind"`
+	}
+	return json.Unmarshal(structured, &result) == nil && result.Kind == "directory"
 }
 
 func hashlinePatchPaths(input string) []string {

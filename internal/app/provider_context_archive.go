@@ -91,6 +91,7 @@ var archiveVariants = []archiveVariant{
 }
 
 var errArchiveCarrierTooLarge = errors.New("archive context: deterministic carrier exceeds limit")
+var errArchiveNoCutPoint = fmt.Errorf("archive context: no safe history cut point preserves the latest %d user turns", archiveRecentUserTurns)
 
 func (c turnContext) archiveCompactTo(ctx context.Context, history []message.Message, targetTokens int) ([]message.Message, error) {
 	normalized, err := c.normalizeToolResults(ctx, history)
@@ -220,7 +221,7 @@ func snapcompactArchiveCutPoint(history []message.Message, prefixEnd, keepRecent
 		}
 	}
 	if recentStart <= prefixEnd || recentStart >= len(history) {
-		return 0, fmt.Errorf("archive context: no safe history cut point preserves the latest %d user turns", archiveRecentUserTurns)
+		return 0, errArchiveNoCutPoint
 	}
 	return recentStart, nil
 }
@@ -236,15 +237,45 @@ func (c turnContext) partitionArchiveHistory(ctx context.Context, history []mess
 	}
 	history = append(append([]message.Message(nil), history[:prefixEnd]...), expanded...)
 	recentStart, err := snapcompactArchiveCutPoint(history, prefixEnd, keepRecentTokens)
+	preparation := archivePreparation{history: history, prefixEnd: prefixEnd, recentStart: recentStart}
 	if err != nil {
-		return archivePreparation{}, err
-	}
-	preparation := archivePreparation{
-		history: history, prefixEnd: prefixEnd, recentStart: recentStart,
+		return preparation, err
 	}
 	preparation.omitted = append([]message.Message(nil), history[prefixEnd:preparation.recentStart]...)
 	if len(preparation.omitted) == 0 {
 		return archivePreparation{}, fmt.Errorf("archive context: no older history can be archived")
+	}
+	return preparation, nil
+}
+
+// A single assistant response can overflow the window before there are old
+// user turns to cut. Replace its complete atomic group at its original position;
+// user instructions and every other message remain verbatim and ordered.
+// ponytail: try one largest group; add multi-group selection only if it cannot fit.
+func oversizedAssistantArchive(history []message.Message, targetTokens int) (archivePreparation, error) {
+	preparation := archivePreparation{history: history}
+	users := recentUserIndexes(history, 0, 1)
+	if len(users) == 0 || estimateContextTokens(history) <= targetTokens {
+		return preparation, nil
+	}
+	groups, err := compactionAtomicGroups(history)
+	if err != nil {
+		return preparation, err
+	}
+	cacheEnd, err := message.CachePrefixBoundary(history)
+	if err != nil {
+		return preparation, err
+	}
+	largest := 0
+	for _, group := range groups {
+		if group.start <= users[0] || group.start < cacheEnd || history[group.start].Role != message.RoleAssistant {
+			continue
+		}
+		if tokens := estimateContextTokens(history[group.start:group.end]); tokens > largest {
+			largest = tokens
+			preparation.prefixEnd, preparation.recentStart = group.start, group.end
+			preparation.omitted = history[group.start:group.end]
+		}
 	}
 	return preparation, nil
 }
@@ -356,15 +387,29 @@ func (c turnContext) prepareArchiveCompaction(ctx context.Context, history []mes
 		return normalized, nil
 	}
 	preparation, err := c.partitionArchiveHistory(ctx, normalized, c.keepRecentTokens)
-	if err != nil {
-		return original, err
+	var built contextarchive.Result
+	if err == nil {
+		built, targetTokens, err = c.selectArchiveVariant(ctx, preparation, targetTokens, hardTriggerTokens)
 	}
-	built, targetTokens, err := c.selectArchiveVariant(ctx, preparation, targetTokens, hardTriggerTokens)
 	if errors.Is(err, errArchiveCarrierTooLarge) && c.keepRecentTokens > 0 {
 		fallback, fallbackErr := c.partitionArchiveHistory(ctx, normalized, 0)
 		if fallbackErr == nil && fallback.recentStart > preparation.recentStart {
 			preparation = fallback
 			built, targetTokens, err = c.selectArchiveVariant(ctx, preparation, targetTokens, hardTriggerTokens)
+		}
+	}
+	if errors.Is(err, errArchiveNoCutPoint) || errors.Is(err, errArchiveCarrierTooLarge) {
+		fallback, fallbackErr := oversizedAssistantArchive(preparation.history, targetTokens)
+		if fallbackErr != nil {
+			return original, fallbackErr
+		}
+		if len(fallback.omitted) > 0 {
+			candidate, limit, fitErr := c.selectArchiveVariant(ctx, fallback, targetTokens, hardTriggerTokens)
+			if fitErr == nil {
+				preparation, built, targetTokens, err = fallback, candidate, limit, nil
+			} else if !errors.Is(fitErr, errArchiveCarrierTooLarge) {
+				return original, fitErr
+			}
 		}
 	}
 	if err != nil {

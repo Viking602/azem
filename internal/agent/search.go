@@ -48,7 +48,7 @@ func (d reliableSearchDriver) Definition() tool.Definition {
 	additional := false
 	return tool.Definition{
 		Name:        ToolSearch,
-		Description: "Search workspace text with bundled ripgrep or one exact internal resource URI (including ssh://). Workspace queries are case-sensitive ripgrep regex by default; set literal:true for fixed strings. Combine synonymous symbols in one alternation and consume returned lines before a narrower follow-up. Path/glob constraints and ignore files are respected. Returns grouped [PATH#TAG] matches; maxResults caps matched lines, not files scanned.",
+		Description: "Search workspace text with bundled ripgrep or one exact internal resource URI. Workspace queries are case-sensitive ripgrep regex by default; set literal:true for fixed strings. Combine synonymous symbols in one alternation and consume returned lines before a narrower follow-up. Path/glob constraints and ignore files are respected. Returns grouped [PATH#TAG] matches; maxResults caps matched lines, not files scanned.",
 		InputSchema: tool.Schema{
 			Type: "object",
 			Properties: map[string]tool.Schema{

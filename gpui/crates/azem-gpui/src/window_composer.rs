@@ -30,29 +30,11 @@ impl AzemWindow {
         let model = if self.state.settings.model.is_empty() {
             locale.text("ui.selectModel").to_string()
         } else {
-            self.state
-                .catalogs
-                .providers
-                .iter()
-                .find(|provider| {
-                    provider.get("id").and_then(serde_json::Value::as_str)
-                        == Some(self.state.settings.provider.as_ref())
-                })
-                .and_then(|provider| {
-                    model_choices(
-                        provider,
-                        self.state.settings.model.as_ref(),
-                        self.state.settings.reasoning.as_ref(),
-                    )
-                    .into_iter()
-                    .find(|choice| choice.selected)
-                })
-                .map(|choice| {
-                    choice.family_name.unwrap_or_else(|| {
-                        catalog_model_name(choice.model, self.state.settings.model.as_ref())
-                    })
-                })
-                .unwrap_or_else(|| humanize_model_id(self.state.settings.model.as_ref()))
+            selected_model_display_name(
+                &self.state.catalogs.providers,
+                self.state.settings.provider.as_ref(),
+                self.state.settings.model.as_ref(),
+            )
         };
         let current_provider = self.state.settings.provider.to_string();
         let current_logo = catalog_provider_logo_id(
@@ -69,18 +51,8 @@ impl AzemWindow {
             self.state.settings.reasoning.as_ref(),
             self.state.settings.chatgpt_fast_mode,
         );
-        let mut reasoning = reasoning_display_name(
-            if modes.reasoning.is_empty() {
-                self.state.settings.reasoning.as_ref()
-            } else {
-                &modes.reasoning
-            },
-            locale,
-        );
-        if modes.fast {
-            reasoning.push_str(" · ");
-            reasoning.push_str(locale.text("model.fast"));
-        }
+        let reasoning =
+            model_reasoning_display_name(&modes, self.state.settings.reasoning.as_ref(), locale);
         let show_cancel =
             stoppable_run(&self.state).is_some() && prompt_empty && attachment_count == 0;
         let send_control = if show_cancel {
@@ -101,7 +73,7 @@ impl AzemWindow {
                 .child(icon("square", 13., rgb(0xffffff)))
                 .into_any_element()
         } else {
-            let idle = prompt_empty && attachment_count == 0;
+            let idle = (prompt_empty && attachment_count == 0) || self.workflow_mode_pending();
             div()
                 .id("send-message")
                 .role(Role::Button)
@@ -268,7 +240,7 @@ impl AzemWindow {
                             .role(Role::Button)
                             .aria_label(labels.plan)
                             .aria_selected(self.state.runtime.plan_mode)
-                            .tab_stop(!self.state.runtime.running)
+                            .tab_stop(!self.state.runtime.running && !self.workflow_mode_pending())
                             .h(px(32.))
                             .px_2()
                             .rounded_full()
@@ -298,7 +270,13 @@ impl AzemWindow {
                                     palette.ink_soft
                                 },
                             ))
-                            .child(labels.plan),
+                            .child(labels.plan)
+                            .animate_selection(
+                                self.state.runtime.plan_mode,
+                                palette.paper,
+                                palette.accent_soft,
+                                cx,
+                            ),
                     )
                     .child(div().flex_1())
                     .child(context_control)
@@ -559,6 +537,7 @@ impl AzemWindow {
         } else {
             item.prompt
         };
+        let text = crate::text_input::display_session_references(&text);
         let drag = QueuedPromptDrag {
             id: item.id.clone(),
             session_id: item.session_id,

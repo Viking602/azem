@@ -77,6 +77,11 @@ func UpdateDefault(path, key, value string) error {
 func UpdateModelRoute(path, scope, role string, route ModelRouteConfig) error {
 	keys := []string{"agents"}
 	switch scope {
+	case "fusion":
+		if role != "" {
+			return fmt.Errorf("role is not valid for fusion route")
+		}
+		keys = append(keys, "fusion")
 	case "title":
 		if role != "" {
 			return fmt.Errorf("role is not valid for title route")
@@ -330,10 +335,27 @@ func UpdateChatGPTFastMode(path string, enabled bool) error {
 	})
 }
 
+func UpdateChatGPTExtendedContextModels(path string, models []string) error {
+	if err := validateChatGPTExtendedContext(models); err != nil {
+		return err
+	}
+	var encoded yaml.Node
+	if err := encoded.Encode(models); err != nil {
+		return fmt.Errorf("encode extended context models: %w", err)
+	}
+	return updateYAML(path, func(root *yaml.Node) {
+		entry := ensureMappingPath(root, "providers", "chatgpt")
+		deleteMappingValue(entry, "extended_context_models")
+		if len(models) > 0 {
+			entry.Content = append(entry.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "extended_context_models"}, &encoded)
+		}
+	})
+}
+
 func UpdateSubscriptionDisabledModels(path, provider string, models []string) error {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	if !IsSubscriptionProvider(provider) {
-		return fmt.Errorf("subscription provider must be chatgpt, grok, or cursor")
+		return fmt.Errorf("subscription provider must be chatgpt, grok, cursor, or devin")
 	}
 	if err := validateDisabledModels(provider, models); err != nil {
 		return err
@@ -573,6 +595,16 @@ func UpdateSessionModelDefaults(path, provider, model, reasoning string) error {
 		setMappingScalar(defaults, "provider", provider)
 		setMappingScalar(defaults, "model", model)
 		setMappingScalar(defaults, "reasoning", strings.TrimSpace(reasoning))
+	})
+}
+
+// UpdateWorkflowMode persists the desktop execution strategy without changing model routes.
+func UpdateWorkflowMode(path, mode string) error {
+	if mode != "vibe" && mode != "fusion" {
+		return fmt.Errorf("workflow mode must be vibe or fusion")
+	}
+	return updateYAML(path, func(root *yaml.Node) {
+		setMappingScalar(ensureMappingPath(root, "agents"), "workflow", mode)
 	})
 }
 

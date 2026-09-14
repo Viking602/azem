@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"path/filepath"
 	"testing"
@@ -254,6 +255,55 @@ func TestMeteredProviderDriverPersistsTerminalFactsAndUsesDistinctRequestIDs(t *
 	}
 }
 
+func TestMeteringDoesNotHydrateUnrelatedHistory(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	svc := session.NewService(store.DB(), store.Blobs())
+	if _, err = svc.Ensure(ctx, session.Session{ID: "meter-only"}); err != nil {
+		t.Fatal(err)
+	}
+	// A metering operation must not decode provider history or transcript rows.
+	// Ordinary history reads must still reject this deliberately invalid fixture.
+	if _, err = store.DB().Exec(`UPDATE session_projections SET model_history='invalid history', cache_epoch=7, checkpoint_generation=11 WHERE session_id='meter-only'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = svc.LoadProjection(ctx, "meter-only"); err == nil {
+		t.Fatal("fixture did not exercise history decoding")
+	}
+	inner := &phase4MeteringDriver{}
+	driver := &meteredProviderDriver{inner: inner, store: svc, sessionID: "meter-only", runID: "r", kind: "main"}
+	for i := int64(0); i < 2; i++ {
+		if _, err = store.DB().Exec(`UPDATE session_projections SET cache_epoch=?, checkpoint_generation=? WHERE session_id='meter-only'`, 7+i, 11+i); err != nil {
+			t.Fatal(err)
+		}
+		stream, streamErr := driver.Stream(ctx, hyprovider.Request{})
+		if streamErr != nil {
+			t.Fatal(streamErr)
+		}
+		if event, recvErr := stream.Recv(); recvErr != nil || event.Kind != hyprovider.EventDone {
+			t.Fatalf("event=%#v err=%v", event, recvErr)
+		}
+		if err = stream.Close(); err != nil {
+			t.Fatal(err)
+		}
+		var epoch, generation int64
+		if err = store.DB().QueryRow(`SELECT cache_epoch,checkpoint_generation FROM provider_requests ORDER BY started_at DESC LIMIT 1`).Scan(&epoch, &generation); err != nil || epoch != 7+i || generation != 11+i {
+			t.Fatalf("epoch=%d generation=%d err=%v", epoch, generation, err)
+		}
+		snapshot, snapshotErr := svc.ProviderUsageSnapshot(ctx, "meter-only", "r")
+		if snapshotErr != nil || snapshot.CurrentTurnMainRequests != int(i+1) || snapshot.CurrentTurnMainInput != int(12*(i+1)) || snapshot.CurrentCacheEpoch != 7+i {
+			t.Fatalf("snapshot=%+v err=%v", snapshot, snapshotErr)
+		}
+	}
+	if _, err = svc.LoadProjection(ctx, "meter-only"); err == nil {
+		t.Fatal("metering must not change or conceal invalid history")
+	}
+}
+
 func TestMeteredProviderDriverMarksLengthStopAsLength(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "length.db"))
@@ -327,6 +377,40 @@ func TestMeteredProviderDriverMarksPrematureEOFUnknown(t *testing.T) {
 	if err = store.DB().QueryRow(`SELECT status FROM provider_requests`).Scan(&status); err != nil || status != "unknown" {
 		t.Fatalf("status=%q err=%v", status, err)
 	}
+}
+
+func TestMeteredRequestRejectionIsFailed(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	svc := session.NewService(store.DB(), store.Blobs())
+	if _, err := svc.Ensure(ctx, session.Session{ID: "s"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, asEvent := range []bool{false, true} {
+		fact := session.ProviderRequestFact{RequestID: fmt.Sprint(asEvent), SessionID: "s", RunID: "r", RequestKind: "main", Provider: "devin", Model: "swe-2-max", Transport: "devin-agent", StartedAt: time.Now()}
+		state := &meteredRequestState{driver: &meteredProviderDriver{store: svc}, fact: fact}
+		stream := &meteredProviderStream{Stream: meteringRejection{asEvent}, state: state}
+		_, _ = stream.Recv()
+		var status string
+		if err := store.DB().QueryRow("SELECT status FROM provider_requests WHERE request_id=?", fact.RequestID).Scan(&status); err != nil || status != "failed" {
+			t.Fatalf("event=%v status=%s err=%v", asEvent, status, err)
+		}
+	}
+}
+
+type meteringRejection struct{ asEvent bool }
+
+func (s meteringRejection) Close() error { return nil }
+func (s meteringRejection) Recv() (hyprovider.Event, error) {
+	err := hyprovider.NewHTTPError("devin", 400, "invalid tool name")
+	if s.asEvent {
+		return hyprovider.Event{Kind: hyprovider.EventError, Err: err}, nil
+	}
+	return hyprovider.Event{}, err
 }
 
 type eofMeteringDriver struct{}

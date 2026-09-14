@@ -1,4 +1,5 @@
 use super::*;
+use crate::state::PullRequestTab;
 pub(crate) fn pull_requests_surface(
     state: &AppState,
     palette: ThemePalette,
@@ -23,94 +24,34 @@ pub(crate) fn pull_requests_surface(
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default()
         .to_string();
-    let repository_label = state
-        .pull_requests
-        .dashboard
-        .pointer("/repository/nameWithOwner")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("GitHub")
-        .to_string();
-    let dashboard_status = if state.pull_requests.loading {
-        locale.text("common.refreshing").to_string()
+    let model = &state.pull_requests;
+    let rows = model.tab.rows(&model.dashboard);
+    let repository_label = if repository.is_empty() {
+        "GitHub"
     } else {
-        state.pull_requests.error.to_string()
+        &repository
     };
-    let current = state
-        .pull_requests
-        .dashboard
-        .get("current")
-        .filter(|value| !value.is_null())
-        .cloned()
-        .into_iter()
-        .collect::<Vec<_>>();
-    let created = state
-        .pull_requests
-        .dashboard
-        .get("createdByViewer")
-        .and_then(serde_json::Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let open = state
-        .pull_requests
-        .dashboard
-        .get("open")
-        .and_then(serde_json::Value::as_array)
-        .cloned()
-        .unwrap_or_default();
     let dashboard = div()
         .id("pull-request-dashboard")
         .size_full()
-        .overflow_y_scroll()
-        .bg(palette.paper_muted)
-        .px(px(28.))
-        .py(px(24.))
+        .min_h_0()
+        .bg(palette.paper)
         .flex()
         .flex_col()
-        .gap_5()
         .child(
-            div()
-                .pb_4()
-                .border_b_1()
-                .border_color(palette.border)
-                .flex()
-                .items_center()
+            workspace::workspace_header(locale.text("pr.heading"), palette, locale, cx)
                 .child(
                     div()
+                        .min_w_0()
                         .flex_1()
                         .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            div()
-                                .font_family("SF Mono")
-                                .text_size(px(9.))
-                                .text_color(palette.faint)
-                                .child("GITHUB"),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(21.))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .child(locale.text("pr.heading")),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(palette.muted)
-                                .child(repository_label),
-                        )
-                        .when(!dashboard_status.is_empty(), |header| {
-                            header.child(
-                                div()
-                                    .text_xs()
-                                    .text_color(if state.pull_requests.error.is_empty() {
-                                        palette.faint
-                                    } else {
-                                        palette.danger
-                                    })
-                                    .child(dashboard_status),
-                            )
-                        }),
+                        .justify_end()
+                        .items_center()
+                        .gap_2()
+                        .text_size(px(WORKSPACE_META))
+                        .text_color(palette.muted)
+                        .child(icon("folder", WORKSPACE_ICON, palette.muted))
+                        .child(div().truncate().child(repository_label.to_string())),
                 )
                 .child(
                     div()
@@ -118,47 +59,178 @@ pub(crate) fn pull_requests_surface(
                         .role(Role::Button)
                         .aria_label(locale.text("pr.refresh"))
                         .tab_stop(true)
-                        .h(px(34.))
-                        .px_3()
-                        .rounded(px(8.))
+                        .h(px(WORKSPACE_CONTROL))
+                        .flex_shrink_0()
+                        .px_2()
+                        .rounded(px(WORKSPACE_RADIUS))
                         .border_1()
                         .border_color(palette.border)
-                        .bg(palette.paper)
+                        .text_size(px(WORKSPACE_META))
+                        .text_color(palette.muted)
                         .flex()
                         .items_center()
                         .gap_2()
                         .cursor_pointer()
-                        .on_click(cx.listener(|this, _, _, _| {
+                        .hover(|s| s.bg(palette.hover))
+                        .focus_visible(|s| s.border_color(palette.accent))
+                        .on_click(cx.listener(|this, _, _, cx| {
                             this.request_surface(Surface::PullRequests);
+                            cx.notify();
                         }))
-                        .child(icon("refresh-cw", 14., palette.muted))
-                        .child(locale.text("common.refresh")),
+                        .child(icon("rotate-ccw", WORKSPACE_ICON, palette.muted))
+                        .child(locale.text(if model.loading {
+                            "common.refreshing"
+                        } else {
+                            "common.refresh"
+                        })),
                 ),
         )
-        .child(pull_request_group(
-            0,
-            locale.text("pr.current"),
-            current,
-            palette,
-            cx,
-            locale,
-        ))
-        .child(pull_request_group(
-            1,
-            locale.text("pr.created"),
-            created,
-            palette,
-            cx,
-            locale,
-        ))
-        .child(pull_request_group(
-            2,
-            locale.text("pr.open"),
-            open,
-            palette,
-            cx,
-            locale,
-        ));
+        .child(
+            div()
+                .id("pull-request-tabs")
+                .role(Role::TabList)
+                .aria_label(locale.text("pr.title"))
+                .h(px(WORKSPACE_TOOLBAR))
+                .flex_shrink_0()
+                .px(px(WORKSPACE_INSET))
+                .border_b_1()
+                .border_color(palette.border)
+                .flex()
+                .items_center()
+                .gap_2()
+                .children(
+                    [
+                        (PullRequestTab::Open, "pr.open"),
+                        (PullRequestTab::Current, "pr.current"),
+                        (PullRequestTab::Created, "pr.created"),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, (tab, key))| {
+                        let active = model.tab == tab;
+                        div()
+                            .id(("pull-request-tab", index))
+                            .role(Role::Tab)
+                            .aria_label(locale.text(key))
+                            .aria_selected(active)
+                            .tab_stop(true)
+                            .h(px(WORKSPACE_CONTROL))
+                            .px_3()
+                            .rounded_full()
+                            .border_1()
+                            .border_color(rgba(0))
+                            .bg(if active { palette.accent_soft } else { rgba(0) })
+                            .text_size(px(WORKSPACE_TEXT))
+                            .text_color(if active {
+                                palette.accent
+                            } else {
+                                palette.muted
+                            })
+                            .font_weight(if active {
+                                gpui::FontWeight::SEMIBOLD
+                            } else {
+                                gpui::FontWeight::NORMAL
+                            })
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .cursor_pointer()
+                            .hover(move |s| {
+                                s.bg(if active {
+                                    palette.accent_soft
+                                } else {
+                                    palette.hover
+                                })
+                            })
+                            .focus_visible(|s| s.border_color(palette.accent))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.state.pull_requests.tab = tab;
+                                this.state.pull_requests.selected = serde_json::Value::Null;
+                                cx.notify();
+                            }))
+                            .child(locale.text(key))
+                            .child(
+                                div()
+                                    .min_w(px(18.))
+                                    .h(px(18.))
+                                    .px_1()
+                                    .rounded_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .bg(if active {
+                                        palette.paper
+                                    } else {
+                                        palette.paper_muted
+                                    })
+                                    .font_family("SF Mono")
+                                    .text_size(px(WORKSPACE_META))
+                                    .text_color(if active {
+                                        palette.accent
+                                    } else {
+                                        palette.muted
+                                    })
+                                    .child(tab.rows(&model.dashboard).len().to_string()),
+                            )
+                    }),
+                ),
+        )
+        .when(!model.error.is_empty(), |dashboard| {
+            dashboard.child(
+                div()
+                    .px(px(WORKSPACE_INSET))
+                    .py_2()
+                    .text_size(px(WORKSPACE_TEXT))
+                    .text_color(palette.danger)
+                    .child(model.error.to_string()),
+            )
+        })
+        .child(
+            div()
+                .id(("pull-request-list", model.tab as usize))
+                .role(Role::TabPanel)
+                .aria_label(locale.text(match model.tab {
+                    PullRequestTab::Open => "pr.open",
+                    PullRequestTab::Current => "pr.current",
+                    PullRequestTab::Created => "pr.created",
+                }))
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .px(px(WORKSPACE_INSET))
+                .when(rows.is_empty() && model.error.is_empty(), |list| {
+                    list.child(
+                        div()
+                            .h(px(200.))
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .justify_center()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .size(px(44.))
+                                    .rounded(px(12.))
+                                    .bg(palette.paper_muted)
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(icon("git-pull-request", 24., palette.muted)),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(WORKSPACE_TEXT))
+                                    .text_color(palette.muted)
+                                    .child(locale.text(if model.loading {
+                                        "common.refreshing"
+                                    } else {
+                                        "pr.empty"
+                                    })),
+                            ),
+                    )
+                })
+                .child(pull_request_list(rows, palette, cx, locale)),
+        );
     let drawer = (number > 0).then(|| {
         let draft = selected
             .pointer("/pullRequest/draft")
@@ -198,7 +270,7 @@ pub(crate) fn pull_requests_surface(
                     .child(icon("git-pull-request", 15., palette.muted))
                     .child(
                         div()
-                            .text_sm()
+                            .text_size(px(WORKSPACE_TEXT))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .child(format!("PR #{number}")),
                     )
@@ -209,7 +281,7 @@ pub(crate) fn pull_requests_surface(
                             .role(Role::Button)
                             .aria_label(locale.text("pr.closeDetail"))
                             .tab_stop(true)
-                            .size(px(28.))
+                            .size(px(WORKSPACE_CONTROL))
                             .rounded(px(7.))
                             .flex()
                             .items_center()
@@ -295,10 +367,8 @@ pub(crate) fn pull_requests_surface(
         .into_any_element()
 }
 
-fn pull_request_group(
-    group_id: usize,
-    title: &'static str,
-    pull_requests: Vec<serde_json::Value>,
+fn pull_request_list(
+    pull_requests: &[serde_json::Value],
     palette: ThemePalette,
     cx: &mut Context<AzemWindow>,
     locale: Locale,
@@ -306,32 +376,9 @@ fn pull_request_group(
     div()
         .flex()
         .flex_col()
-        .gap_2()
-        .child(
-            div()
-                .text_size(px(16.))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .child(title),
-        )
-        .when(pull_requests.is_empty(), |group| {
-            group.child(
-                div()
-                    .h(px(56.))
-                    .rounded(px(12.))
-                    .border_1()
-                    .border_color(palette.border)
-                    .bg(palette.paper)
-                    .text_sm()
-                    .text_color(palette.faint)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child("—"),
-            )
-        })
         .children(
             pull_requests
-                .into_iter()
+                .iter()
                 .enumerate()
                 .map(|(index, pull_request)| {
                     let number = pull_request
@@ -367,17 +414,16 @@ fn pull_request_group(
                         .and_then(serde_json::Value::as_i64)
                         .unwrap_or_default();
                     div()
-                        .id(("pull-request", group_id * 1000 + index))
+                        .id(("pull-request", index))
                         .role(Role::Button)
                         .aria_label(locale.format(
                             "pr.row",
                             &[("number", number.to_string()), ("title", title.clone())],
                         ))
                         .tab_stop(true)
-                        .min_h(px(64.))
-                        .px_4()
-                        .rounded(px(12.))
-                        .border_1()
+                        .min_h(px(WORKSPACE_ROW + 16.))
+                        .px_2()
+                        .border_b_1()
                         .border_color(palette.border)
                         .bg(palette.paper)
                         .flex()
@@ -393,7 +439,7 @@ fn pull_request_group(
                                 .insert(id, PendingRequest::PullRequestDetail);
                             cx.notify();
                         }))
-                        .child(div().text_color(palette.positive).child("○"))
+                        .child(icon("git-pull-request", WORKSPACE_ICON, palette.positive))
                         .child(
                             div()
                                 .min_w_0()
@@ -404,33 +450,39 @@ fn pull_request_group(
                                 .child(
                                     div()
                                         .truncate()
-                                        .text_sm()
+                                        .text_size(px(WORKSPACE_TEXT))
                                         .font_weight(gpui::FontWeight::SEMIBOLD)
                                         .child(title),
                                 )
-                                .child(div().truncate().text_sm().text_color(palette.muted).child(
-                                    locale.format(
-                                        "pr.openRow",
-                                        &[("number", number.to_string()), ("author", author)],
-                                    ),
-                                )),
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_size(px(WORKSPACE_TEXT))
+                                        .text_color(palette.muted)
+                                        .child(locale.format(
+                                            "pr.openRow",
+                                            &[("number", number.to_string()), ("author", author)],
+                                        )),
+                                ),
                         )
                         .child(
                             div()
                                 .font_family("SF Mono")
-                                .text_sm()
+                                .text_size(px(WORKSPACE_TEXT))
                                 .text_color(palette.muted)
-                                .child(format!("⌘ {head} → {base}")),
+                                .max_w(px(240.))
+                                .truncate()
+                                .child(format!("{head} → {base}")),
                         )
                         .child(
                             div()
-                                .text_sm()
+                                .text_size(px(WORKSPACE_TEXT))
                                 .text_color(palette.positive)
                                 .child(format!("+{additions}")),
                         )
                         .child(
                             div()
-                                .text_sm()
+                                .text_size(px(WORKSPACE_TEXT))
                                 .text_color(palette.danger)
                                 .child(format!("−{deletions}")),
                         )
@@ -447,7 +499,7 @@ fn pull_request_detail_content(
     if detail.is_null() || detail.get("number").is_none() {
         return div()
             .text_color(palette.faint)
-            .text_sm()
+            .text_size(px(WORKSPACE_TEXT))
             .child(locale.text("pr.select"))
             .into_any_element();
     }
@@ -518,8 +570,8 @@ fn pull_request_detail_content(
                 .gap_1()
                 .child(
                     div()
-                        .text_size(px(22.))
-                        .line_height(px(28.))
+                        .text_size(px(WORKSPACE_PAGE_TITLE))
+                        .line_height(px(WORKSPACE_CONTROL))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(palette.ink)
                         .child(title),
@@ -621,7 +673,7 @@ fn pull_request_check_row(
         .to_string();
     let failing = category == "failing";
     div()
-        .h(px(32.))
+        .h(px(WORKSPACE_ROW))
         .border_b_1()
         .border_color(palette.border)
         .text_size(px(11.))
@@ -680,7 +732,7 @@ fn pull_request_file_row(file: serde_json::Value, palette: ThemePalette) -> gpui
         .and_then(serde_json::Value::as_i64)
         .unwrap_or_default();
     div()
-        .h(px(34.))
+        .h(px(WORKSPACE_CONTROL))
         .border_b_1()
         .border_color(palette.border)
         .font_family("SF Mono")

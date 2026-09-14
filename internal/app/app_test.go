@@ -2158,7 +2158,7 @@ func TestModelRouteListIsSortedAndCloneIsIndependent(t *testing.T) {
 			got = append(got, route.Scope)
 		}
 	}
-	if want := []string{"main", "title", "plan", "approval", "vision", "recap", "advisor", "vibe:fast", "vibe:good", "security:audit", "security:reducer", "security:fixer", "security:verifier", "subagent:alpha", "subagent:off", "subagent:zeta"}; !reflect.DeepEqual(got, want) {
+	if want := []string{"main", "title", "plan", "approval", "vision", "recap", "advisor", "fusion", "vibe:fast", "vibe:good", "security:audit", "security:reducer", "security:fixer", "security:verifier", "subagent:alpha", "subagent:off", "subagent:zeta"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("route order = %v", got)
 	}
 	clone := event.Clone()

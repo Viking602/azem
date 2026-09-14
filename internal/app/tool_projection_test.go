@@ -1,11 +1,13 @@
 package app
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/Viking602/azem/internal/session"
 )
@@ -54,6 +56,40 @@ func TestProjectToolRecordsAttachesFileChangeSummaries(t *testing.T) {
 	}
 	if projected[3].FileChange != "" {
 		t.Fatal("non file-change tools must not project file changes")
+	}
+}
+
+func TestNativeEditsAndMediaHaveDurableReadback(t *testing.T) {
+	root := t.TempDir()
+	payload := bytes.Repeat([]byte{1, 2, 3, 4}, 400000)
+	if err := os.WriteFile(filepath.Join(root, "image.png"), payload, 0600); err != nil {
+		t.Fatal(err)
+	}
+	timeline := &durableToolTimeline{workspace: root}
+	observations := timeline.fileObservations("generate_image", json.RawMessage(`{"output_path":"image.png","input":["source.png"]}`), nil, true)
+	if len(observations) != 1 || observations[0].SHA256 != sha256Hex(payload) || observations[0].ErrorCode != "" {
+		t.Fatal(observations)
+	}
+	record := session.ToolRecord{Name: "generate_image", State: session.ToolCompleted, Observations: observations, CompletedAt: time.Now()}
+	files, mutated, _, failures := runtimeRevisionFiles(root, []session.ToolRecord{record})
+	if len(failures) != 0 || !mutated || len(files) != 1 || files[0].SHA256 != sha256Hex(payload) {
+		t.Fatal(files, mutated, failures)
+	}
+	readback := timeline.fileObservations("inspect_image", json.RawMessage(`{"path":"image.png"}`), nil, true)
+	if len(readback) != 1 || readback[0].Operation != "read" || readback[0].SHA256 != observations[0].SHA256 {
+		t.Fatal(readback)
+	}
+	args := json.RawMessage(`{"path":"**/*.go","apply":true}`)
+	result := json.RawMessage(`{"sections":[{"path":"main.go"}]}`)
+	ast := requestedFileObservations("ast_edit", args, result)
+	if len(ast) != 1 || ast[0].Path != "main.go" || ast[0].Operation != "edit" {
+		t.Fatal(ast)
+	}
+	if !toolRecordMutated(session.ToolRecord{Name: "ast_edit", Structured: result}) {
+		t.Fatal("AST mutation missed")
+	}
+	if len(requestedFileObservations("ast_edit", args, json.RawMessage(`{"dryRun":true,"patch":"preview"}`))) != 0 {
+		t.Fatal("preview recorded as mutation")
 	}
 }
 
@@ -115,5 +151,41 @@ func TestFileObservationsRelativizeAbsolutePathsBeforeEvidence(t *testing.T) {
 	)
 	if len(observations) != 1 || observations[0].Path != "note.txt" || observations[0].SHA256 == "" || observations[0].ErrorCode != "" {
 		t.Fatalf("observations = %+v", observations)
+	}
+}
+
+func TestDirectoryReadDoesNotBecomeFileEvidence(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "docs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("documentation\n")
+	if err := os.WriteFile(filepath.Join(root, "docs/index.md"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	timeline := &durableToolTimeline{workspace: root}
+	args := json.RawMessage(`{"path":"docs","limit":50}`)
+	listing := json.RawMessage(`{"path":"docs","kind":"directory","content":"index.md","bytes":8}`)
+	if observations := timeline.fileObservations("coding.read_file", args, listing, true); len(observations) != 0 {
+		t.Fatalf("directory listing acquired file observations: %+v", observations)
+	}
+	// Replay the exact legacy failure shape without modifying its stored record.
+	legacy := session.ToolRecord{Name: "coding.read_file", State: session.ToolCompleted, Structured: listing,
+		Observations: []session.FileObservation{{Path: "docs", Operation: "read", ErrorCode: "limit_exceeded"}}}
+	file := session.ToolRecord{Name: "coding.write_file", State: session.ToolCompleted,
+		Observations: []session.FileObservation{{Path: "docs/index.md", Operation: "write", SHA256: sha256Hex(body)}}}
+	files, mutated, _, failures := runtimeRevisionFiles(root, []session.ToolRecord{legacy, file})
+	if len(failures) != 0 || !mutated || len(files) != 1 || files[0].SHA256 != sha256Hex(body) {
+		t.Fatalf("legacy directory blocked real file verification: files=%+v mutated=%v errors=%v", files, mutated, failures)
+	}
+	for _, kind := range []json.RawMessage{nil, json.RawMessage(`{"kind":"file"}`), json.RawMessage(`invalid`)} {
+		legacy.Structured = kind
+		if _, _, _, failures := runtimeRevisionFiles(root, []session.ToolRecord{legacy}); len(failures) == 0 {
+			t.Fatal("non-directory evidence failure was hidden")
+		}
+	}
+	legacy.Structured, legacy.Name = listing, "coding.write_file"
+	if _, _, _, failures := runtimeRevisionFiles(root, []session.ToolRecord{legacy}); len(failures) == 0 {
+		t.Fatal("a write impersonated a read-only directory listing")
 	}
 }

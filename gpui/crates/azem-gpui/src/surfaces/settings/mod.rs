@@ -22,7 +22,7 @@ use usage::settings_usage_body;
 pub(crate) use catalog::ModelCapabilityTooltip;
 pub(super) use catalog::pick;
 #[cfg(test)]
-pub(super) use catalog::provider_quota_remaining;
+pub(super) use catalog::{provider_quota_remaining, provider_quota_windows};
 pub(crate) use extensions::extension_confirmation;
 #[cfg(test)]
 pub(super) use extensions::{extension_safe_target, plugin_logo};
@@ -510,6 +510,7 @@ fn settings_navigation_item(
             pick(selected, palette.accent, palette.faint),
         ))
         .child(label)
+        .animate_selection(selected, palette.sidebar, palette.hover, cx)
         .into_any_element()
 }
 
@@ -538,6 +539,28 @@ fn settings_rows(rows: Vec<gpui::AnyElement>, palette: ThemePalette) -> gpui::Di
 }
 
 fn settings_group(
+    title: &'static str,
+    description: &'static str,
+    body: gpui::Div,
+    palette: ThemePalette,
+) -> gpui::Stateful<gpui::Div> {
+    settings_section(
+        title,
+        description,
+        body.relative()
+            .flex_shrink_0()
+            .overflow_hidden()
+            .w_full()
+            .min_w_0()
+            .rounded(px(12.))
+            .border_1()
+            .border_color(palette.border)
+            .bg(palette.paper),
+        palette,
+    )
+}
+
+fn settings_section(
     title: &'static str,
     description: &'static str,
     body: gpui::Div,
@@ -578,17 +601,7 @@ fn settings_group(
                     )
                 }),
         )
-        .child(
-            body.relative()
-                .flex_shrink_0()
-                .overflow_hidden()
-                .w_full()
-                .min_w_0()
-                .rounded(px(12.))
-                .border_1()
-                .border_color(palette.border)
-                .bg(palette.paper),
-        )
+        .child(body)
 }
 
 fn settings_detail_row(
@@ -629,28 +642,36 @@ fn settings_control_detail_row(
     settings_children_row(title, description, control, palette).into_any_element()
 }
 
-fn settings_switch(on: bool, palette: ThemePalette) -> gpui::Div {
+fn settings_switch(on: bool, palette: ThemePalette, cx: &gpui::App) -> impl IntoElement {
+    use gpui::Interpolate;
     div()
         .w(px(34.))
         .h(px(20.))
-        .p(px(2.))
+        .relative()
         .rounded_full()
-        .bg(if on {
-            palette.positive
-        } else {
-            palette.border_strong
-        })
-        .flex()
-        .justify_end()
-        .when(!on, |switch| switch.justify_start())
-        .child(
-            div()
-                .size(px(16.))
-                .rounded_full()
-                .bg(rgb(0xffffff))
-                .shadow(vec![
-                    BoxShadow::new(px(0.), px(1.), hsla(0., 0., 0., 0.18)).blur_radius(px(2.)),
-                ]),
+        .with_spring(
+            "switch-motion",
+            control_animation(if on { 1. } else { 0. }, cx),
+            move |rail, phase| {
+                rail.bg(Rgba::interpolate(
+                    palette.border_strong,
+                    palette.positive,
+                    phase,
+                ))
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(2. + 14. * phase))
+                        .top(px(2.))
+                        .size(px(16.))
+                        .rounded_full()
+                        .bg(rgb(0xffffff))
+                        .shadow(vec![
+                            BoxShadow::new(px(0.), px(1.), hsla(0., 0., 0., 0.18))
+                                .blur_radius(px(2.)),
+                        ]),
+                )
+            },
         )
 }
 
@@ -774,5 +795,6 @@ fn settings_action_button(
             }
         }))
         .child(label)
+        .animate_selection(selected, palette.paper, palette.paper_muted, cx)
         .into_any_element()
 }

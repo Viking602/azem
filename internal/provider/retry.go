@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"io"
 	"time"
 
@@ -42,15 +43,69 @@ func (driver *retryDriver) Stream(ctx context.Context, request hyprovider.Reques
 		}
 		return &outputCheckedStream{Stream: stream}, nil
 	}
-	if driver.config.MaxRetries <= 0 {
-		return open()
+	var stream hyprovider.Stream
+	var err error
+	if driver.config.MaxRetries > 0 {
+		stream, err = hyprovider.OpenRetryingStream(ctx, open, hyprovider.StreamRetryOptions{
+			Max:      driver.config.MaxRetries,
+			Delay:    retryDelay(driver.config.BaseDelay, driver.config.MaxDelay),
+			MaxDelay: driver.config.MaxDelay,
+			Observer: driver.config.Observer,
+		})
+	} else {
+		stream, err = open()
 	}
-	return hyprovider.OpenRetryingStream(ctx, open, hyprovider.StreamRetryOptions{
-		Max:      driver.config.MaxRetries,
-		Delay:    retryDelay(driver.config.BaseDelay, driver.config.MaxDelay),
-		MaxDelay: driver.config.MaxDelay,
-		Observer: driver.config.Observer,
-	})
+	// A received rejection has a known outcome. Record it as a terminal model
+	// event so durability does not mistake it for a lost, possibly executed call.
+	if IsResponseFailure(err) {
+		return hyprovider.NewSliceStream([]hyprovider.Event{{Kind: hyprovider.EventError, Err: err}}), nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &rejectionStream{Stream: stream}, nil
+}
+
+// IsResponseFailure distinguishes a received failure response from a lost
+// transport whose external outcome still requires reconciliation. Retryable
+// responses are normalized only AFTER the existing retry owner is exhausted.
+func IsResponseFailure(err error) bool {
+	var response *hyprovider.Error
+	if errors.As(err, &response) && response.StatusCode >= 400 && response.StatusCode <= 599 {
+		return true
+	}
+	switch hyprovider.ErrorKindOf(err) {
+	case hyprovider.ErrorAuthentication, hyprovider.ErrorPermission, hyprovider.ErrorInvalidRequest, hyprovider.ErrorNotFound:
+		return true
+	default:
+		return false
+	}
+}
+
+// Normalize after the existing retry owner, including refusals in HTTP 200
+// streaming trailers and explicit rejections after partial text. Never replay.
+type rejectionStream struct {
+	hyprovider.Stream
+	terminal bool
+}
+
+func (s *rejectionStream) Identity() hyprovider.StreamIdentity {
+	if identified, ok := s.Stream.(hyprovider.IdentifiedStream); ok {
+		return identified.Identity()
+	}
+	return hyprovider.StreamIdentity{}
+}
+
+func (s *rejectionStream) Recv() (hyprovider.Event, error) {
+	if s.terminal {
+		return hyprovider.Event{}, io.EOF
+	}
+	event, err := s.Stream.Recv()
+	if IsResponseFailure(err) {
+		s.terminal = true
+		return hyprovider.Event{Kind: hyprovider.EventError, Err: err}, nil
+	}
+	return event, err
 }
 
 func retryDelay(base, maximum time.Duration) func(int) time.Duration {

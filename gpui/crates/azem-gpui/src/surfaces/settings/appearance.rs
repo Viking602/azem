@@ -50,7 +50,7 @@ pub(super) fn settings_appearance_body(
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.set_appearance("reducedMotion", json!(!reduced_motion), window, cx)
                     }))
-                    .child(settings_switch(reduced_motion, palette))
+                    .child(settings_switch(reduced_motion, palette, cx))
                     .into_any_element(),
                 palette,
             )
@@ -255,6 +255,7 @@ fn settings_theme_preview(
                 .text_color(palette.muted)
                 .child(name),
         )
+        .animate_selection(selected, palette.paper, palette.accent_soft, cx)
         .into_any_element()
 }
 

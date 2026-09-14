@@ -1,15 +1,57 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/Viking602/azem/internal/app"
 	"github.com/Viking602/azem/internal/config"
 	evalpkg "github.com/Viking602/azem/internal/eval"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 )
+
+func TestDrainTurnReportsSuspensionWithoutWaitingForTimeout(t *testing.T) {
+	for _, kind := range []string{"reconciliation", "requested", ""} {
+		t.Run(kind, func(t *testing.T) {
+			service := app.NewService(t.Context(), config.Default())
+			defer service.Shutdown(context.Background())
+			const reason = "2 tool call(s) failed; requires reconciliation for 2 attempt(s)"
+			service.EmitEvent(t.Context(), app.Event{
+				Kind: app.EventRecoveryState, RunID: "eval-run", State: "suspended",
+				Text: reason, Data: map[string]string{"kind": kind},
+			})
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			err := drainTurn(ctx, service, "eval-run", false)
+			if err == nil || !strings.Contains(err.Error(), "suspended") ||
+				!strings.Contains(err.Error(), reason) || ctx.Err() != nil {
+				t.Fatalf("suspended run: error=%v context=%v", err, ctx.Err())
+			}
+		})
+	}
+}
+
+func TestDrainTurnIgnoresUnrelatedRecovery(t *testing.T) {
+	service := app.NewService(t.Context(), config.Default())
+	defer service.Shutdown(context.Background())
+	for _, event := range []app.Event{
+		{Kind: app.EventRecoveryState, RunID: "other-run", State: "suspended"},
+		{Kind: app.EventRecoveryState, State: "suspended"},
+		{Kind: app.EventRecoveryState, State: "recovered"},
+		{Kind: app.EventRunFinished, RunID: "eval-run", State: "completed"},
+	} {
+		service.EmitEvent(t.Context(), event)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	if err := drainTurn(ctx, service, "eval-run", false); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestWriteEvalConfigLoads(t *testing.T) {
 	dir := t.TempDir()

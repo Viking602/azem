@@ -193,6 +193,8 @@ SELECT id,title,provider_id,model_id,reasoning,agent_mode,created_at,updated_at 
 UPDATE sessions SET provider_id=?,model_id=?,reasoning=?,agent_mode=?,updated_at=? WHERE id=?;
 -- name: GetSessionProjection :one
 SELECT last_run_id,model_history,usage,updated_at,checkpoint_generation,cache_epoch,cache_identity_hash FROM session_projections WHERE session_id=?;
+-- name: GetProviderMeteringState :one
+SELECT cache_epoch,checkpoint_generation,usage FROM session_projections WHERE session_id=?;
 -- name: UpdateProjectionRun :exec
 UPDATE session_projections SET last_run_id=?,updated_at=? WHERE session_id=?;
 -- name: UpdateProjectionRunAfterAssistantMutation :exec
@@ -248,7 +250,9 @@ UPDATE session_tool_records SET state='interrupted',completed_at=? WHERE run_id=
 -- name: UpsertWorkspaceSession :exec
 INSERT INTO workspace_session_state(anchor,session_id,updated_at) VALUES(?,?,?) ON CONFLICT(anchor) DO UPDATE SET session_id=excluded.session_id,updated_at=excluded.updated_at;
 -- name: GetWorkspaceSession :one
-SELECT session_id FROM workspace_session_state WHERE anchor=?;
+SELECT w.session_id FROM workspace_session_state w
+LEFT JOIN session_ui_state ui ON ui.session_id=w.session_id
+WHERE w.anchor=? AND COALESCE(ui.archived,0)=0;
 -- name: ListAccounts :many
 SELECT id,provider_id,email,display_name,plan,credential_ref,status,created_at,updated_at FROM accounts ORDER BY updated_at DESC;
 -- name: ListAccountsByProvider :many

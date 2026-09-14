@@ -4,6 +4,21 @@ Last verified: 2026-09-06
 
 Azem ships the Rust GPUI desktop in `gpui/`, backed by a workspace-scoped
 daemon and the authenticated local protocol in `internal/desktopipc/`.
+
+Settings → Model routing selects one desktop workflow: Vibe scheduling or Fusion
+collaboration. Only the selected workflow's model card is visible: Vibe shows
+fast/good workers and Fusion shows its execution model. Switching workflows
+preserves both sets of routes and closes the previous model menu. The workflow
+buttons sit directly on the Settings background; shared helper models remain in
+their own group. The composer has no Fusion toggle. The current
+chat model is the director/lead in either workflow.
+`set_workflow_mode` atomically saves `agents.workflow`, then emits `model_routes`
+with `data.workflow_mode`. Reconnect reads the live Service setting in
+`base.workflowMode`, independent of the selected session's previous agent mode.
+New sends use this setting; running turns and their queued continuations retain
+their admitted session mode. Pending settings changes block duplicate selection
+and new sends; failures retain the previous selection and appear in Settings.
+Plan temporarily sends a single-agent planning turn without changing the workflow.
 The TUI shares the same runtime.
 
 ## Build
@@ -11,7 +26,6 @@ The TUI shares the same runtime.
 Requirements:
 
 - Go from `go.mod`.
-- Bun for the AST/LSP runtime packages.
 - Rust from `gpui/rust-toolchain.toml` when building GPUI.
 - macOS for the signed application bundles.
 
@@ -278,6 +292,30 @@ Parallel Subagent launches render as one bounded collaboration card. Its
 horizontal margins are included in layout rather than added to `width:100%`.
 Live, queued, and failed work retains progress detail; completed work collapses
 to one compact summary without a duplicate completion column.
+Vibe dispatches use the same card, linked to the actual parent tool
+call in both live events and restored history. Active cards open automatically
+and respect manual disclosure until their lifecycle changes. Rows show the
+workflow/worker tier, actual model, latest activity, status and elapsed time;
+clicking a row opens that worker's transcript. Mixed read/dispatch groups retain
+their ordinary tool details. Reusing a parked worker links its new run to the
+current send call instead of losing the dispatch card. Vibe worker names,
+registries, parked workers and peer mailboxes are scoped to their owning
+session, so independent chats can safely use the same worker names. Legacy
+registry rows are checked against the stored worker owner during restoration.
+Fusion presents one main conversation: handoff prompts, Sidekick thinking,
+progress, actual tools and returned reports appear in their execution order.
+Child prose carries a `Sidekick · model` source caption and never counts as the
+lead's final answer. Handoff details show the actual prompt and any error in
+readable text. Fusion contributes no subagent sidebar rows or environment-panel
+agent counts. Its independent persistent context, approval IDs and model usage
+remain intact. Selection and reconnect restore the same process, including older
+retained transcripts, without repeating earlier handoffs' context. Private system,
+hook and compaction messages remain excluded from the conversation display.
+Stream activity previews use accumulated bounded text instead of the last token.
+The run clock restores the backend start timestamp and keeps it across projection
+refreshes; worker updates and navigation must not restart the elapsed timer.
+Terminal state projections retain that timestamp until the final run event
+records the completed duration.
 Todo detail preserves the durable phase hierarchy, shows overall and per-phase
 completion counts, and updates in place on every `todo_updated` event. Newly
 guided items therefore appear under their chosen phase; cancelled items retain
@@ -438,6 +476,40 @@ it back for a normal turn. Failed and cancelled runs pause their queue before
 releasing the active run, so a failed final cannot silently dispatch the next task.
 Diff line-number gutters grow with the source line count and never wrap digits.
 
+### Text selection and copy
+
+Typing `@` opens File and Conversation choices. File selection retains the
+existing workspace search and file reference behavior. Conversation selection
+searches titles in the current project, excluding the current and archived
+conversations. A selected conversation appears as an inline title with a chat
+icon; keyboard selection, atomic deletion and copying preserve its target.
+The portable `@[title](azem-session:id)` mention survives queued sends and edits.
+Visible messages show the conversation title instead of its internal ID.
+
+Sending a mention snapshots the source's existing Recap and recent three user
+exchanges into the current user block. Missing summaries require no extra model
+call. The runtime verifies project ownership and treats excerpts as historical
+data, preserving their source and any truncation marker. Normal sends, queued
+dispatch and live guidance share the same resolver; later turns and checkpoint
+rebuilds use the saved snapshot rather than rereading a changing source.
+
+Chat messages and shared Markdown views support mouse drag selection across
+paragraphs, wrapped lines, tables and fenced code in the same message or document.
+Double-click selects a word, triple-click selects a line, Shift-click extends the
+selection, Cmd+A selects that message/document, and Cmd+C copies the selected
+rendered text. The existing reply copy button still copies the full reply.
+Selection uses GPUI's shaped glyph positions, including centered text. It remains
+stable across redraws and appended streaming content, clears on source replacement,
+and handles dragging beyond the text bounds. Copy shortcuts follow focus, so the
+composer keeps its existing editing and copy behavior.
+
+Multiline inputs accept trackpad and mouse-wheel scrolling once the draft exceeds
+the visible height. Manual scroll offsets survive caret blinking and unrelated
+redraws. Editing, paste, IME updates and cursor movement reveal the caret only as
+far as needed; scrolling does not move the caret or change the draft. Overscroll
+clamps at both edges without scrolling the conversation behind the editor, and
+text/selection/caret painting stays clipped to the input viewport.
+
 ### Native pending approvals
 
 A pending manual approval is shown above the GPUI composer with the requested action, Allow once, and Reject. The thread status reads Approval required: the governed command has not executed. Decisions use the existing session-scoped resolve_approval action; duplicate clicks are blocked until acknowledgement, and failed submissions retain the approval for retry. Reconnect snapshots retain the requested action, tool, target, and risk. For an older daemon that omitted metadata, GPUI displays the matching tool arguments. Navigating to another session never displays or resolves the first session's approval.
@@ -464,6 +536,42 @@ then checked against `/Users/viking/agents_dev/synara/apps/web/src/index.css`,
 
 Reduced motion disables conversation and popup entry and preserves immediate
 navigation. Completed conversation transitions stop requesting animation frames.
+
+Right side panel widths are saved per session in `gpui-window.json` when a drag
+ends, including lost focus or session navigation. Reopening a panel, selecting
+another session, and restarting restore that session's width. Sessions without
+an adjustment use the existing half-workspace default. Rendering clamps to the
+available space without overwriting the saved width, so widening the window
+restores the user's setting. Review, files, terminal and agent views share this
+session preference; opening a panel alone does not create an override.
+Native verification retained separate 443 px and 598 px widths through panel
+reopening, session A → B → A, and a full renderer/daemon restart.
+
+Closing a subagent detail/roster or workspace side panel reveals the Environment
+card during the same 300 ms motion. Card opacity and the transcript/composer's
+reserved space follow the current visible panel width, including reversed
+toggles; clearing the outgoing agent selection at completion does not start a
+second animation or change the reserved width. As it hides, the fixed-width card
+slides right by up to its reserved width and down by 18 px, underneath the
+foreground side panel, with a late opacity fade. Showing it reverses that path.
+The standalone Environment toggle uses the existing 200 ms reversible popup
+motion and retains the outgoing card until it finishes; closing controls are
+blocked during exit. Dragging the right divider across the fit threshold starts
+a separate 200 ms fit transition in the resize event itself. The card retains
+its anchor at the visible panel edge while sliding behind it; releasing the
+mouse lets the transition finish, and dragging back reverses the current pose.
+Opening/closing the side panel stays on its shared 300 ms timeline without a
+second clock, and the transcript keeps its minimum width during a resize exit.
+Wide workspaces keep ordinary panels and Environment
+alongside each other; narrow windows and the Environment toggle retain their
+visibility limits. Reduced motion settles the side panel and card immediately.
+Native hide/show and agent-panel open/close checks confirmed that hidden card
+controls disappear after exit and return on reveal, while the saved 751 px
+side-panel width remains unchanged.
+The rebuilt app was also exercised by dragging the divider from 866 px to
+920 px and back across the 897 px fit boundary: the card hid and returned,
+and the original panel width was restored. Deterministic checks cover the
+intermediate pose, reversal and reduced motion.
 The initial restored window is visible immediately. Opening search over a
 conversation does not replay its entry. Native popup surfaces remain opaque;
 CSS backdrop blur and nested-dialog scale are not yet native equivalents.
@@ -477,6 +585,12 @@ Popup lifetime is frame-driven and supports reversal from the current opacity. R
 The final packaged build was additionally checked for full-workspace Settings, the centered Appearance page, populated virtual provider/model lists, model/permission/branch menu open and Escape close, removal of settled menus from the accessibility tree, and conversation A → B → A with project PR controls retained. No provider, permission or branch selection was changed during acceptance. `make test-gpui` and `make gpui` passed, including strict codesign verification.
 
 Model routing uses stacked full-width workflow and subagent groups. Each row keeps its purpose beside aligned model/provider and reasoning selectors, wrapping controls on narrow windows. Both route picker kinds use the shared reversible popup lifecycle; opening reasoning must not be gated on the model-only picker kind.
+
+Settings route buttons and the composer share the selected-model family name.
+Devin and Cursor depth labels come from the selected catalog variant, including
+when an older saved reasoning value disagrees. Changing depth resolves an enabled
+variant in that same family and saves its exact model ID together with the depth;
+Vibe, Fusion, shared helpers and subagent routes all use this selection path.
 
 Non-catalog Settings content and headers must not flex-shrink: the outer scrolling viewport measures the full intrinsic content height. Each section (including extension sub-tabs) has its own stable scroll element ID. Native acceptance reproduced the previously immobile routes page and verified scrolling through the final worker row after the fix, with readable purpose labels and the reasoning picker visible.
 
@@ -492,6 +606,121 @@ The environment card omits Todo and groups workspace controls, Editor view, and 
 
 The environment Recap is always visible below its section label, without a disclosure arrow or toggle state.
 
+The sidebar's project `+` opens the native single-folder picker attached to the current window. Select an existing folder or use macOS's New Folder control to create one, then add it through the existing `open_project` bridge. The bridge validates and remembers the project before switching the same window. Cancel preserves the current view; invalid path encoding and bridge failures appear below the project heading, and repeated clicks do not open duplicate pickers. A snapshot without a session projection, including a reserved startup session ID, clears the previous conversation, title and runtime details so a newly added project opens its own empty conversation page. Expanded projects without visible conversations show a localized None yet placeholder; Each project initially shows five conversations. Show more reveals the next five, remains available while more conversations remain, and disappears at the end. Show less is available after the first expansion and returns to five; short and empty lists have neither control.
+
+The macOS bundle declares English and Simplified Chinese in `CFBundleLocalizations`, allowing system panels to follow the macOS app language preference; the picker title uses Azem's selected locale. After the backend catalog confirms that the current conversation was archived, the window selects the next unarchived conversation in that project, or the preceding one if it was last. With no remaining conversation, it creates a new one in the current project. Automatic workspace restoration skips archived selections while retaining their history for explicit reopening. Archiving another conversation leaves the current selection in place.
+
+Sidebar project and conversation reordering uses a 240 ms ease-out translation from each item's measured previous position. Stable project paths and session IDs retain motion through sorting, and an interrupted move continues from the currently displayed position. Each nested list excludes scrolling and parent motion from its measurements; hitboxes move with the content. Project disclosure and each five-item Show more step or Show less use the same 240 ms easing to clip the list height in both directions, including the active project. Each project owns its expansion state; non-active projects retain their own Show more control when they have more than five visible conversations. Nested list height changes do not restart the enclosing disclosure. Hidden conversation rows do not enter the accessibility or keyboard navigation order. Click handlers notify the view; animation-frame requests run only during prepaint, because GPUI has no rendering view in a mouse callback. Removed projects release their motion state, and reduced motion disables translation, height transitions and animation frames.
+
 The native window uses one 46 px top row: traffic lights and the sidebar toggle share the conversation title/actions row. Sidebar content starts below that row; collapsing the sidebar reserves space for window controls before the title. There is no separate full-width titlebar strip.
+The right panel's divider sits on its left edge, aligned with the subagent tab bar above; its drag target remains 7 px wide inside the panel.
 
 Settings also paints through the native titlebar: only its navigation content reserves the 46 px window-control area, so the sidebar background reaches the window top without a separate white strip.
+
+### Experimental MoonBit/WGPU client demo
+
+An isolated macOS prototype lives in
+[`experiments/moonbit-wgpu`](../experiments/moonbit-wgpu/README.md).
+MoonBit defines UI descriptions and state; a Rust C ABI host uses egui/eframe
+with WGPU for native rendering. It has no daemon or persistence connection.
+Run `./experiments/moonbit-wgpu/run.sh run`; the prototype README records its
+FFI/GPU checks and the remaining visual/IME acceptance gap.
+
+### Native workspace file previews
+
+Changes and non-Markdown text previews use GPUI's uniform list to lay out and
+highlight only visible lines, including a width measurement row for horizontal
+scrolling. Line numbers and diff hunk positions are prepared once per file
+response, outside repaint. Selecting another file releases the old prepared
+preview and resets both scroll axes. Existing backend preview byte limits and
+truncation flags are preserved; virtualization does not discard extra rows.
+Diff additions and deletions fill the entire visible row. Source rows carry
+their own font metrics so width measurement matches painting; a bottom scrollbar
+also provides pointer access to long lines.
+
+The file browser uses fixed-height, non-shrinking rows with folder/file icons and an independently scrollable directory pane. Markdown files (`.md`, `.markdown`, `.mdown`, case-insensitive) use the shared Markdown renderer. Other text files use the existing diff syntax palette selected by extension, preserve code line spacing and indentation, and support horizontal scrolling for long lines. Unknown extensions remain plain monospace text.
+
+Directory previews provide an Up action for nested workspace-relative paths and stop at the workspace root. Markdown previews wrap to the pane width, render table cells as aligned columns, and interpret standalone `<div align="center">` wrappers and `</div>` as native centering rather than visible tags. This is native Markdown formatting, not an HTML/browser execution surface; unsupported HTML stays literal. Inline HTML in explanatory prose remains visible.
+
+An unselected file shows the localized selection hint instead of serializing the null selection. Empty text files stay empty, and literal `null` file content remains visible. The file tree shares file-reference icon selection: Markdown, source, configuration, images, media, shell, databases, archives, fonts and generic documents are distinguished; Git dotfiles, environment files, build scripts and dependency manifests/locks have filename-specific icons.
+
+### Built-in image viewer
+
+Selecting a PNG, JPEG, GIF or WebP file opens it inside the workspace preview pane, using the authenticated workspace-file response rather than launching another app. The image keeps its aspect ratio and fits the available pane; its workspace-relative path remains visible. The existing 8 MiB image limit is enforced before base64 decoding in the renderer. Invalid image data gets a load-failure message; binary or oversized files get an unsupported-preview message. This viewer does not add SVG execution, editing or animation playback controls.
+
+Workspace file-list and preview panes have visible vertical scroll thumbs when their content overflows, with track click/drag controls and independent offsets. Directory/file selection resets its own offset. Images are base64-decoded once per successful file response and retained as a shared GPUI image for redraws; directory rows borrow the current listing instead of cloning its JSON array on every render.
+
+Raster image MIME is detected from file bytes before preview decoding, so supported raster images with a mismatched filename extension still open. Images fitted to the pane do not retain the previous text file's scrollbar.
+
+Plain-text and source previews show a right-aligned line-number gutter, including blank lines. The gutter grows with the line count and shares a fixed row height with syntax-highlighted content; Markdown and image previews do not receive source line numbers.
+
+Workspace file trees use a bundled MIT-licensed Material Icon Theme subset, with original SVG colors and filename/extension matching. Image handles are cached across redraws. Source revision and attribution live in `gpui/assets/file-icons/README.md` and `LICENSE`; no network access is needed for icons.
+
+The workspace home is a bounded, scrollable overview: project and branch identity, direct file/change/PR/terminal actions, a virtualized list of all returned changed files, and six recent project conversations. Entering the overview refreshes changes and PR data; file rows open their diff and activity rows use native session selection. PR summaries do not infer successful checks from the existence of a PR. The changes and activity panes scroll independently within the remaining window height.
+
+Workspace change previews share the transcript diff parser and row renderer: red/green change backgrounds, old/new line numbers, and path-based syntax highlighting, with horizontal scrolling for long lines.
+
+The file, change and pull-request views expose a clickable workspace Back control. Escape returns to the overview after higher-priority overlays have been dismissed; in the PR view it closes an open detail first. Both return paths refresh overview data.
+
+Workspace overview density uses 28 px toolbar controls, 32 px file rows and 32 px conversation rows. Branch metadata and navigation share one toolbar; the all-changes action takes only its content width.
+
+The overview no longer caps changes at 20 rows. Its virtual list fills the available height and uses the shared draggable scroll thumb; only visible file rows are rendered.
+
+Workspace home, files, changes and pull-request surfaces share density constants in `surfaces.rs`: 28 px controls, 32 px single-line rows, 40 px toolbars, 13 px body text, 12 px metadata, 15 px section titles and 16 px file icons. Two-line PR entries use 48 px. Files, changes and PRs share their header; home and changes share the same virtualized file row. The change summary is one compact row, and changing the selected diff resets its independent scroll offset.
+
+The pull-request dashboard uses one shared workspace toolbar with repository and refresh controls, followed by 28 px pill-shaped Open, Current branch and Created by me tabs with rounded count badges. Active tabs use a soft accent fill; hover and keyboard focus keep the rounded shape without a bottom underline. Each tab counts its loaded rows and retains access to the existing PR details and actions. The selected category has a single compact empty state ("暂无" / "None yet"); refreshing and request failures have separate feedback. The list scrolls below the fixed toolbar and tabs, and refresh requests are coalesced while one is pending.
+
+Opening Settings, entering the model catalog, or selecting a subscription provider
+requests the provider catalog again even when cached rows are visible. The daemon
+refreshes subscription quota asynchronously and coalesces overlapping requests;
+cached quota stays visible until the live result arrives.
+Catalog refreshes update the existing model grid in place. Native event decoding
+normalizes raw catalog capability flags and Fast service tiers to the same shape
+as provider-list rows, so unchanged models keep their capability icons and
+switches throughout refresh. The configured-catalog round trip retains Fast
+support. Search, selected provider and scroll handles are not reset; genuine
+capability removals still replace the old values.
+
+The ChatGPT `GPT-5.6 Sol` and `GPT-6 Astra` model cards each expose an independent
+272K / 1M segmented context selector at the bottom right beside the capability
+icons. 272K selects the subscription default; 1M selects the 1,050,000-token
+extended window. The selection highlight slides between segments. It defaults to 272K and sends
+`set_model_extended_context` with the provider, exact model ID, and boolean
+decision. Saved changes update both Settings and model pickers through the local
+catalog projection without starting catalog or quota fetches. The switch persists
+in `providers.chatgpt.extended_context_models`; on uses 1,050,000 tokens and off
+restores the subscription catalog default. Other providers and models have no
+such switch. New route resolutions and manual compaction use the saved limit.
+Context composition counts use `k` below one million and `M` from one million,
+with up to two decimal places (`21.1k / 1.05M`) and no trailing decimal zeroes.
+
+Native switches share GPUI's stateful, critically damped spring for thumb
+position and track color. Context segments use the same spring for their
+selection indicator; Settings choices (workflow, governance, security mode,
+appearance, extension tabs/scope and usage scope), Plan and Fast controls fade
+their selected background. Stable element IDs preserve position and velocity
+when an in-progress transition reverses. Initial mounts start at the selected
+state, settled controls stop requesting frames, and app reduced-motion preferences
+resolve directly to the target. No background animation timer runs.
+
+### Native conversation tree appearance
+
+The sidebar project/session tree uses a subtle blue active-project edge and
+white selected session cards. All conversation titles use regular weight, including
+the selected session. Idle sessions have no hollow status dot; running and unread indicators remain.
+
+Drag the sidebar's right edge to resize it; the workspace follows the edge while
+the navigation stays clipped at a readable width. Releasing below 100 px collapses
+it; otherwise it settles between 200 and 400 px, also bounded by the space needed
+for the workspace. The collapsed window keeps an 8 px drag target at the left edge
+to pull the sidebar back out. The titlebar button reopens the last expanded width
+for this window. The focused divider also accepts Left/Right and Home/End.
+Dragging follows the pointer directly; settling reuses the existing sidebar
+transition and becomes immediate with reduced motion. Mouse release outside the
+divider or window deactivation ends the drag.
+
+### Model availability updates
+
+Model enable/disable actions publish the saved availability to Settings and model
+pickers without scheduling subscription catalog or quota refreshes. Explicit
+model discovery and normal provider-list loading retain their refresh behavior.

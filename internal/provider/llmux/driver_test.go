@@ -47,7 +47,7 @@ func TestProfilesAndStreamMapping(t *testing.T) {
 		if index > 0 && profiles[index-1].ID >= profile.ID {
 			t.Fatalf("profiles are not sorted and unique at %q", profile.ID)
 		}
-		if profile.ID == "chatgpt" || profile.ID == "grok" || profile.ID == "cursor" {
+		if profile.ID == "chatgpt" || profile.ID == "grok" || profile.ID == "cursor" || profile.ID == "devin" {
 			t.Fatalf("reserved Azem provider leaked into llmux settings: %q", profile.ID)
 		}
 		foundOpenAI = foundOpenAI || profile.ID == "openai"

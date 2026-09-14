@@ -5,7 +5,7 @@ use gpui::{HighlightStyle, Rgba, StyledText};
 use crate::theme::ThemePalette;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Language {
+pub(crate) enum Language {
     Rust,
     Go,
     JavaScript,
@@ -31,7 +31,7 @@ pub(super) enum TokenKind {
     Property,
 }
 
-pub(super) fn language_for_path(path: &str) -> Language {
+pub(crate) fn language_for_path(path: &str) -> Language {
     let ext = std::path::Path::new(path)
         .extension()
         .and_then(|ext| ext.to_str())
@@ -56,7 +56,7 @@ pub(super) fn language_for_path(path: &str) -> Language {
     }
 }
 
-pub(super) fn highlighted_code(
+pub(crate) fn highlighted_code(
     text: &str,
     language: Language,
     palette: ThemePalette,

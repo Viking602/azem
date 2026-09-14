@@ -252,18 +252,6 @@ func (b *bootstrapAssembly) buildCore(forceWorkspace, desktopMode bool) error {
 	if err != nil {
 		return err
 	}
-	if b.customTools != nil {
-		b.coding.SetFileMutationBroker(b.customTools)
-		drivers, driverErr := b.customTools.Drivers()
-		if driverErr != nil {
-			_ = b.customTools.Close(context.Background())
-			return driverErr
-		}
-		if err := b.coding.AttachExternalTools(drivers, b.customTools.Close); err != nil {
-			_ = b.customTools.Close(context.Background())
-			return err
-		}
-	}
 	b.subagentRuns, err = agentservice.NewSQLSubagentRunStore(b.store.DB(), b.store.Blobs())
 	if err != nil {
 		return err
@@ -291,8 +279,7 @@ func (b *bootstrapAssembly) wireService() error {
 		}
 	}
 	b.service.AttachPlugins(pluginCatalogEntries(b.pluginCatalog), pluginDiagnostics(b.pluginCatalog))
-	b.service.AttachCommands(b.commandCatalog, append(append(append([]string(nil), b.commandDiagnostics...), b.customDiagnostics...), b.extensionDiagnostics...))
-	b.service.AttachExtensionHost(b.customTools)
+	b.service.AttachCommands(b.commandCatalog, append(append([]string(nil), b.commandDiagnostics...), b.extensionDiagnostics...))
 	b.service.AttachThemes(b.extensionThemes, b.extensionDiagnostics)
 	b.service.AttachPluginRuntime(plugins.Options{
 		HomeDir: b.homeDir, DataDir: b.paths.DataDir, WorkspaceDir: b.paths.Workspace,

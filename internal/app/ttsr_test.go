@@ -3,11 +3,12 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
-	agentservice "github.com/Viking602/azem/internal/agent"
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/session"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
@@ -22,11 +23,6 @@ func TestTTSRMatchesCrossDeltaTextPersistsAndInjectsOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer provider.Close(ctx)
-	coding, err := agentservice.NewService(provider, t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer coding.Close(ctx)
 	sessions := session.NewService(provider.DB(), provider.Blobs())
 	if _, err := sessions.Ensure(ctx, session.Session{ID: "ttsr", Title: "TTSR"}); err != nil {
 		t.Fatal(err)
@@ -35,7 +31,7 @@ func TestTTSRMatchesCrossDeltaTextPersistsAndInjectsOnce(t *testing.T) {
 	hook, err := newTTSRHook(config.TTSRConfig{
 		Enabled: true, ContextMode: "discard", InterruptMode: "always", RepeatMode: "once", RepeatGap: 10,
 		Rules: []config.StreamRuleConfig{{Name: "forbidden-call", Content: "Use the safe call instead.", Conditions: []string{`forbidden\s+call`}, Scope: []string{"text"}}},
-	}, coding, sessions, "ttsr", "run", control)
+	}, sessions, "ttsr", "run", control)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,26 +55,15 @@ func TestTTSRMatchesCrossDeltaTextPersistsAndInjectsOnce(t *testing.T) {
 	}
 }
 
-func TestTTSRScopesDeferredToolRulesAndASTSnapshots(t *testing.T) {
+func TestTTSRScopesDeferredToolRules(t *testing.T) {
 	ctx := context.Background()
-	provider, err := sqlitestore.Open(ctx, ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer provider.Close(ctx)
-	coding, err := agentservice.NewService(provider, t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer coding.Close(ctx)
 	control := newTurnControlQueue()
 	hook, err := newTTSRHook(config.TTSRConfig{
 		Enabled: true, ContextMode: "keep", InterruptMode: "always", RepeatMode: "once", RepeatGap: 10,
 		Rules: []config.StreamRuleConfig{
 			{Name: "deferred-ts", Content: "Remove the dangerous marker.", Conditions: []string{"dangerous"}, Scope: []string{"tool:coding.write_file(*.ts)"}, InterruptMode: "never"},
-			{Name: "no-console", Content: "Use the project logger.", ASTConditions: []string{"console.log($MSG)"}, Scope: []string{"tool:coding.write_file(*.ts)"}},
 		},
-	}, coding, nil, "ttsr", "run", control)
+	}, nil, "ttsr", "run", control)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,39 +78,23 @@ func TestTTSRScopesDeferredToolRulesAndASTSnapshots(t *testing.T) {
 	if err != nil || len(deferred) != 1 || deferred[0].Kind != turnControlFollowUp {
 		t.Fatalf("deferred TTSR control = %#v, %v", deferred, err)
 	}
-
-	astControl := newTurnControlQueue()
-	astHook, err := newTTSRHook(config.TTSRConfig{
-		Enabled: true, ContextMode: "keep", InterruptMode: "tool-only", RepeatMode: "once", RepeatGap: 10,
-		Rules: []config.StreamRuleConfig{{Name: "no-console", Content: "Use the project logger.", ASTConditions: []string{"console.log($MSG)"}, Scope: []string{"tool:coding.write_file(*.ts)"}}},
-	}, coding, nil, "ttsr", "run", astControl)
-	if err != nil {
-		t.Fatal(err)
-	}
-	matched, astErr := coding.MatchASTSnapshot(ctx, `console.log("unsafe")`, "ts", []string{"console.log($MSG)"})
-	if astErr != nil {
-		t.Skip(astErr)
-	}
-	if !matched {
-		t.Fatal("AST fixture did not match")
-	}
-	arguments, _ = json.Marshal(map[string]any{"path": "main.ts", "content": `console.log("unsafe")`})
-	if matchErr := astHook.OnEvent(ctx, hyprovider.Event{Kind: hyprovider.EventToolCall, ToolCall: &message.ToolCall{ID: "write-2", Name: "coding.write_file", Arguments: arguments}}); matchErr != nil {
-		t.Fatalf("AST TTSR queue = %#v", matchErr)
-	}
-	steers, err := astControl.Drain(ctx, turnControlBeforeModel)
-	if err != nil || len(steers) != 1 || steers[0].Kind != turnControlSteer {
-		t.Fatalf("AST TTSR control = %#v, %v", steers, err)
-	}
 }
 
 func TestProviderRuntimeTTSRInterruptsAndRegenerates(t *testing.T) {
 	ctx := context.Background()
+	continued := make(chan struct{})
 	harness := newSkillRuntimeHarness(t, "---\nname: demo\ndescription: stable catalog\n---\nstable body\n", nil, func(call int, body string, writer http.ResponseWriter) {
 		switch call {
 		case 1:
-			writeProviderText(writer, "ttsr-primary-1", "FORBIDDEN_GENERATION")
+			fmt.Fprint(writer, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"FORBIDDEN_GENERATION\"}\n\n")
+			writer.(http.Flusher).Flush()
+			select {
+			case <-continued:
+			case <-time.After(3 * time.Second):
+				t.Error("host waited for the stalled provider to finish instead of interrupting it")
+			}
 		case 2:
+			close(continued)
 			if !strings.Contains(body, "Use SAFE_GENERATION instead") || !strings.Contains(body, "stream-rule") {
 				t.Errorf("TTSR injection missing from retry: %s", body)
 			}
@@ -161,5 +130,10 @@ func TestProviderRuntimeTTSRInterruptsAndRegenerates(t *testing.T) {
 	}
 	if _, err := harness.service.sessions.LoadLatestArtifactByKind(ctx, "ttsr-e2e", ttsrArtifactKind); err != nil {
 		t.Fatalf("missing durable TTSR evidence: %v", err)
+	}
+	var total, interrupted, completed int
+	err = harness.store.DB().QueryRowContext(ctx, `SELECT count(*), sum(status='unknown' AND completed_at > 0 AND input_tokens=0 AND output_tokens=0), sum(status='completed') FROM provider_requests WHERE session_id='ttsr-e2e'`).Scan(&total, &interrupted, &completed)
+	if err != nil || total != 2 || interrupted != 1 || completed != 1 {
+		t.Fatalf("physical requests: total=%d interrupted=%d completed=%d, %v", total, interrupted, completed, err)
 	}
 }

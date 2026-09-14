@@ -260,12 +260,13 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 	subagents := r.subagents
 	subagentInitErr := r.subagentInitErr
 	r.mu.RUnlock()
+	directorMode := request.VibeMode || request.AgentMode == "fusion"
 	if subagentInitErr != nil {
 		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, subagentInitErr.Error(), subagentInitErr)
 		return nil, hyagent.Engine{}, subagentInitErr
 	}
-	if request.VibeMode && subagents == nil {
-		err := fmt.Errorf("vibe mode requires an initialized subagent runtime")
+	if directorMode && subagents == nil {
+		err := fmt.Errorf("director mode requires an initialized subagent runtime")
 		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, err.Error(), err)
 		return nil, hyagent.Engine{}, err
 	}
@@ -275,7 +276,7 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 		_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, err.Error(), err)
 		return nil, hyagent.Engine{}, err
 	}
-	if managedSkill := r.coding.ManagedSkillDriver(); managedSkill != nil && !request.VibeMode {
+	if managedSkill := r.coding.ManagedSkillDriver(); managedSkill != nil && !directorMode {
 		workspaceDrivers = append(workspaceDrivers, managedSkill)
 	}
 	if request.origin == turnOriginAutoLearn {
@@ -287,7 +288,7 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 	drivers := make([]tool.Driver, 0, len(workspaceDrivers)+9)
 	toolNames := make([]string, 0, len(workspaceDrivers)+8)
 	var checkpoint *checkpointController
-	if host != nil && host.Sessions() != nil && !request.VibeMode {
+	if host != nil && host.Sessions() != nil && !directorMode {
 		checkpoint, err = newCheckpointController(ctx, host.Sessions(), request.SessionID, run.RunID)
 		if err != nil {
 			_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, err.Error(), err)
@@ -302,7 +303,7 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 			toolNames = append(toolNames, definition.Name)
 			continue
 		}
-		if request.VibeMode && !vibeDirectorWorkspaceTool(definition.Name) {
+		if directorMode && !vibeDirectorWorkspaceTool(definition.Name) {
 			continue
 		}
 
@@ -345,7 +346,7 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 			toolNames = append(toolNames, submitPlanToolName)
 		}
 	}
-	if manager != nil && !request.VibeMode && request.origin != turnOriginAutoLearn {
+	if manager != nil && !directorMode && request.origin != turnOriginAutoLearn {
 		for _, external := range manager.Snapshot() {
 			definition := external.Definition()
 			governed := &governedAgentTool{
@@ -359,7 +360,7 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 		parentRuntime := subagentParentRuntime{
 			SessionID: request.SessionID, ParentRunID: run.RunID, ParentAgentID: run.HolderID,
 			ProviderID: request.Provider, AccountID: accountID, ModelID: modelID, Reasoning: request.Reasoning, ContextTokenTarget: contextTarget,
-			PlanMode: request.PlanMode, DirectorReadOnly: request.VibeMode,
+			PlanMode: request.PlanMode, DirectorReadOnly: directorMode,
 			ContextConfig: r.cfg.Agents.Context,
 			WorkspaceRoot: r.cfg.Workspace.Root, Driver: driver, Coding: r.coding, Host: host,
 			ResolveDriver: func(ctx context.Context, provider, model, reasoning string) (string, int, hyprovider.Driver, error) {
@@ -378,6 +379,18 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 				return resolvedAccount.ID, resolvedModel, window, resolved, resolveErr
 			},
 		}
+		var fusion *fusionDriver
+		if request.AgentMode == "fusion" {
+			r.mu.RLock()
+			fusionRoute := r.cfg.Agents.Fusion
+			r.mu.RUnlock()
+			fusion, err = newFusionDriver(ctx, subagents, parentRuntime, fusionRoute)
+			if err != nil {
+				_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, err.Error(), err)
+				return nil, hyagent.Engine{}, err
+			}
+			parentRuntime = fusion.parent
+		}
 		subagentDrivers, buildErr := subagents.Drivers(parentRuntime)
 		if buildErr != nil {
 			_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, buildErr.Error(), buildErr)
@@ -389,6 +402,9 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 				_ = r.coding.CompleteRun(context.WithoutCancel(ctx), run, buildErr.Error(), buildErr)
 				return nil, hyagent.Engine{}, buildErr
 			}
+		}
+		if fusion != nil {
+			subagentDrivers = []tool.Driver{fusion}
 		}
 		for _, external := range subagentDrivers {
 			definition := external.Definition()
@@ -416,11 +432,11 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 	activeSkills := mergeSkillNames(skillSnapshot.Eager, request.ActiveSkills)
 	activeSkills = mergeSkillNames(activeSkills, loadSessionActivatedSkills(ctx, host, request.SessionID, skillSnapshot.Registry))
 	availableSkills := skillSnapshot.Available
-	if request.VibeMode {
+	if directorMode {
 		activeSkills = nil
 		availableSkills = nil
 	}
-	instructions, instructionFingerprint := turnInstructionsWithProject(request.PlanMode, request.projectContext)
+	instructions, instructionFingerprint := turnInstructionsWithProject(request.PlanMode, request.projectContext, request.AgentMode)
 	toolDefinitionTokens := estimateToolDefinitionTokens(drivers)
 	budgetConfig, err := calculateContextBudget(modelID, contextWindow, toolDefinitionTokens, r.cfg.Agents.Context)
 	if err != nil {
@@ -696,7 +712,7 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 	loopGuardConfig := r.cfg.Agents.LoopGuards
 	loopGuardConfig.ToolCallExemptTools = append([]string(nil), loopGuardConfig.ToolCallExemptTools...)
 	r.mu.RUnlock()
-	ttsr, ttsrErr := newTTSRHook(ttsrConfig, r.coding, func() *session.Service {
+	ttsr, ttsrErr := newTTSRHook(ttsrConfig, func() *session.Service {
 		if host != nil {
 			return host.Sessions()
 		}
@@ -761,7 +777,7 @@ func (r *ProviderRuntime) buildSingleRun(ctx context.Context, request TurnReques
 			},
 		))
 	}
-	engine = bindTurnControl(engine, turnControl)
+	engine = bindTurnControl(engine, turnControl, deadlineAt)
 	return run, engine, nil
 }
 
@@ -901,11 +917,29 @@ func loadSessionActivatedSkills(ctx context.Context, host providerHost, sessionI
 	if host == nil || host.Sessions() == nil || strings.TrimSpace(sessionID) == "" {
 		return nil
 	}
-	records, err := host.Sessions().ListToolRecords(ctx, sessionID)
+	projection, err := host.Sessions().LoadDisplayProjection(ctx, sessionID)
 	if err != nil {
 		return nil
 	}
-	return filterResolvableSkills(registry, sessionActivatedSkillNames(records))
+	return filterResolvableSkills(registry, sessionActivatedSkillNames(rootToolRecords(projection)))
+}
+
+func rootToolRecords(projection session.Projection) []session.ToolRecord {
+	// Child tool evidence shares the session store, not the lead's active
+	// skill prefix. Hoisting child activations rewrites both cached contexts.
+	rootRuns := make(map[string]bool)
+	for _, block := range projection.Blocks {
+		if block.AgentID == "" && (block.Kind == "user" || block.Kind == "assistant") {
+			rootRuns[block.RunID] = true
+		}
+	}
+	records := make([]session.ToolRecord, 0, len(projection.ToolRecords))
+	for _, record := range projection.ToolRecords {
+		if rootRuns[record.RunID] {
+			records = append(records, record)
+		}
+	}
+	return records
 }
 
 func sessionActivatedSkillNames(records []session.ToolRecord) []string {
@@ -1086,6 +1120,9 @@ func (r *ProviderRuntime) TeamResolver(ctx context.Context, request TurnRequest)
 }
 
 func retryProviderDriver(ctx context.Context, host providerHost, sessionID, runID, providerID string, policy config.RetryConfig, driver hyprovider.Driver) hyprovider.Driver {
+	if providerID == "chatgpt" {
+		driver = codex.WithTurnAffinity(driver)
+	}
 	if !policy.Enabled || policy.MaxRetries <= 0 {
 		return providerretry.WithRetry(driver, providerretry.RetryConfig{})
 	}

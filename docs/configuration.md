@@ -17,11 +17,11 @@ before runtime construction. The default file is `~/.azem/config.yaml`;
 | `providers` | Subscription transports and llmux provider/model registry |
 | `retry` | Agent retry count and exponential backoff bounds |
 | `agents` | Main, Team, title, plan, approval, vision, recap, Advisor, Vibe, loop guards, context, and subagent routes/budgets |
-| `ttsr` | Stream text/AST interruption rules, context handling, and repeat policy |
+| `ttsr` | Stream text interruption rules, context handling, and repeat policy |
 | `security` | Native Standard/Deep defaults, stopping conditions, budgets, and audit/reducer/fixer/verifier model routes |
 | `skills` | Discovery, trust, eager activation, and disabled entries |
 | `plugins` | Azem-owned/Codex/marketplace packages, auto-update, and explicit hook trust |
-| `extensions` | Bun tools, commands, providers, agents, themes, and project-code trust |
+| `extensions` | File-based custom commands, agents, themes, and project-code trust |
 | `autolearn` | Managed Skill learning threshold and automatic continuation |
 | `discovery` | Cross-harness context, rules, Skills, MCP, and hook discovery |
 | `mcp` | Stdio or HTTP servers, environment, headers, OAuth, resources, prompts, notifications, timeouts, and tool policies |
@@ -109,6 +109,10 @@ agents:
   vibe:
     fast: { provider: chatgpt, model: gpt-5.6-luna, reasoning: low }
     good: {}
+  fusion:
+    provider: chatgpt
+    model: gpt-5.6-luna
+    reasoning: low
   loop_guards:
     thinking_enabled: true
     assistant_text_enabled: true
@@ -120,10 +124,7 @@ agents:
 
 extensions:
   enabled: true
-  trust_project_code: false
-  additional_tool_paths: []
   additional_command_dirs: []
-  additional_extension_paths: []
   additional_agent_dirs: []
   additional_theme_dirs: []
 
@@ -135,9 +136,27 @@ autolearn:
 
 Goal and checkpoint state is session data rather than global YAML. Vibe routes
 inherit the active route when empty. `advisor.catchup_timeout` must be a valid
-non-negative Go duration. TTSR rules validate text conditions, AST conditions,
-scope, globs, and per-rule interruption mode. Project extension code remains
-disabled until `extensions.trust_project_code` is explicit.
+non-negative Go duration. TTSR rules validate text conditions, scope, globs, and
+per-rule interruption mode. `ast_conditions` keys are accepted for compatibility
+but no longer evaluated. `extensions.trust_project_code`,
+`extensions.additional_tool_paths`, and `extensions.additional_extension_paths`
+are legacy keys accepted for compatibility; Azem no longer runs a bundled
+JavaScript extension host, so they have no effect.
+
+Desktop execution is selected in Settings → Model routing and saved globally as
+`agents.workflow: vibe` (default) or `fusion`. Each new send uses the selected
+workflow; changing it does not interrupt an active run. Vibe's `agents.vibe.fast`
+and `agents.vibe.good` routes and Fusion's `agents.fusion` route are configured in
+separate groups and retained when switching. Shared title/plan/approval/vision/
+recap/Advisor routes apply to both workflows. The composer has no Fusion switch.
+
+Both workflows use the current conversation model as director/lead and require
+subagents with nonzero delegation depth. Fusion requires an explicit connected
+provider and model for its Sidekick; cross-provider combinations are supported.
+The session records the actual `agent_mode` (`vibe` or `fusion`) for durable
+continuations and queued work. Plan mode sends an ordinary single-agent planning
+turn without changing `agents.workflow`. Explicit TUI/API single and team modes
+remain supported through `defaults.agent_mode`.
 
 ## Skills
 
@@ -262,7 +281,7 @@ unchanged. An unknown `hooks.*` field fails closed on load.
 ## llmux providers and models
 
 `providers.llmux` is keyed by a provider ID from llmux's profile registry.
-ChatGPT, Grok, and Cursor remain Azem subscription transports and appear in
+ChatGPT, Grok, Cursor, and Devin remain Azem subscription transports and appear in
 desktop Model settings as login cards rather than API-key profiles.
 
 llmux v0.2.1 provider IDs use the canonical models.dev hyphen form, for example
@@ -400,7 +419,7 @@ secret material. TUI and GPUI consume those same daemon events and
 the same account-scoped catalogs; none keeps a client-local credential copy. An
 empty API-key field preserves and reuses the existing credential.
 
-OpenAI/ChatGPT, Grok, and Cursor subscription entries reuse the existing
+OpenAI/ChatGPT, Grok, Cursor, and Devin subscription entries reuse the existing
 credential service and live subscription catalogs. They do not accept an API
 base URL or API key in Model settings; login, account identity, plan,
 provider-specific quota, reset time, available credit balance, model
@@ -417,8 +436,24 @@ usage. The settings card labels that window weekly, monthly, or credits
 from `currentPeriod.type`. Quota failures keep the backend error on the
 settings page. Disabled subscription IDs persist in
 `providers.chatgpt.disabled_models`, `providers.grok.disabled_models`, or
-`providers.cursor.disabled_models` and follow the same picker/runtime rules as
+`providers.cursor.disabled_models`, or `providers.devin.disabled_models` and follow the same picker/runtime rules as
 llmux models.
+
+ChatGPT subscription model cards for `gpt-5.6-sol` and `gpt-6-astra` each have
+an independent 272K / 1M context selector. Both default to 272K. Enabled IDs persist
+in `providers.chatgpt.extended_context_models` and use a 1,050,000-token context
+window in model pickers, new runtime route resolutions, and manual compaction.
+Selecting 272K restores the current subscription catalog's default window;
+the raw account catalog is never overwritten. The list accepts only these two
+exact IDs and survives catalog refreshes and restarts. Model availability and
+Fast mode remain independent. Existing engines retain their captured budget.
+
+When a fetched catalog contains more than five models, newly discovered IDs
+default to disabled. Catalog refreshes preserve the availability of known IDs;
+existing saved catalogs are not reset. API discovery previews apply the same
+rule while retaining saved choices. Subscription discovery defaults persist in
+the account catalog, and explicitly enabling a model clears that default for
+its cached accounts. Both the picker and runtime enforce these defaults.
 
 A successful Grok catalog refresh treats the account's combined model API
 response as complete. Settings and runtime retain only returned chat-capable
@@ -426,6 +461,45 @@ IDs; the refresh transaction removes previously cached IDs that the API omits.
 Azem does not merge a curated Grok list. Network/authentication/decode failure
 may show the last successful account catalog only with an explicit stale
 warning.
+
+### Devin personal account
+
+In Settings → Models → Devin, choose Sign in and complete the browser login
+with your personal Devin account. TUI uses `/login devin`. No cloud-session
+API key or local proxy is needed. The daemon uses the CLI PKCE flow and listens
+on `127.0.0.1:59653` for up to five minutes; that port must be available.
+Login stores the session in the existing credential store and fetches your
+account's CLI model catalog. Use Fetch models to replace it with a fresh
+account response. Failed discovery is reported instead of inventing models.
+
+```yaml
+providers:
+  devin:
+    enabled: true
+    catalog_ttl: 5m
+    disabled_models: []
+```
+
+The native composer and route pickers group enabled variants by model family.
+Changing thinking depth or Fast selects the exact advertised variant; disabled
+and missing combinations are unavailable. Account labels identify legacy opaque
+IDs, and separate context sizes and Fusion companion models stay separate.
+Settings groups all Cursor and Devin variants into one family card, including
+disabled variants. A family switch enables or disables every variant in one
+batch; searching any raw ID or alias keeps the complete family. A partially
+enabled family shows its enabled count and switches off as a whole.
+Availability switches persist the deny list and update both Settings and routing
+without fetching quota or models.
+
+Opening the provider directory asynchronously fetches CLI `GetUserStatus` with
+the existing personal session. Settings shows reported daily and weekly remaining
+percentages and each reset in local time. A missing balance stays unreported;
+an omitted proto3 zero percentage is treated as exhausted only when its reset
+is present. Failed refreshes show the error and retain the previous successful
+quota while the shared refresh policy retries transient failures. Token/cache
+usage is recorded only when returned by a model stream. Session expiry requires Sign in again. Logout
+removes the locally stored credential. Personal plan CLI entitlement remains
+subject to Devin's account response.
 
 ### Auth broker
 
@@ -452,6 +526,13 @@ bind addresses and bearer-token files are command arguments/environment, not
 persisted secrets.
 
 ## Model routes
+
+Default worker roles include the [native tool inventory](native-tools.md).
+Explore/plan/review also receive AST search, image inspection, web search and
+memory reflection; security audit roles keep their source-only defaults.
+Configured role tool lists remain explicit allowlists. Native image generation
+uses `OPENAI_API_KEY` and optional `AZEM_IMAGE_BASE_URL`; these credentials are
+not stored in YAML. No TS runtime or package configuration is required.
 
 Desktop Role models configures these independent routes:
 

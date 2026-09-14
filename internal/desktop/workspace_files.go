@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -236,6 +237,13 @@ func readWorkspaceImage(path, mediaType string, result WorkspaceFile) (Workspace
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return WorkspaceFile{}, err
+	}
+	switch detected := http.DetectContentType(content); detected {
+	case "image/png", "image/jpeg", "image/gif", "image/webp":
+		mediaType = detected
+	default:
+		result.Kind = "binary"
+		return result, nil
 	}
 	result.Kind, result.MediaType = "image", mediaType
 	result.Content = base64.StdEncoding.EncodeToString(content)

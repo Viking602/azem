@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -15,6 +16,55 @@ import (
 	"github.com/Viking602/azem/internal/auth/grok"
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 )
+
+func TestCatalogLargeDiscoveryDefaultsAndRetainsAvailability(t *testing.T) {
+	ctx := context.Background()
+	db, err := sqlitestore.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(ctx)
+	service := NewService(db.DB(), nil)
+	count := 5
+	service.Fetchers["devin"] = func(context.Context, string) ([]Model, error) {
+		models := make([]Model, count)
+		for i := range models {
+			models[i] = Model{ID: fmt.Sprintf("model-%d", i), SupportsTools: true}
+		}
+		return models, nil
+	}
+	check := func(account string, wantDisabled []bool) {
+		t.Helper()
+		result, err := service.List(ctx, "devin", account, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Models) != len(wantDisabled) {
+			t.Fatalf("models = %+v", result.Models)
+		}
+		for i, model := range result.Models {
+			if model.Disabled != wantDisabled[i] {
+				t.Fatalf("%s %s disabled = %v, want %v", account, model.ID, model.Disabled, wantDisabled[i])
+			}
+		}
+	}
+	check("existing", []bool{false, false, false, false, false})
+	count = 6
+	check("fresh", []bool{true, true, true, true, true, true})
+	check("existing", []bool{false, false, false, false, false, true})
+	if err := service.EnableSubscriptionModels(ctx, "devin", []string{"model-0"}); err != nil {
+		t.Fatal(err)
+	}
+	service = NewService(db.DB(), nil)
+	cached, found, err := service.Cached(ctx, "devin", "fresh")
+	if err != nil || !found || cached.Models[0].Disabled || !cached.Models[1].Disabled {
+		t.Fatalf("reopened = %+v, %v", cached, err)
+	}
+	service.Fetchers["devin"] = func(context.Context, string) ([]Model, error) {
+		return []Model{{ID: "model-0"}, {ID: "model-1"}}, nil
+	}
+	check("fresh", []bool{false, true})
+}
 
 func TestCatalogCachingETagAndAccountIsolation(t *testing.T) {
 	ctx := context.Background()

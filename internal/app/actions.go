@@ -101,8 +101,11 @@ const (
 	ActionDiscoverProviderModels   ActionKind = "discover_provider_models"
 	ActionSetModelProvider         ActionKind = "set_model_provider"
 	ActionSetModelEnabled          ActionKind = "set_model_enabled"
+	ActionSetModelExtendedContext  ActionKind = "set_model_extended_context"
 	ActionListModelRoutes          ActionKind = "list_model_routes"
 	ActionSetModelRoute            ActionKind = "set_model_route"
+	ActionSetSessionMode           ActionKind = "set_session_mode"
+	ActionSetWorkflowMode          ActionKind = "set_workflow_mode"
 	ActionResetModelRoute          ActionKind = "reset_model_route"
 	ActionSetSubagentConcurrency   ActionKind = "set_subagent_concurrency"
 	ActionSetSubagentDepth         ActionKind = "set_subagent_depth"
@@ -403,6 +406,7 @@ func (s *Service) modelRouteEntries() []ModelRouteEntry {
 		{Scope: "vision", Label: "Vision", Route: s.cfg.Agents.Vision},
 		{Scope: "recap", Label: "Recap", Route: s.cfg.Agents.Recap},
 		{Scope: "advisor", Label: "Advisor", Route: s.cfg.Agents.Advisor.Route()},
+		{Scope: "fusion", Label: "Fusion Sidekick", Route: s.cfg.Agents.Fusion},
 		{Scope: "vibe", Role: "fast", Label: "Vibe fast", Route: s.cfg.Agents.Vibe.Fast},
 		{Scope: "vibe", Role: "good", Label: "Vibe good", Route: s.cfg.Agents.Vibe.Good},
 	}
@@ -440,10 +444,11 @@ func (s *Service) modelRoutesEvent(state string) Event {
 	awaitSeconds := int(s.cfg.Agents.Subagents.AwaitDuration.Seconds())
 	idleSeconds := int(s.cfg.Agents.Subagents.IdleDuration.Seconds())
 	fastMode := s.cfg.Providers.ChatGPT.FastMode
+	workflow := s.cfg.Agents.Workflow
 	s.mu.Unlock()
 	return Event{
 		Kind: EventModelRoutes, State: state, ModelRoutes: s.modelRouteEntries(),
-		Data: map[string]string{"subagent_max_concurrency": strconv.Itoa(maxConcurrency), "subagent_max_depth": strconv.Itoa(maxDepth), "shell_max_concurrency": strconv.Itoa(shellConcurrency), "shell_max_wall_clock_seconds": strconv.Itoa(shellWallSeconds), "subagent_await_seconds": strconv.Itoa(awaitSeconds), "subagent_idle_seconds": strconv.Itoa(idleSeconds), "chatgpt_fast_mode": strconv.FormatBool(fastMode)},
+		Data: map[string]string{"workflow_mode": workflow, "subagent_max_concurrency": strconv.Itoa(maxConcurrency), "subagent_max_depth": strconv.Itoa(maxDepth), "shell_max_concurrency": strconv.Itoa(shellConcurrency), "shell_max_wall_clock_seconds": strconv.Itoa(shellWallSeconds), "subagent_await_seconds": strconv.Itoa(awaitSeconds), "subagent_idle_seconds": strconv.Itoa(idleSeconds), "chatgpt_fast_mode": strconv.FormatBool(fastMode)},
 	}
 }
 
@@ -461,7 +466,7 @@ func (s *Service) updateModelRoute(ctx context.Context, entry *ModelRouteEntry, 
 	}
 	s.routeMu.Lock()
 	defer s.routeMu.Unlock()
-	if entry.Scope != "main" && entry.Scope != "title" && entry.Scope != "plan" && entry.Scope != "approval" && entry.Scope != "vision" && entry.Scope != "recap" && entry.Scope != "advisor" && entry.Scope != "vibe" && entry.Scope != "subagent" && entry.Scope != "security" {
+	if entry.Scope != "main" && entry.Scope != "title" && entry.Scope != "plan" && entry.Scope != "approval" && entry.Scope != "vision" && entry.Scope != "recap" && entry.Scope != "advisor" && entry.Scope != "vibe" && entry.Scope != "fusion" && entry.Scope != "subagent" && entry.Scope != "security" {
 		return fmt.Errorf("unsupported model route scope %q", entry.Scope)
 	}
 	roleScope := entry.Scope == "subagent" || entry.Scope == "security" || entry.Scope == "vibe"
@@ -541,6 +546,8 @@ func (s *Service) updateModelRoute(ctx context.Context, entry *ModelRouteEntry, 
 		s.cfg.Agents.Recap = route
 	} else if entry.Scope == "advisor" {
 		s.cfg.Agents.Advisor.Provider, s.cfg.Agents.Advisor.Model, s.cfg.Agents.Advisor.Reasoning = route.Provider, route.Model, route.Reasoning
+	} else if entry.Scope == "fusion" {
+		s.cfg.Agents.Fusion = route
 	} else if entry.Scope == "vibe" {
 		if entry.Role == "fast" {
 			s.cfg.Agents.Vibe.Fast = route
@@ -1120,6 +1127,10 @@ func (s *Service) buildSessionProjectionEvent(ctx context.Context, id, state str
 			return Event{}, "", err
 		}
 	}
+	agents, err := s.projectFusionSession(ctx, &projection)
+	if err != nil {
+		return Event{}, "", err
+	}
 	blocks, err := json.Marshal(projection.Blocks)
 	if err != nil {
 		return Event{}, "", err
@@ -1140,7 +1151,7 @@ func (s *Service) buildSessionProjectionEvent(ctx context.Context, id, state str
 	s.addActiveRunProjection(data, id)
 	event := Event{
 		Kind: EventSessionLoaded, SessionID: id, State: state,
-		Data: data, AgentSnapshots: s.subagentSnapshots(ctx, id), Todo: &todo, Recap: currentRecap,
+		Data: data, AgentSnapshots: agents, Todo: &todo, Recap: currentRecap,
 	}
 	return event, projection.Session.ModelID, nil
 }
@@ -1177,24 +1188,6 @@ func (s *Service) addActiveRunProjection(data map[string]string, sessionID strin
 		data["globalActiveRunID"] = activeRunID
 		data["globalActiveSessionID"] = activeSessionID
 	}
-}
-
-func (s *Service) subagentSnapshots(ctx context.Context, sessionID string) []AgentSnapshotPayload {
-	if s.providers == nil {
-		return nil
-	}
-	snapshots := s.providers.ListSubagents(ctx, sessionID)
-	result := make([]AgentSnapshotPayload, 0, len(snapshots))
-	for _, snapshot := range snapshots {
-		if !snapshot.Found {
-			continue
-		}
-		event := subagentStateEvent(snapshot.Run, snapshot.Run.Summary)
-		result = append(result, AgentSnapshotPayload{
-			ID: snapshot.Run.ID, State: string(snapshot.Run.State), Summary: snapshot.Run.Summary, Agent: *event.Agent,
-		})
-	}
-	return result
 }
 
 func archiveInactiveDays(raw string) (int, error) {
@@ -1291,6 +1284,11 @@ func (s *Service) login(ctx context.Context, provider string) error {
 				return openBrowserURL(verificationURL)
 			})
 		}
+	case "devin":
+		if mode != "" {
+			return fmt.Errorf("Devin uses browser sign-in")
+		}
+		account, err = s.authentication.LoginDevin(ctx, openBrowserURL)
 	case "cursor":
 		if mode == "import" {
 			account, err = s.authentication.ImportCursorToken(ctx, os.Getenv("CURSOR_ACCESS_TOKEN"), os.Getenv("CURSOR_REFRESH_TOKEN"))
@@ -1298,7 +1296,7 @@ func (s *Service) login(ctx context.Context, provider string) error {
 			account, err = s.authentication.LoginCursor(ctx, openBrowserURL)
 		}
 	default:
-		return fmt.Errorf("provider must be chatgpt, grok, or cursor")
+		return fmt.Errorf("provider must be chatgpt, grok, cursor, or devin")
 	}
 	if err != nil {
 		return err
@@ -1307,18 +1305,9 @@ func (s *Service) login(ctx context.Context, provider string) error {
 		"provider": account.Provider, "accountID": account.ID, "email": account.Email, "displayName": account.DisplayName, "plan": account.Plan,
 	}})
 	s.emitApprovalMode(ctx)
-	models, err := s.catalog.List(ctx, account.Provider, account.ID, true)
-	if err != nil {
+	if err := s.refreshOneSubscriptionCatalog(ctx, account.Provider, account.ID); err != nil {
 		return fmt.Errorf("load %s model catalog: %w", account.Provider, err)
 	}
-	models = s.catalog.EnrichWithModelsDev(ctx, models)
-
-	models.Models = s.catalogModelsWithAvailability(account.Provider, models.Models)
-	encoded, err := json.Marshal(models.Models)
-	if err != nil {
-		return err
-	}
-	s.emit(ctx, Event{Kind: EventModelCatalog, State: "fresh", Data: map[string]string{"provider": account.Provider, "accountID": account.ID, "models": string(encoded)}})
 	return s.emitModelProviders(ctx, "auth_updated")
 }
 
@@ -1326,7 +1315,7 @@ func (s *Service) emitAuthCatalog(ctx context.Context) {
 	if s.authentication == nil || s.catalog == nil {
 		return
 	}
-	for _, provider := range []string{"chatgpt", "grok", "cursor"} {
+	for _, provider := range config.SubscriptionProviderIDs() {
 		account, ok := s.activeSubscriptionAccount(ctx, provider)
 		if !ok {
 			continue

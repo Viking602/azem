@@ -34,6 +34,7 @@ const (
 type SubscriptionQuotaBreakdown struct {
 	ID          string
 	UsedPercent float64
+	ResetsAt    int64
 }
 
 type SubscriptionQuota struct {

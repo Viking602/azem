@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"slices"
@@ -15,6 +16,7 @@ import (
 	"github.com/Viking602/azem/internal/hooks"
 	"github.com/Viking602/azem/internal/provider/catalog"
 	"github.com/Viking602/azem/internal/provider/codex"
+	devindriver "github.com/Viking602/azem/internal/provider/devin"
 	llmuxdriver "github.com/Viking602/azem/internal/provider/llmux"
 )
 
@@ -40,7 +42,7 @@ func (s *Service) modelProviderEntries(ctx context.Context) ([]ModelProviderEntr
 			stored[providerID] = true
 		}
 	}
-	for _, providerID := range []string{"chatgpt", "grok", "cursor"} {
+	for _, providerID := range config.SubscriptionProviderIDs() {
 		if account, ok := s.activeSubscriptionAccount(ctx, providerID); ok {
 			activeAccounts[providerID] = subscriptionAccount{account.ID, firstNonEmpty(account.DisplayName, account.Email, account.ID)}
 			stored[providerID] = true
@@ -60,6 +62,7 @@ func (s *Service) modelProviderEntries(ctx context.Context) ([]ModelProviderEntr
 		{"chatgpt", "OpenAI / ChatGPT 订阅", "openai"},
 		{"grok", "Grok 订阅", "xai"},
 		{"cursor", "Cursor 订阅", "cursor"},
+		{"devin", "Devin 订阅", "devin"},
 	} {
 		account := activeAccounts[subscription.id]
 		source := "none"
@@ -163,10 +166,17 @@ func (s *Service) discoverModelProviderWith(
 			Capabilities: capabilities, InputModalities: append([]string(nil), model.InputModalities...), OutputModalities: append([]string(nil), model.OutputModalities...),
 		})
 	}
-	if len(discovered) > 10 {
-		for index := range discovered {
-			discovered[index].Disabled = true
+	previous := s.llmuxConfiguredModels(ctx, id, configuredProfiles[id].Models)
+	availability := make(map[string]bool, len(previous))
+	for _, model := range previous {
+		availability[model.ID] = model.Disabled
+	}
+	for index := range discovered {
+		disabled, known := availability[discovered[index].ID]
+		if !known {
+			disabled = len(discovered) > catalog.DefaultEnabledModelLimit
 		}
+		discovered[index].Disabled = disabled
 	}
 	entry.ID = id
 	entry.Models = discovered
@@ -291,12 +301,16 @@ func (s *Service) emitModelProviders(ctx context.Context, state string) error {
 		if entry.Enabled && !entry.Subscription {
 			s.emitConfiguredModelCatalog(ctx, entry.ID, entry.Models)
 		}
-		if entry.Subscription && entry.Enabled && len(entry.Models) > 0 {
+		if entry.Subscription && entry.Enabled && len(entry.Models) > 0 && state != "model_availability_updated" && state != "model_context_updated" {
 			s.emitConfiguredModelCatalog(ctx, entry.ID, entry.Models)
 		}
 	}
-	s.scheduleSubscriptionQuotaRefresh(entries)
-	s.scheduleSubscriptionCatalogRefresh(entries)
+	// Local model settings already have an authoritative catalog. A toggle
+	// must not start unrelated account fetches or replace the list again.
+	if state != "model_availability_updated" && state != "model_context_updated" {
+		s.scheduleSubscriptionQuotaRefresh(entries)
+		s.scheduleSubscriptionCatalogRefresh(entries)
+	}
 	return nil
 }
 
@@ -445,6 +459,13 @@ func (s *Service) refreshSubscriptionQuota(target ModelProviderEntry) {
 func (s *Service) loadSubscriptionQuota(ctx context.Context, providerID, accountID string) (authservice.SubscriptionQuota, error) {
 	if s.subscriptionQuotaLookup != nil {
 		return s.subscriptionQuotaLookup(ctx, providerID, accountID)
+	}
+	if providerID == "devin" {
+		credential, err := s.authentication.Credential(ctx, providerID, accountID)
+		if err != nil {
+			return authservice.SubscriptionQuota{}, err
+		}
+		return devindriver.FetchQuota(ctx, credential.AccessToken)
 	}
 	return s.authentication.SubscriptionQuota(ctx, providerID, accountID)
 }
@@ -711,14 +732,9 @@ func (s *Service) setSubscriptionModelsEnabled(ctx context.Context, providerID s
 	s.mu.Lock()
 	currentSession := s.currentSession
 	var disabled []string
-	if providerID == "chatgpt" {
-		disabled = append([]string(nil), s.cfg.Providers.ChatGPT.DisabledModels...)
-	} else if providerID == "grok" {
-		disabled = append([]string(nil), s.cfg.Providers.Grok.DisabledModels...)
-	} else {
-		disabled = append([]string(nil), s.cfg.Providers.Cursor.DisabledModels...)
-	}
+	disabled = append([]string(nil), s.cfg.Providers.Subscription(providerID).DisabledModels...)
 	s.mu.Unlock()
+	previousDisabled := append([]string(nil), disabled...)
 	disabled = setModelsDisabled(disabled, modelIDs, !enabled)
 	if err := s.dispatchLifecycle(ctx, hooks.ConfigChange, s.hookMetadata(currentSession, ""), func(e *hooks.Envelope) {
 		e.Source, e.FilePath = "user_settings", s.configPath
@@ -732,20 +748,73 @@ func (s *Service) setSubscriptionModelsEnabled(ctx context.Context, providerID s
 			return err
 		}
 	}
-	s.mu.Lock()
-	if providerID == "chatgpt" {
-		s.cfg.Providers.ChatGPT.DisabledModels = append([]string(nil), disabled...)
-	} else if providerID == "grok" {
-		s.cfg.Providers.Grok.DisabledModels = append([]string(nil), disabled...)
-	} else {
-		s.cfg.Providers.Cursor.DisabledModels = append([]string(nil), disabled...)
+	if enabled && s.catalog != nil {
+		if err := s.catalog.EnableSubscriptionModels(ctx, providerID, modelIDs); err != nil {
+			if s.configPath != "" {
+				rollbackErr := s.ensureHookWatcher().writeConfig(s.configPath, func() error {
+					return config.UpdateSubscriptionDisabledModels(s.configPath, providerID, previousDisabled)
+				})
+				return errors.Join(err, rollbackErr)
+			}
+			return err
+		}
 	}
+	s.mu.Lock()
+	s.cfg.Providers.Subscription(providerID).DisabledModels = append([]string(nil), disabled...)
 	s.mu.Unlock()
 	if s.providers != nil {
 		s.providers.UpdateSubscriptionDisabledModels(providerID, disabled)
 	}
+	// Preserve the full subscription catalog (including service tiers) for routing.
 	s.emitAuthCatalog(ctx)
 	return s.emitModelProviders(ctx, "model_availability_updated")
+}
+
+func (s *Service) setModelExtendedContext(ctx context.Context, providerID, modelID string, enabled bool) error {
+	if providerID != "chatgpt" || !config.SupportsChatGPTExtendedContext(modelID) {
+		return fmt.Errorf("extended context is supported only for ChatGPT gpt-5.6-sol and gpt-6-astra")
+	}
+	s.routeMu.Lock()
+	defer s.routeMu.Unlock()
+	s.mu.Lock()
+	currentSession := s.currentSession
+	models := append([]string(nil), s.cfg.Providers.ChatGPT.ExtendedContextModels...)
+	s.mu.Unlock()
+	models = slices.DeleteFunc(models, func(id string) bool { return id == modelID })
+	if enabled {
+		models = append(models, modelID)
+	}
+	slices.Sort(models)
+	if err := s.dispatchLifecycle(ctx, hooks.ConfigChange, s.hookMetadata(currentSession, ""), func(e *hooks.Envelope) {
+		e.Source, e.FilePath = "user_settings", s.configPath
+	}); err != nil {
+		return err
+	}
+	if s.configPath != "" {
+		if err := s.ensureHookWatcher().writeConfig(s.configPath, func() error {
+			return config.UpdateChatGPTExtendedContextModels(s.configPath, models)
+		}); err != nil {
+			return err
+		}
+	}
+	s.mu.Lock()
+	s.cfg.Providers.ChatGPT.ExtendedContextModels = append([]string(nil), models...)
+	s.mu.Unlock()
+	if s.providers != nil {
+		s.providers.UpdateChatGPTExtendedContextModels(models)
+	}
+	s.emitAuthCatalog(ctx)
+	return s.emitModelProviders(ctx, "model_context_updated")
+}
+
+func applyModelContextSettings(providerID string, model catalog.Model, extendedModels []string) catalog.Model {
+	if providerID == "chatgpt" {
+		model.ExtendedContext = config.SupportsChatGPTExtendedContext(model.ID) && slices.Contains(extendedModels, model.ID)
+		if model.ExtendedContext {
+			model.ContextWindow = 1_050_000
+		}
+	}
+	return model
 }
 
 func setModelsDisabled(models, modelIDs []string, disabled bool) []string {
@@ -769,17 +838,15 @@ func setModelsDisabled(models, modelIDs []string, disabled bool) []string {
 func (s *Service) catalogModelsWithAvailability(provider string, models []catalog.Model) []catalog.Model {
 	s.mu.Lock()
 	var disabled []string
-	if provider == "chatgpt" {
-		disabled = append([]string(nil), s.cfg.Providers.ChatGPT.DisabledModels...)
-	} else if provider == "grok" {
-		disabled = append([]string(nil), s.cfg.Providers.Grok.DisabledModels...)
-	} else if provider == "cursor" {
-		disabled = append([]string(nil), s.cfg.Providers.Cursor.DisabledModels...)
+	extended := append([]string(nil), s.cfg.Providers.ChatGPT.ExtendedContextModels...)
+	if cfg := s.cfg.Providers.Subscription(provider); cfg != nil {
+		disabled = append([]string(nil), cfg.DisabledModels...)
 	}
 	s.mu.Unlock()
 	result := append([]catalog.Model(nil), models...)
 	for index := range result {
-		result[index].Disabled = slices.Contains(disabled, result[index].ID)
+		result[index].Disabled = result[index].Disabled || slices.Contains(disabled, result[index].ID)
+		result[index] = applyModelContextSettings(provider, result[index], extended)
 	}
 	return result
 }
@@ -813,6 +880,7 @@ func subscriptionModelsFromCatalog(models []catalog.Model) []config.LLMuxModelCo
 		result = append(result, config.LLMuxModelConfig{
 			ID: model.ID, Disabled: model.Disabled, Name: model.Name, Aliases: append([]string(nil), model.Aliases...),
 			Description: model.Description, ContextWindow: model.ContextWindow, MaxOutputTokens: model.MaxOutputTokens,
+			ExtendedContext: model.ExtendedContext,
 			ReasoningLevels: append([]string(nil), model.ReasoningLevels...), DefaultReasoning: model.DefaultReasoning,
 			Capabilities: capabilities, InputModalities: append([]string(nil), model.InputModalities...),
 			OutputModalities: append([]string(nil), model.OutputModalities...),
@@ -826,12 +894,16 @@ func configuredCatalogModels(models []config.LLMuxModelConfig) []catalog.Model {
 	for _, model := range models {
 		result = append(result, catalog.Model{
 			ID: model.ID, Disabled: model.Disabled, Name: model.Name, Aliases: append([]string(nil), model.Aliases...), Description: model.Description, ContextWindow: model.ContextWindow, MaxOutputTokens: model.MaxOutputTokens,
+			ExtendedContext: model.ExtendedContext,
 			ReasoningLevels: append([]string(nil), model.ReasoningLevels...), DefaultReasoning: model.DefaultReasoning,
 			SupportsTools: hasCapability(model.Capabilities, "tools"), SupportsParallel: hasCapability(model.Capabilities, "parallel-tools"),
 			SupportsReasoning:  hasCapability(model.Capabilities, "reasoning") || len(model.ReasoningLevels) > 0,
 			SupportsStructured: hasCapability(model.Capabilities, "structured-output"),
 			InputModalities:    append([]string(nil), model.InputModalities...), OutputModalities: append([]string(nil), model.OutputModalities...),
 		})
+		if hasCapability(model.Capabilities, "fast") {
+			result[len(result)-1].ServiceTiers = []catalog.ServiceTier{{ID: codex.FastServiceTier}}
+		}
 	}
 	return result
 }
@@ -983,7 +1055,7 @@ func quotaBreakdownEntries(breakdown []authservice.SubscriptionQuotaBreakdown) [
 	}
 	entries := make([]ModelProviderQuotaBreakdown, len(breakdown))
 	for index, item := range breakdown {
-		entries[index] = ModelProviderQuotaBreakdown{ID: item.ID, UsedPercent: item.UsedPercent}
+		entries[index] = ModelProviderQuotaBreakdown{ID: item.ID, UsedPercent: item.UsedPercent, ResetsAt: item.ResetsAt}
 	}
 	return entries
 }

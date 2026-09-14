@@ -1,29 +1,127 @@
 use super::*;
 
+fn sidebar_max_width(window_width: f32) -> f32 {
+    (window_width - MAIN_TEXT_MIN_WIDTH).clamp(200., 400.)
+}
+
+fn settled_sidebar_width(width: f32) -> f32 {
+    if width < 100. {
+        0.
+    } else {
+        width.clamp(200., 400.)
+    }
+}
+
 impl AzemWindow {
+    pub(super) fn workflow_mode_pending(&self) -> bool {
+        self.pending_requests
+            .values()
+            .any(|request| matches!(request, PendingRequest::WorkflowMode(_)))
+    }
+
     pub(super) fn popup_motion(&self, key: &str) -> PopupMotion {
         self.popup_motions.get(key).copied().unwrap_or_default()
     }
 
     pub(super) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_resize_drag = None;
         self.sidebar_open = !self.sidebar_open;
         self.sidebar_animation = Some((Instant::now(), self.sidebar_visible_width));
         cx.notify();
     }
 
     pub(super) fn advance_sidebar_animation(&mut self, window: &mut Window, reduced: bool) {
-        let target = if self.sidebar_open { SIDEBAR_WIDTH } else { 0. };
+        let maximum = sidebar_max_width(f32::from(window.bounds().size.width));
+        self.sidebar_width = self.sidebar_width.min(maximum);
+        self.sidebar_visible_width = self.sidebar_visible_width.min(maximum);
+        if self.sidebar_resize_drag.is_some() {
+            return;
+        }
+        let target = if self.sidebar_open {
+            self.sidebar_width
+        } else {
+            0.
+        };
         if reduced {
             self.sidebar_visible_width = target;
             self.sidebar_animation = None;
         } else if let Some((started, from)) = self.sidebar_animation {
-            self.sidebar_visible_width = eased_side_panel_width(from, target, started.elapsed());
+            self.sidebar_visible_width =
+                eased_side_panel_width(from, target, started.elapsed()).min(maximum);
             if started.elapsed() >= SIDE_PANEL_TRANSITION {
                 self.sidebar_visible_width = target;
                 self.sidebar_animation = None;
             } else {
                 window.request_animation_frame();
             }
+        } else {
+            self.sidebar_visible_width = target;
+        }
+    }
+
+    pub(super) fn sidebar_resize_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.sidebar_resize_focus.focus(window, cx);
+        self.sidebar_animation = None;
+        self.sidebar_resize_drag = Some(SidePanelResizeDrag {
+            start_x: event.position.x,
+            start_width: self.sidebar_visible_width,
+        });
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    pub(super) fn sidebar_resize_mouse_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(drag) = self.sidebar_resize_drag.as_ref() else {
+            return;
+        };
+        if !event.dragging() {
+            self.finish_sidebar_resize(cx);
+            return;
+        }
+        self.sidebar_visible_width = (drag.start_width
+            + f32::from(event.position.x - drag.start_x))
+        .clamp(0., sidebar_max_width(f32::from(window.bounds().size.width)));
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    pub(super) fn finish_sidebar_resize(&mut self, cx: &mut Context<Self>) {
+        if self.sidebar_resize_drag.take().is_none() {
+            return;
+        }
+        self.set_sidebar_width(self.sidebar_visible_width, cx);
+    }
+
+    pub(super) fn set_sidebar_width(&mut self, width: f32, cx: &mut Context<Self>) {
+        self.sidebar_resize_drag = None;
+        let width = settled_sidebar_width(width);
+        self.sidebar_open = width > 0.;
+        if self.sidebar_open {
+            self.sidebar_width = width;
+        }
+        self.sidebar_animation = Some((Instant::now(), self.sidebar_visible_width));
+        cx.notify();
+    }
+
+    pub(super) fn sidebar_resize_mouse_up(
+        &mut self,
+        event: &MouseUpEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.button == MouseButton::Left && self.sidebar_resize_drag.is_some() {
+            self.finish_sidebar_resize(cx);
+            cx.stop_propagation();
         }
     }
 
@@ -110,10 +208,33 @@ impl AzemWindow {
     }
 
     pub(super) fn toggle_plan(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.state.runtime.running {
+        if !self.state.runtime.running && !self.workflow_mode_pending() {
             self.state.runtime.plan_mode = !self.state.runtime.plan_mode;
             cx.notify();
         }
+    }
+
+    pub(super) fn select_workflow_mode(&mut self, mode: &str, cx: &mut Context<Self>) {
+        if !self.state.connection.connected
+            || self.workflow_mode_pending()
+            || mode == self.state.settings.workflow_mode.as_ref()
+            || !matches!(mode, "vibe" | "fusion")
+        {
+            return;
+        }
+        self.state.settings.error = "".into();
+        self.model_picker_open = false;
+        self.route_picker_target = None;
+        self.reasoning_drag = None;
+        let id = self.runtime.request(
+            Method::Execute,
+            json!({
+                "kind": "set_workflow_mode", "target": mode,
+            }),
+        );
+        self.pending_requests
+            .insert(id, PendingRequest::WorkflowMode(mode.to_string()));
+        cx.notify();
     }
 
     pub(super) fn model_picker_selection(&self) -> (String, String, String) {
@@ -149,7 +270,14 @@ impl AzemWindow {
         (
             selected("provider", self.state.settings.provider.as_ref()),
             selected("model", self.state.settings.model.as_ref()),
-            selected("reasoning", self.state.settings.reasoning.as_ref()),
+            selected(
+                "reasoning",
+                if target.scope == "fusion" {
+                    ""
+                } else {
+                    self.state.settings.reasoning.as_ref()
+                },
+            ),
         )
     }
 
@@ -230,7 +358,9 @@ impl AzemWindow {
             && !self.pending_requests.values().any(|request| {
                 matches!(
                     request,
-                    PendingRequest::ModelSelection { .. } | PendingRequest::ChatGPTFastMode(_)
+                    PendingRequest::ModelSelection { .. }
+                        | PendingRequest::ChatGPTFastMode(_)
+                        | PendingRequest::WorkflowMode(_)
                 )
             })
     }
@@ -251,10 +381,14 @@ impl AzemWindow {
         if !self.selected_model_reasoning_levels().contains(&next) {
             return;
         }
-        if provider == "cursor" {
-            if let Some((target, tier)) =
-                cursor_selection(&self.state.catalogs.providers, &model, Some(&next), None)
-                && (target != model || tier != current)
+        if matches!(provider.as_str(), "cursor" | "devin") {
+            if let Some((target, tier)) = variant_selection(
+                &self.state.catalogs.providers,
+                &provider,
+                &model,
+                Some(&next),
+                None,
+            ) && (target != model || tier != current)
             {
                 self.apply_model_picker_selection(provider, target, tier, false, cx);
             }
@@ -269,9 +403,10 @@ impl AzemWindow {
             return;
         }
         let (provider, model, _) = self.model_picker_selection();
-        if provider == "cursor" {
-            if let Some((target, tier)) = cursor_selection(
+        if matches!(provider.as_str(), "cursor" | "devin") {
+            if let Some((target, tier)) = variant_selection(
                 &self.state.catalogs.providers,
+                &provider,
                 &model,
                 None,
                 Some(!modes.fast),
@@ -454,17 +589,8 @@ impl AzemWindow {
             self.pending_requests
                 .insert(id, PendingRequest::EnvironmentGit);
         }
-        if include_pull_requests
-            && !self
-                .pending_requests
-                .values()
-                .any(|request| matches!(request, PendingRequest::PullRequests))
-        {
-            let id = self
-                .runtime
-                .request(Method::PullRequestDashboard, json!({}));
-            self.pending_requests
-                .insert(id, PendingRequest::PullRequests);
+        if include_pull_requests {
+            self.request_surface(Surface::PullRequests);
         }
     }
 
@@ -490,13 +616,35 @@ impl AzemWindow {
             cx.notify();
             return;
         };
-        self.side_panel_width = desired_width.clamp(SIDE_PANEL_MIN_WIDTH, maximum);
+        let width = desired_width.clamp(SIDE_PANEL_MIN_WIDTH, maximum);
+        let fit_before = environment_panel_fits(workspace_width, self.side_panel_width);
+        let fit_after = environment_panel_fits(workspace_width, width);
+        if self.side_panel_resize_drag.is_some()
+            && !self.side_panel_agents_open
+            && fit_before != fit_after
+        {
+            // Start on the drag event, even if mouse-up arrives before the next frame.
+            self.popup_motions
+                .entry("environment-fit")
+                .or_insert(PopupMotion {
+                    open: fit_before,
+                    opacity: if fit_before { 1. } else { 0. },
+                    ..Default::default()
+                })
+                .update(
+                    fit_after,
+                    AppearancePreferences::current(cx).reduced_motion,
+                    Instant::now(),
+                );
+        }
+        self.side_panel_width = width;
         self.side_panel_visible_width = self.side_panel_width;
         self.side_panel_animation_started = None;
         cx.notify();
     }
 
     pub(super) fn hide_side_panel(&mut self) {
+        self.finish_side_panel_resize();
         self.side_panel_open = false;
         self.side_panel_closing = false;
         self.side_panel_visible_width = 0.;
@@ -515,13 +663,21 @@ impl AzemWindow {
         let workspace_width = workspace_width(
             f32::from(window.bounds().size.width) + SIDEBAR_WIDTH - self.sidebar_visible_width,
         );
-        let Some(maximum) = side_panel_max_width(workspace_width) else {
+        let Some(width) = side_panel_width_for_workspace(
+            workspace_width,
+            self.session_side_panel_widths
+                .get(self.state.navigation.current_session_id.as_ref())
+                .copied(),
+        ) else {
             self.hide_side_panel();
             return;
         };
-        self.side_panel_width = self.side_panel_width.min(maximum);
-        self.side_panel_visible_width = self.side_panel_visible_width.min(maximum);
-        self.side_panel_animation_from = self.side_panel_animation_from.min(maximum);
+        self.side_panel_width = width;
+        if self.side_panel_animation_started.is_none() {
+            self.side_panel_visible_width = width;
+        }
+        self.side_panel_visible_width = self.side_panel_visible_width.min(width);
+        self.side_panel_animation_from = self.side_panel_animation_from.min(width);
     }
 
     pub(super) fn animate_side_panel(
@@ -568,7 +724,7 @@ impl AzemWindow {
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
         if self.side_panel_open && !self.side_panel_closing {
-            self.side_panel_resize_drag = None;
+            self.finish_side_panel_resize();
             if reduced_motion {
                 self.hide_side_panel();
                 cx.notify();
@@ -581,7 +737,12 @@ impl AzemWindow {
             let workspace_width = workspace_width(
                 f32::from(window.bounds().size.width) + SIDEBAR_WIDTH - self.sidebar_visible_width,
             );
-            let Some(width) = side_panel_width_for_workspace(workspace_width) else {
+            let Some(width) = side_panel_width_for_workspace(
+                workspace_width,
+                self.session_side_panel_widths
+                    .get(self.state.navigation.current_session_id.as_ref())
+                    .copied(),
+            ) else {
                 self.hide_side_panel();
                 cx.notify();
                 return;
@@ -666,13 +827,24 @@ impl AzemWindow {
             return;
         };
         if !event.dragging() {
-            self.side_panel_resize_drag = None;
+            self.finish_side_panel_resize();
             cx.notify();
             return;
         }
         let desired = drag.start_width + f32::from(drag.start_x - event.position.x);
         self.resize_side_panel(desired, window, cx);
+        let session = self.state.navigation.current_session_id.as_ref();
+        if self.side_panel_resize_drag.is_some() && !session.is_empty() {
+            self.session_side_panel_widths
+                .insert(session.to_string(), self.side_panel_width);
+        }
         cx.stop_propagation();
+    }
+
+    pub(super) fn finish_side_panel_resize(&mut self) {
+        if self.side_panel_resize_drag.take().is_some() {
+            self.persist_window_state();
+        }
     }
 
     pub(super) fn side_panel_resize_mouse_up(
@@ -681,7 +853,8 @@ impl AzemWindow {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if event.button == MouseButton::Left && self.side_panel_resize_drag.take().is_some() {
+        if event.button == MouseButton::Left && self.side_panel_resize_drag.is_some() {
+            self.finish_side_panel_resize();
             cx.stop_propagation();
             cx.notify();
         }
@@ -1126,5 +1299,29 @@ impl AzemWindow {
                 })
                 .into_any_element(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sidebar_drag_snaps_closed_and_bounds_expanded_width() {
+        for (dragged, settled) in [
+            (-20., 0.),
+            (0., 0.),
+            (99., 0.),
+            (100., 200.),
+            (180., 200.),
+            (246., 246.),
+            (320., 320.),
+            (800., 400.),
+        ] {
+            assert_eq!(settled_sidebar_width(dragged), settled);
+        }
+        assert_eq!(sidebar_max_width(880.), 240.);
+        assert_eq!(sidebar_max_width(1200.), 400.);
+        assert_eq!(sidebar_max_width(640.), 200.);
     }
 }

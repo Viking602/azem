@@ -84,6 +84,7 @@ type ModelRouteEntry struct {
 type ModelProviderQuotaBreakdown struct {
 	ID          string  `json:"id"`
 	UsedPercent float64 `json:"usedPercent"`
+	ResetsAt    int64   `json:"resetsAt,omitempty"`
 }
 
 type ModelProviderEntry struct {

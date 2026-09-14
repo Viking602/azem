@@ -7,6 +7,15 @@ impl AppState {
             .sequence
             .max(snapshot["wireSequence"].as_u64().unwrap_or(0));
         self.navigation.current_session_id = value_str(snapshot, "selectedSessionId");
+        if snapshot
+            .pointer("/session/session/id")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        {
+            self.navigation.current_title = "".into();
+            self.transcript = TranscriptModel::default();
+            self.runtime = RuntimeModel::default();
+        }
         self.runtime.running = false;
         self.runtime.guidance_open = false;
         self.runtime.run_id = "".into();
@@ -152,6 +161,12 @@ impl AppState {
         }
         if session == self.navigation.current_session_id {
             self.runtime.running = running;
+            if let Some(started_at) = run["startedAt"]
+                .as_str()
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            {
+                self.runtime.run_started_at_ms = started_at.timestamp_millis();
+            }
             self.runtime.guidance_open = running
                 && run["allowedActions"]
                     .as_array()

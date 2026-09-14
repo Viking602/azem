@@ -134,3 +134,18 @@ func mustWriteWorkspaceFile(t *testing.T, path, content string) {
 		t.Fatal(err)
 	}
 }
+
+func TestWorkspaceImageUsesContentFormat(t *testing.T) {
+	root := t.TempDir()
+	// A JPEG signature in a .png file must not be sent to the PNG decoder.
+	mustWriteWorkspaceFile(t, filepath.Join(root, "photo.png"), string([]byte{0xff, 0xd8, 0xff, 0xe0, 0, 0}))
+	file, err := (&Bridge{workspace: root}).WorkspaceFile("photo.png")
+	if err != nil || file.Kind != "image" || file.MediaType != "image/jpeg" {
+		t.Fatalf("image format = %s/%s, err=%v", file.Kind, file.MediaType, err)
+	}
+	mustWriteWorkspaceFile(t, filepath.Join(root, "invalid.png"), "not an image")
+	file, err = (&Bridge{workspace: root}).WorkspaceFile("invalid.png")
+	if err != nil || file.Kind != "binary" || file.Content != "" {
+		t.Fatalf("invalid image classification = %+v, err=%v", file, err)
+	}
+}

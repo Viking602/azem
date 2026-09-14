@@ -1,7 +1,42 @@
 use azem_ipc::{BinaryMetadata, Envelope};
 use serde_json::json;
 
-use super::{AppState, SessionSummary, unix_millis};
+use super::{AppState, PullRequestModel, PullRequestTab, SessionSummary, unix_millis};
+
+#[test]
+fn pull_request_tabs_use_their_own_dashboard_rows() {
+    let mut model = PullRequestModel {
+        dashboard: json!({
+            "current": {"number": 7},
+            "createdByViewer": [{"number": 8}],
+            "open": [{"number": 7}, {"number": 9}]
+        }),
+        ..Default::default()
+    };
+    assert_eq!(model.tab, PullRequestTab::Open);
+    for (tab, expected) in [
+        (PullRequestTab::Current, vec![7]),
+        (PullRequestTab::Created, vec![8]),
+        (PullRequestTab::Open, vec![7, 9]),
+    ] {
+        model.tab = tab;
+        let numbers: Vec<_> = model
+            .tab
+            .rows(&model.dashboard)
+            .iter()
+            .map(|row| row["number"].as_i64().unwrap())
+            .collect();
+        assert_eq!(numbers, expected);
+        assert!(tab.rows(&serde_json::Value::Null).is_empty());
+        assert!(
+            tab.rows(&json!({"current": null, "createdByViewer": [], "open": []}))
+                .is_empty()
+        );
+    }
+    model.dashboard = json!({"open": [{"number": 10}]});
+    assert_eq!(model.tab, PullRequestTab::Open);
+    assert_eq!(model.tab.rows(&model.dashboard)[0]["number"], 10);
+}
 
 #[test]
 fn extension_snapshots_survive_activity_and_failed_refreshes() {
@@ -58,6 +93,59 @@ fn optimistic_user_message_precedes_streamed_reply() {
     assert!(!blocks[0].extra["createdAt"].as_str().unwrap().is_empty());
     assert!(state.runtime.running);
     assert_eq!(state.runtime.activity.as_ref(), "waiting_model");
+}
+
+#[test]
+fn empty_project_snapshot_clears_the_previous_conversation() {
+    for selected in ["", "startup-session"] {
+        let mut state = AppState::default();
+        state.workspace.root = "/old".into();
+        state.navigation.current_session_id = "old-session".into();
+        state.navigation.current_title = "Old conversation".into();
+        state.append_optimistic_user("old", "Old message".into(), vec![]);
+        state.runtime.agents.push(json!({"id":"old-agent"}));
+        state.runtime.todo = json!({"items":[{"content":"old task"}]});
+        state.apply_reconnect_snapshot(json!({
+        "base":{"workspace":"/new","sessionId":"","language":"zh-CN","model":"new-model"},
+        "selectedSessionId":selected, "session":null, "sessions":[], "projects":[{"path":"/new"}],
+        "runs":[], "controls":[]
+    }));
+        assert_eq!(state.workspace.root.as_ref(), "/new");
+        assert_eq!(state.navigation.current_session_id.as_ref(), selected);
+        assert!(state.navigation.current_title.is_empty());
+        assert!(state.transcript.blocks.borrow().is_empty());
+        assert!(state.transcript.index_by_id.is_empty());
+        assert!(state.runtime.agents.is_empty());
+        assert!(state.runtime.todo.is_null());
+        assert!(!state.runtime.running);
+        assert_eq!(state.settings.model.as_ref(), "new-model");
+    }
+}
+
+#[test]
+fn archive_selection_uses_the_next_session_in_the_same_project() {
+    let mut state = AppState::default();
+    state.workspace.root = "/project".into();
+    state.navigation.current_session_id = "current".into();
+    state.navigation.sessions = serde_json::from_value(json!([
+        {"id":"previous","workspace":"/project"},
+        {"id":"current","workspace":"/project","archived":true},
+        {"id":"archived","workspace":"/project","archived":true},
+        {"id":"foreign","workspace":"/other"},
+        {"id":"next","workspace":"/project"}
+    ]))
+    .unwrap();
+    assert_eq!(
+        state.next_session_after_archive().unwrap().id.as_ref(),
+        "next"
+    );
+    state.navigation.sessions.pop();
+    assert_eq!(
+        state.next_session_after_archive().unwrap().id.as_ref(),
+        "previous"
+    );
+    state.navigation.sessions[0].archived = true;
+    assert!(state.next_session_after_archive().is_none());
 }
 
 #[test]
@@ -178,6 +266,53 @@ fn model_catalog_replaces_matching_provider_models() {
     assert_eq!(state.catalogs.models[0]["id"], "gpt-new");
     assert_eq!(state.catalogs.providers[0]["models"][0]["id"], "gpt-new");
     assert_eq!(state.catalogs.providers[0]["models"][0]["name"], "GPT New");
+}
+
+#[test]
+fn catalog_refresh_keeps_capabilities_until_they_actually_change() {
+    let mut state = AppState::default();
+    let capabilities = json!([
+        "tools",
+        "parallel-tools",
+        "reasoning",
+        "structured-output",
+        "fast"
+    ]);
+    let displayed = json!({
+        "id": "gpt-test", "name": "GPT Test", "disabled": true,
+        "capabilities": capabilities, "inputModalities": ["text", "image"]
+    });
+    state.apply_direct_event(json!({
+        "kind": "model_providers", "modelProviders": [{"id":"chatgpt", "models":[displayed]}]
+    }));
+    let mut raw = json!({
+        "id": "gpt-test", "name": "GPT Test", "disabled": true,
+        "supportsTools": true, "supportsParallel": true, "supportsReasoning": true,
+        "supportsStructured": true, "serviceTiers":[{"id":"priority"}],
+        "inputModalities":["text", "image"]
+    });
+    for speed_field in ["serviceTiers", "additionalSpeedTiers"] {
+        if speed_field == "additionalSpeedTiers" {
+            raw.as_object_mut().unwrap().remove("serviceTiers");
+            raw["additionalSpeedTiers"] = json!(["fast"]);
+        }
+        state.apply_direct_event(json!({
+            "kind":"model_catalog", "data":{"provider":"chatgpt", "models":json!([raw]).to_string()}
+        }));
+        let model = &state.catalogs.providers[0]["models"][0];
+        for key in ["id", "name", "disabled", "capabilities", "inputModalities"] {
+            assert_eq!(model[key], displayed[key], "refresh changed {key}");
+        }
+    }
+    raw["supportsParallel"] = false.into();
+    raw.as_object_mut().unwrap().remove("additionalSpeedTiers");
+    state.apply_direct_event(json!({
+        "kind":"model_catalog", "data":{"provider":"chatgpt", "models":json!([raw]).to_string()}
+    }));
+    assert_eq!(
+        state.catalogs.providers[0]["models"][0]["capabilities"],
+        json!(["tools", "reasoning", "structured-output"])
+    );
 }
 
 #[test]
@@ -532,6 +667,50 @@ fn terminal_run_interrupts_stale_live_tool_blocks() {
     assert!(state.runtime.approvals.is_empty());
     assert!(state.runtime.questions.is_empty());
     assert!(state.runtime.plans.is_empty());
+}
+
+#[test]
+fn run_elapsed_survives_dispatch_projection_refresh_and_reconnect() {
+    let mut state = AppState::default();
+    let started = unix_millis() - 65_000;
+    let started_at = chrono::DateTime::from_timestamp_millis(started)
+        .unwrap()
+        .to_rfc3339();
+    let projection = json!({"session":{"id":"session"},"blocks":[],"toolRecords":[]});
+    let snapshot = json!({
+        "selectedSessionId":"session", "session":projection,
+        "runs":[{"sessionId":"session", "runId":"run", "state":"running",
+            "activity":"waiting_model", "startedAt":started_at}]
+    });
+    state.apply_reconnect_snapshot(snapshot.clone());
+    assert_eq!(state.runtime.run_started_at_ms, started);
+    for _ in 0..3 {
+        state.apply_direct_event(json!({"kind":"session_projection", "sessionId":"session", "sessionProjection":projection}));
+        assert_eq!(state.runtime.run_started_at_ms, started);
+    }
+    state.apply_reconnect_snapshot(snapshot);
+    assert_eq!(state.runtime.run_started_at_ms, started);
+    state.apply_direct_event(json!({
+        "kind":"text_delta", "sessionId":"session", "runId":"run",
+        "text":"Finished", "textPhase":"final_answer", "state":"streaming"
+    }));
+    state.apply_direct_event(json!({
+        "kind":"run_state", "sessionId":"session", "runId":"run",
+        "runProjection":{"sessionId":"session", "runId":"run", "state":"completed",
+            "activity":"idle", "startedAt":started_at}
+    }));
+    state.apply_direct_event(json!({
+        "kind":"run_finished", "sessionId":"session", "runId":"run"
+    }));
+    let blocks = state.transcript.blocks.borrow();
+    let elapsed = blocks.last().unwrap().extra["elapsedMs"]
+        .as_str()
+        .unwrap()
+        .parse::<i64>()
+        .unwrap();
+    assert!((65_000..66_000).contains(&elapsed), "elapsed: {elapsed}");
+    assert!(!state.runtime.running);
+    assert_eq!(state.runtime.run_started_at_ms, 0);
 }
 
 #[test]
@@ -943,4 +1122,64 @@ fn native_session_navigation_preserves_project_pull_request() {
         assert_eq!(state.pull_requests.selected["number"], 33);
         assert_eq!(state.workspace.root.as_ref(), "/workspace");
     }
+}
+
+#[test]
+fn fusion_prose_restores_in_order_and_streams_without_merging_the_lead() {
+    let prose = |id: &str, kind: &str, text: &str, after: &str| {
+        json!({
+            "id":"block:7", "sequence":7, "runId":"lead", "kind":kind,
+            "content":text, "state":"streaming", "textPhase":"commentary",
+            "data":{"fusionRole":"sidekick", "sourceLabel":"Sidekick · actual-model", "fusionBlockId":id, "fusionAfterToolCallId":after}
+        })
+    };
+    let mut state = AppState::default();
+    state.apply_session_projection(&json!({
+        "session":{"id":"session"},
+        "blocks":[
+            {"id":"user", "sequence":7, "kind":"user", "runId":"lead", "content":"request"},
+            prose("thought", "thinking", "reason", "handoff"),
+            prose("progress", "assistant", "progress", "handoff"),
+            prose("report", "assistant", "report", "fusion:child:read")
+        ],
+        "toolRecords":[
+            {"runId":"lead", "toolCallId":"handoff", "name":"sidekick", "anchorSequence":7},
+            {"runId":"lead", "toolCallId":"fusion:child:read", "name":"coding.read_file", "anchorSequence":7}
+        ]
+    }));
+    assert_eq!(
+        state
+            .transcript
+            .blocks
+            .borrow()
+            .iter()
+            .map(|block| block.id.to_string())
+            .collect::<Vec<_>>(),
+        [
+            "user",
+            "handoff",
+            "thought",
+            "progress",
+            "fusion:child:read",
+            "report"
+        ]
+    );
+    let delta = |text: &str, data: serde_json::Value| {
+        serde_json::from_value(json!({
+        "kind":"text_delta", "sessionId":"session", "runId":"lead", "textPhase":"commentary", "text":text, "data":data
+    })).unwrap()
+    };
+    state.append_stream_text(delta(" continued", json!({"fusionBlockId":"report", "fusionRole":"sidekick", "sourceLabel":"Sidekick · actual-model"})), "assistant");
+    assert_eq!(state.transcript.blocks.borrow().len(), 6);
+    assert_eq!(
+        state.transcript.blocks.borrow().last().unwrap().content,
+        "report continued"
+    );
+    state.append_stream_text(delta("Lead review", json!({})), "assistant");
+    assert_eq!(state.transcript.blocks.borrow().len(), 7);
+    assert_eq!(
+        state.transcript.blocks.borrow()[5].state.as_ref(),
+        "completed"
+    );
+    assert!(state.runtime.agents.is_empty());
 }

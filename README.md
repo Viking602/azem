@@ -23,7 +23,7 @@ Azem is designed for coding work that needs more than a chat window. It combines
 | **Terminal and desktop workflows** | A fast Bubble Tea TUI and native GPUI desktop with virtualized streaming output, inline approvals and diffs, Agent inspection, recovery, and role-model settings |
 | **Governed execution** | Prompt, Auto Review, and YOLO approval modes for file, shell, and external actions |
 | **Durable state** | SQLite-backed sessions, runs, approvals, leases, side-effect reconciliation, and Team resume |
-| **Multiple providers** | ChatGPT through Codex-compatible OAuth, Grok through API or CLI-proxy transport, Cursor through its native agent service, and configurable llmux providers |
+| **Multiple providers** | ChatGPT through Codex-compatible OAuth, Grok through API or CLI-proxy transport, Cursor through its native agent service, Devin through personal CLI browser Auth, and configurable llmux providers |
 | **Extensible tools** | Codex-compatible plugins, MCP servers over stdio or Streamable HTTP, plus dynamically loaded Agent Skills |
 | **Multi-agent work** | Structured team mode and resumable subagents with optional Git worktree isolation |
 | **Evidence-bound evaluation** | Deterministic durable trajectory export, revision-compatible verification records, offline route/training evaluation, and validated exact-model adapter experiments without a second live router |
@@ -35,12 +35,11 @@ Azem is designed for coding work that needs more than a chat window. It combines
 Requirements:
 
 - Go 1.25.8 or later; the project recommends the Go 1.25.12 toolchain
-- A supported ChatGPT or Grok account or existing credential
+- A supported ChatGPT, Grok, Cursor, or Devin account, or a configured API provider
 - Git when using subagent worktree isolation
 - ripgrep 15 or later when building a desktop distribution; the desktop build
   target embeds the selected binary beside the runtime, so packaged users do
   not need a system installation
-- Bun 1.3.14 or later for the AST/LSP runtime packages
 - Rust 1.97.1 when building the native GPUI desktop client; `gpui/rust-toolchain.toml` selects it automatically
 
 ```bash
@@ -72,6 +71,8 @@ workspace daemon. The previous daemon remains independent, so its active work
 continues.
 
 The native client provides an integrated macOS titlebar, conversation/workspace
+Workspace files include a built-in PNG/JPEG/GIF/WebP image viewer, syntax-highlighted code previews, rendered Markdown, and an independently scrollable file list with folder and file icons.
+
 sidebar, durable project/session history, centered new-task composer, full
 provider/model picker, virtualized messages, foldable reasoning/tool/diff
 trails, the floating Environment panel, editor/files, changes, structured PR
@@ -79,6 +80,12 @@ views, security, usage, and a rounded native Settings modal. The Settings model
 catalog uses the complete MIT-licensed models.dev provider-logo set, quota
 state, provider/model enable controls, capability metadata, and independently
 scrollable provider and compact model lists.
+
+Dragging the right side panel saves its width for the current session. Closing
+and reopening the panel, switching sessions, and restarting the app restore it.
+The Environment card slides down and right behind the side panel when hidden,
+including when dragging the divider leaves insufficient space,
+and returns along the same path when shown; reduced motion switches instantly.
 
 In the native composer, type `/` for commands and enabled Skills or `@` to find files
 in the current project. Arrow keys navigate, Enter or Tab inserts a choice,
@@ -133,7 +140,7 @@ The desktop **Pull Requests** workspace uses the authenticated [GitHub CLI](http
 
 ### 2. Start it in a project
 
-The desktop app keeps a durable catalog of projects and restores the most recently opened project. A project's context menu can remove it from Azem without deleting workspace files or owned conversations; opening the path again restores it. `--workspace` selects the initial project for the single window without rewriting the user configuration.
+The desktop app keeps a durable catalog of projects and restores the most recently opened project. Click `+` beside Projects to select a folder; on macOS, the picker also supports New Folder. A project's context menu can remove it from Azem without deleting workspace files or owned conversations; opening the path again restores it. `--workspace` selects the initial project for the single window without rewriting the user configuration.
 
 ```bash
 cd /path/to/your/project
@@ -187,7 +194,7 @@ Azem streams progress in the terminal and asks for approval when the selected po
 - Embedded desktop terminal in the current project workspace (`Cmd+`` / `Ctrl+``), with tabs and a real PTY; this is a human console, not the agent shell tool
 - Streaming model output, reasoning state, tool activity, approval decisions, and usage information
 - General interactive `ask` questions plus a separate planning mode with versioned proposals, review and revision turns, and an explicit Execute Plan handoff into a new ordinary implementation turn
-- ChatGPT, Grok, and Cursor subscription login with live model catalogs, account identity and plan, provider-specific remaining quota, reset countdowns, credit balance, and Cursor Total/Cursor/Third Party pace forecasts. Grok availability comes only from the successful account API response; omitted models disappear instead of being restored from a curated list. Cursor's exact tier, Thinking, and Fast IDs collapse into one base-model row; each row reports its available variant inventory. Thinking is selected automatically whenever the family has a matching same-tier variant. Fast is changed inside the model picker and appears outside only as `· Fast` in the selected-model summary for both Cursor and ChatGPT/Codex subscriptions. The provider model catalog is searchable, and a family switch enables or disables every raw variant atomically. Models without a zero-data-retention guarantee show an explicit warning.
+- ChatGPT, Grok, Cursor, and Devin subscription login with live model catalogs, account identity and plan, provider-specific remaining quota, reset countdowns, credit balance, and Cursor Total/Cursor/Third Party pace forecasts. Grok availability comes only from the successful account API response; omitted models disappear instead of being restored from a curated list. Cursor's exact tier, Thinking, and Fast IDs collapse into one base-model row; each row reports its available variant inventory. Thinking is selected automatically whenever the family has a matching same-tier variant. Fast is changed inside the model picker and appears outside only as `· Fast` in the selected-model summary for both Cursor and ChatGPT/Codex subscriptions. Devin uses personal CLI browser Auth with an account-authoritative catalog; its quota is unreported. The provider model catalog is searchable, and a family switch enables or disables every raw variant atomically. Models without a zero-data-retention guarantee show an explicit warning.
 - Collapsible, colorized inline diffs with file paths and added/deleted line counts
 - Concise tool summaries that avoid flooding the transcript with raw patches or file contents
 - Persistent conversations start in a fresh session on every launch; use `/resume` to reopen prior sessions with their context, tool history, and recap
@@ -201,11 +208,14 @@ Azem streams progress in the terminal and asks for approval when the selected po
 - Independent tool calls dispatch in parallel while shell and subagent runtimes enforce their configured concurrency limits
 - Optional detached Git worktrees for isolated subagent changes
 - Native Standard, scoped, diff, working-tree, and Deep security scans using host-resolved Azem provider/model routes, immutable read-only source snapshots, durable worker/reducer recovery, canonical findings/reports/SARIF, triage, isolated verified patches, and governed GitHub/MCP publication
-- Built-in read/write/Hashline/AST/LSP/DAP/eval/browser/computer/web/GitHub/SSH/process/media/memory tools, with Python, JavaScript, Ruby, and Julia eval kernels enabled when their host runtimes exist
+- Built-in read/write/Hashline/search/glob/format/test/diff/shell/background-job/memory tools
+- [Native OMP tool coverage](docs/native-tools.md): AST, LSP, persistent Python,
+  browser, macOS desktop, debugger, web/GitHub, images, speech, memory reflection
+  and supervised processes, implemented without a JS/TS runtime.
 - Goal, Advisor, Vibe, TTSR, prewalk, checkpoint/rewind, loop guards, structured subagents, Hub peer messaging, and parked-agent revival
 - Parent-linked session trees with named branches and labels, Claude/Codex import, HTML/text/lossless JSON export, encrypted sharing, and encrypted live collaboration
 - Text and NDJSON headless modes, JSON-RPC, ACP, and the supported Go embedding API
-- Marketplace source management, scoped plugin install/update/upgrade/enable/uninstall, custom Bun tools/commands/providers/agents/themes, and permission-only extension file mutation brokerage
+- Marketplace source management, scoped plugin install/update/upgrade/enable/uninstall, and file-based custom commands, agents, and themes
 - Operator commands for auth broker/gateway services, setup/update/garbage collection, usage reports, benchmarks, signed GitHub webhooks, and bash/zsh/fish completion generation
 
 ## Terminal Workflow
@@ -225,7 +235,7 @@ Azem keeps review context in the conversation instead of hiding it behind raw to
 flowchart LR
     U[Terminal UI] --> A[Application runtime]
     D[Native GPUI desktop] --> A
-    A --> P[ChatGPT / Grok / Cursor subscriptions or llmux providers]
+    A --> P[ChatGPT / Grok / Cursor / Devin subscriptions or llmux providers]
     A --> G[Approval and tool governance]
     G --> T[Files, tests, and shell]
     G --> M[MCP servers]
@@ -287,7 +297,7 @@ Without `-config`, Azem reads `~/.azem/config.yaml`. If the file does not exist,
 | `/model-routing` | Configure models for titles, plan mode, approvals, vision fallback, recaps, and each subagent role |
 | `/provider [provider-id]` | Switch to any enabled provider with selectable models |
 | `/reasoning [level]` | Set reasoning effort |
-| `/login [provider]` | Sign in or import ChatGPT, Grok, or Cursor subscription credentials |
+| `/login [provider]` | Sign in to ChatGPT, Grok, Cursor, or Devin; import supported existing credentials |
 | `/logout [provider]` | Sign out of a subscription provider account |
 | `/skills [reload]` | Inspect or reload Agent Skills |
 | `/skill <name> [instruction]` | Activate a Skill and run one turn |
@@ -354,7 +364,7 @@ defaults:
   provider: chatgpt
   model: gpt-5.6-sol
   reasoning: high
-  agent_mode: single       # single | team
+  agent_mode: single       # explicit TUI/API default: single | team | vibe | fusion
   queue_mode: queue        # queue | guide
 
 workspace:
@@ -386,6 +396,7 @@ providers:
     catalog_ttl: 5m
     fast_mode: false       # supported subscription models only; faster responses use more credits
     disabled_models: []   # hidden from pickers and rejected by the runtime
+    extended_context_models: [] # opt in gpt-5.6-sol and/or gpt-6-astra to 1,050,000 tokens
   grok:
     enabled: true
     catalog_ttl: 5m
@@ -414,6 +425,7 @@ ttsr:
   rules: []
 
 agents:
+  workflow: vibe          # desktop: vibe | fusion; select in Settings → Model routing
   main:
     max_tokens: 0          # optional inter-request limit; the final request may overshoot it
     max_tool_calls: 0      # optional per-turn limit; 0 means unbounded
@@ -527,10 +539,7 @@ plugins:
 
 extensions:
   enabled: true
-  trust_project_code: false
-  additional_tool_paths: []
   additional_command_dirs: []
-  additional_extension_paths: []
   additional_agent_dirs: []
   additional_theme_dirs: []
 
@@ -703,10 +712,6 @@ Azem's approvals and persistent action boundaries help reduce accidental operati
 - `allow_network` relies on tools declaring network use and does not enforce OS-level network isolation.
 - `shell_policy: allow` and YOLO mode remove important confirmation points.
 - A subagent that explicitly requests worktree isolation fails if the worktree cannot be created; it never falls back to the shared workspace.
-- A trusted custom extension may register file write/delete fallbacks. Azem
-  consults them only after an ordinary workspace-local file mutation fails with
-  `EACCES`, `EPERM`, or `EROFS`; non-permission failures, archive/SQLite writes,
-  unresolved symlinks, and paths outside the workspace never reach the broker.
 - Auth broker and gateway bearer tokens grant access to credential projections.
   Use HTTPS except on loopback, keep tokens out of YAML when environment or
   permission-restricted token files are available, and expose neither service
@@ -720,7 +725,6 @@ For strict isolation, run Azem inside a container, virtual machine, or restricte
 cmd/azem/               Terminal application entry point
 cmd/azem-daemon/        Workspace-scoped runtime daemon for native IPC clients
 gpui/                   Rust GPUI desktop client and shared generated IPC contracts
-runtime-js/             Bun packages used by AST and LSP coding tools
 internal/agent/         Tool governance, persistent runs, and team agents
 internal/app/           Application orchestration, providers, and subagents
 internal/auth/          OAuth, credential import, and credential storage
@@ -733,14 +737,13 @@ internal/githubpr/      GitHub CLI projection, mutations, and PR monitor
 internal/authbroker/    Multi-process credential snapshots, refresh, account pools, and usage
 internal/authgateway/   Protocol-compatible provider forwarding gateway
 internal/collab/        Encrypted host/guest live collaboration relay
-internal/customtools/   Isolated Bun tools, commands, providers, agents, themes, and file broker
 internal/rpc/           JSON-RPC v1/v2 server
 internal/acp/           Agent Client Protocol server
 internal/sessionimport/ Claude and Codex JSONL importers
 internal/sessionexport/ HTML, text, and lossless JSON exporters
 internal/sessionshare/  Encrypted blob/gist session sharing
 internal/mcp/           MCP connection and tool management
-internal/provider/      ChatGPT/Codex, Grok, Cursor, llmux drivers, and model catalogs
+internal/provider/      ChatGPT/Codex, Grok, Cursor, Devin, llmux drivers, and model catalogs
 internal/recovery/      Crash recovery and side-effect reconciliation
 internal/blobstore/     Content-addressed files for large payloads
 internal/session/       Session persistence and compaction

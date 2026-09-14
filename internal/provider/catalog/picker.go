@@ -61,6 +61,9 @@ var (
 
 func AvailableReasoningLevels(provider string, model Model) []string {
 	switch provider {
+	case "devin":
+		// Devin exposes exact effort variants as model IDs, not a wire effort flag.
+		return nil
 	case "grok":
 		if levels := grokReasoningLevelsForID(model.ID); len(levels) > 0 {
 			return levels

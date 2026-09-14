@@ -11,8 +11,36 @@
 - GPUI: clear the active Todo rail after a run settles and use compact, divided queue rows while preserving stopped history and queue guidance guards.
 
 ## Unreleased
+- Fix the Environment card snapping away when dragging the right divider across
+  the available-width threshold; animate from the resize event through release.
+- Animate the Environment card sliding behind the right side panel, with a
+  reversible reveal and immediate switching when reduced motion is enabled.
+- Remember the right side panel width independently for each session across
+  panel reopening, session navigation, and app restarts.
+- Fix context compaction after oversized assistant output in a long task: archive
+  the complete assistant/tool group when ordinary recent-turn cuts cannot fit,
+  retaining user instructions, exact recovery artifacts and completed tool work.
+- Split native core workflows into Vibe scheduling and Fusion collaboration, persist
+  the choice in Settings, remove the composer Fusion switch, and return the first
+  completed worker from Vibe waits.
 - Remove the React/Wails desktop, its webview adapter, frontend dependencies,
   TypeScript contract output, and build targets. GPUI and TUI retain the shared daemon.
+- Remove the bundled JavaScript runtime (`runtime-js/`) and every tool and bridge
+  backed by it: `ast_grep`, `lsp`, `debug`, `eval`, `browser`, `computer`,
+  `web_search`, `github`, `generate_image`, `tts`, the `xd://` and `ssh://`
+  resource schemes, `hub` process supervision, and the Bun-hosted custom tool /
+  extension-command / file-mutation-broker subsystem (`internal/customtools`).
+  Peer messaging and background job `jobs`/`wait`/`cancel` operations remain.
+  Native replacements below restore tool capabilities without these bridges.
+  TTSR `ast_conditions` and the
+  `extensions.trust_project_code` / `additional_tool_paths` /
+  `additional_extension_paths` keys remain accepted for compatibility but no
+  longer have an effect.
+- Restore AST, LSP, persistent Python, Chrome CDP, macOS desktop, DAP debugging,
+  web/GitHub, images, speech and named Hub processes using Go and native system
+  programs. Add memory `reflect`/`learn`, default worker/role routing and durable
+  AST/media evidence. See `docs/native-tools.md` for the complete OMP mapping,
+  prerequisites, permission boundaries and real-program smoke tests.
 - Compact the native composer plan into a progress/current-task row by default,
   with an expandable numbered list, lighter framing and aligned status markers.
 - Expand data-heavy native Settings pages to the available workspace width.

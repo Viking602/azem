@@ -21,7 +21,7 @@ import (
 	"github.com/Viking602/azem/internal/capability"
 	"github.com/Viking602/azem/internal/commands"
 	"github.com/Viking602/azem/internal/config"
-	"github.com/Viking602/azem/internal/customtools"
+
 	"github.com/Viking602/azem/internal/extensions"
 	"github.com/Viking602/azem/internal/hooks"
 	mcpruntime "github.com/Viking602/azem/internal/mcp"
@@ -108,7 +108,6 @@ type Service struct {
 	security                    *securityscan.Service
 	commandCatalog              *commands.Catalog
 	commandDiagnostics          []string
-	extensionHost               *customtools.Host
 	extensionThemes             []extensions.Theme
 	extensionDiagnostics        []string
 	skillCatalog                *skills.Catalog
@@ -398,10 +397,6 @@ func (s *Service) AttachSkills(catalog *skills.Catalog) {
 func (s *Service) AttachCommands(catalog *commands.Catalog, diagnostics []string) {
 	s.commandCatalog = catalog
 	s.commandDiagnostics = append([]string(nil), diagnostics...)
-}
-
-func (s *Service) AttachExtensionHost(host *customtools.Host) {
-	s.extensionHost = host
 }
 
 func (s *Service) AttachPlugins(entries []PluginCatalogEntry, diagnostics []PluginDiagnostic) {
@@ -742,20 +737,17 @@ func (s *Service) startSessionTitleGeneration(request titleGenerationRequest, cu
 }
 
 func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
-	request = normalizeTurnRequest(request, s.cfg.Defaults)
-	if expanded, ok := s.commandCatalog.Expand(request.Prompt); ok {
-		request.Prompt = expanded
-	} else if name, arguments, ok := extensionCommandInput(request.Prompt); ok && s.extensionHost != nil {
-		expanded, matched, err := s.extensionHost.ExecuteCommand(s.ctx, name, arguments)
-		if err != nil {
+	s.mu.Lock()
+	defaults := s.cfg.Defaults
+	s.mu.Unlock()
+	request = normalizeTurnRequest(request, defaults)
+	if request.AgentMode == "fusion" {
+		if err := s.validateFusion(request); err != nil {
 			return "", err
 		}
-		if matched {
-			if strings.TrimSpace(expanded) == "" {
-				return "", fmt.Errorf("extension command %q produced no prompt", name)
-			}
-			request.Prompt = expanded
-		}
+	}
+	if expanded, ok := s.commandCatalog.Expand(request.Prompt); ok {
+		request.Prompt = expanded
 	}
 	if request.Prompt == "" && len(request.Images) == 0 {
 		return "", fmt.Errorf("prompt is empty")
@@ -766,10 +758,10 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 	if request.Prewalk != nil && request.PlanYolo != nil {
 		return "", fmt.Errorf("prewalk and plan-yolo cannot be combined")
 	}
-	if request.VibeMode && (request.PlanMode || request.Prewalk != nil || request.PlanYolo != nil || request.AgentMode != "single") {
-		return "", fmt.Errorf("vibe mode requires single-agent mode and cannot combine with plan or prewalk modes")
+	if request.VibeMode && (request.PlanMode || request.Prewalk != nil || request.PlanYolo != nil || request.AgentMode != "vibe") {
+		return "", fmt.Errorf("vibe mode cannot combine with other agent, plan or prewalk modes")
 	}
-	if request.VibeMode && (!s.cfg.Agents.Subagents.Enabled || request.DisableSubagents) {
+	if request.VibeMode && (!s.cfg.Agents.Subagents.Enabled || s.cfg.Agents.Subagents.MaxDepth == 0 || request.DisableSubagents) {
 		return "", fmt.Errorf("vibe mode requires the subagent runtime")
 	}
 	for name, route := range map[string]*config.ModelRouteConfig{"prewalk": request.Prewalk, "plan-yolo": request.PlanYolo} {
@@ -843,6 +835,16 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 	s.mu.Lock()
 	request.projectContext = s.projectContext
 	s.mu.Unlock()
+	var referenceErr error
+	request.Prompt, request.sessionReferences, referenceErr = s.resolveSessionReferences(runCtx, request.SessionID, request.Prompt)
+	if referenceErr != nil {
+		cancel()
+		s.clearRun("starting")
+		return "", referenceErr
+	}
+	if request.AgentMode == "team" {
+		request.historicalContext = request.sessionReferences
+	}
 	sessionSource := "startup"
 	if s.sessions != nil {
 		if _, loadErr := s.sessions.LoadSession(s.ctx, request.SessionID); loadErr == nil {
@@ -875,7 +877,7 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 		}
 		request.History = append([]session.Block(nil), projection.Blocks...)
 		request.modelHistory = projection.ModelHistory
-		request.toolRecords = append([]session.ToolRecord(nil), projection.ToolRecords...)
+		request.toolRecords = rootToolRecords(projection)
 		request.checkpointBoundary = projection.ModelHistory.CoveredThroughSequence
 		transcript := append([]session.Block(nil), projection.Blocks...)
 		transcript = append(transcript, session.Block{Kind: "user", Content: request.Prompt, State: "submitted"})
@@ -939,12 +941,6 @@ func (s *Service) StartConfiguredTurn(request TurnRequest) (string, error) {
 			s.clearRun("starting")
 			return "", err
 		}
-	}
-	if request.VibeMode {
-		request.privateContext = strings.TrimSpace(strings.Join([]string{
-			request.privateContext,
-			"[Trusted Vibe mode]\\nYou are the read-only director. Never edit files, run commands, grep, build, or verify by execution yourself. Drive persistent `fast` and `good` worker sessions with vibe_spawn/send/wait/kill/list. Workers start blank; give complete briefs. Keep one session per workstream and send follow-ups to that same name. Work concurrently. Verify worker claims only by reading the changed files before accepting them.",
-		}, "\n\n"))
 	}
 	if initialUser != "" {
 		request.History = append(request.History, session.Block{Kind: "user", Title: "SessionStart hook", Content: initialUser, State: "hook"})
@@ -1071,6 +1067,9 @@ func userTurnBlock(runID string, request TurnRequest) session.Block {
 		block.Data = make(map[string]string, 1)
 	}
 	block.Data["createdAt"] = strconv.FormatInt(time.Now().UTC().UnixMilli(), 10)
+	if request.sessionReferences != "" {
+		block.Data[sessionReferenceDataKey] = request.sessionReferences
+	}
 	if request.queueItemID != "" {
 		block.Data["queueItemId"] = request.queueItemID
 	}
@@ -1158,6 +1157,10 @@ func (s *Service) enqueueActiveTurnControl(sessionID, runID, text string, attach
 	if err := s.attachments.ValidateSessionAttachments(sessionID, attachments); err != nil {
 		return err
 	}
+	text, references, err := s.resolveSessionReferences(s.ctx, sessionID, text)
+	if err != nil {
+		return err
+	}
 	s.mu.Lock()
 	if s.shuttingDown {
 		s.mu.Unlock()
@@ -1186,6 +1189,7 @@ func (s *Service) enqueueActiveTurnControl(sessionID, runID, text string, attach
 		sequence, err = s.sessions.AppendBlock(s.ctx, sessionID, session.Block{
 			Kind: "user", RunID: runID, Title: title, Content: text, State: state,
 			Attachments: CloneAttachments(attachments),
+			Data:        map[string]string{sessionReferenceDataKey: references},
 		})
 		if err != nil {
 			s.mu.Unlock()
@@ -1202,7 +1206,7 @@ func (s *Service) enqueueActiveTurnControl(sessionID, runID, text string, attach
 		id = random
 	}
 	if err := control.Enqueue(turnControlMessage{
-		ID: id, Kind: kind, Message: UserMessageWithAttachments(text, attachments),
+		ID: id, Kind: kind, Message: UserMessageWithAttachments(text+sessionReferenceEvidence(references), attachments),
 	}); err != nil {
 		s.mu.Unlock()
 		return fmt.Errorf("queue %s message: %w", state, err)

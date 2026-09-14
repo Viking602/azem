@@ -10,8 +10,9 @@ import (
 
 func Open(response *resty.Response, ctx context.Context, cancel context.CancelFunc, reporters ...UsageReporter) (*Stream, error) {
 	if response.StatusCode()/100 != 2 {
+		err := HTTPError(response)
 		cancel()
-		return nil, HTTPError(response)
+		return nil, err
 	}
 	contentType := response.Header().Get("Content-Type")
 	mediaType, _, err := mime.ParseMediaType(contentType)

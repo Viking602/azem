@@ -64,6 +64,14 @@ matches the work you intend to authorize.
 
 ## Files, shell, and network
 
+[Native tools](native-tools.md) use the same governed tool boundary. Python,
+language servers, debuggers and named processes execute under the daemon's OS
+identity; they reject network-deny configurations without claiming sandboxing.
+CDP uses a temporary browser profile, macOS input needs existing OS grants,
+and media writes use a workspace root handle with exclusive creation. Image
+API secrets stay in request headers, redirects are refused, and provider error
+bodies are not copied to model output. AST changes commit through Hashline.
+
 `allow_write: false` removes built-in write tools but cannot constrain an
 approved shell process. `shell_policy` controls shell approval and
 `allow_network` depends on tool declarations; neither is OS isolation. Shell
@@ -242,14 +250,6 @@ Marketplace catalogs are untrusted metadata. Add/update/install stages source
 bytes in a private directory, validates name/path/source constraints, and only
 then atomically activates the scoped package. Updating a catalog never grants
 hook trust. Desktop and TUI mutations are explicit typed actions.
-
-A trusted extension may register file mutation fallbacks. Azem invokes them
-only after a workspace-local ordinary-file mutation fails with `EACCES`,
-`EPERM`, or `EROFS`. The request carries a symlink-resolved authoritative
-destination. Unresolved paths, escapes, non-permission errors, archives,
-SQLite, LSP writes, and subprocess writes never enter this broker. Hashline
-multi-file fallback attempts rollback through the same broker if a later
-handler declines.
 
 ## Offline learning, generated tools, and adapters
 

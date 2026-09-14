@@ -334,6 +334,46 @@ func TestUpdateSubscriptionDisabledModelsPreservesProviderSettings(t *testing.T)
 	}
 }
 
+func TestChatGPTExtendedContextPersistsAndValidatesExactModels(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	contents := "# keep settings\nversion: 1\nproviders:\n  chatgpt:\n    fast_mode: true\n    disabled_models: [gpt-5.6-luna]\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, models := range [][]string{nil, {"gpt-5.6-sol"}, {"gpt-5.6-sol", "gpt-6-astra"}, {"gpt-6-astra"}, nil} {
+		if err := UpdateChatGPTExtendedContextModels(path, models); err != nil {
+			t.Fatal(err)
+		}
+		loaded, err := Load(path, root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(loaded.Providers.ChatGPT.ExtendedContextModels, models) || !loaded.Providers.ChatGPT.FastMode || !reflect.DeepEqual(loaded.Providers.ChatGPT.DisabledModels, []string{"gpt-5.6-luna"}) {
+			t.Fatalf("ChatGPT config = %+v", loaded.Providers.ChatGPT)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil || !strings.Contains(string(data), "# keep settings") || len(models) == 0 && strings.Contains(string(data), "extended_context_models") {
+			t.Fatalf("saved config = %s, err = %v", data, err)
+		}
+	}
+	before, _ := os.ReadFile(path)
+	for _, models := range [][]string{{"gpt-5.6-luna"}, {"gpt-6-astra-high"}, {"gpt-6-astra", "gpt-6-astra"}, {""}} {
+		if err := UpdateChatGPTExtendedContextModels(path, models); err == nil {
+			t.Fatalf("invalid models accepted: %v", models)
+		}
+		cfg := Default()
+		cfg.Providers.ChatGPT.ExtendedContextModels = models
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("invalid models loaded: %v", models)
+		}
+	}
+	after, _ := os.ReadFile(path)
+	if string(after) != string(before) {
+		t.Fatal("rejected setting changed the config")
+	}
+}
+
 func TestUpdateSkillsSelectionPreservesSettingsAndRemovesEmptyLists(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "config.yaml")
@@ -898,6 +938,32 @@ func TestUpdateVibeModelRoutes(t *testing.T) {
 	}
 }
 
+func TestFusionRouteRoundTrip(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(path, []byte("version: 1\ndefaults:\n  agent_mode: fusion\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	route := ModelRouteConfig{Provider: "deepseek", Model: "deepseek-v4-flash", Reasoning: "low"}
+	if err := UpdateModelRoute(path, "fusion", "", route); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path, root)
+	if err != nil || loaded.Agents.Fusion != route || loaded.Defaults.AgentMode != "fusion" {
+		t.Fatalf("Fusion config round trip: %#v, %v", loaded.Agents.Fusion, err)
+	}
+	if err := UpdateModelRoute(path, "fusion", "unexpected", route); err == nil {
+		t.Fatal("Fusion role accepted")
+	}
+	if err := ResetModelRoute(path, "fusion", ""); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = Load(path, root)
+	if err != nil || loaded.Agents.Fusion != (ModelRouteConfig{}) {
+		t.Fatalf("Fusion reset: %#v, %v", loaded.Agents.Fusion, err)
+	}
+}
+
 func TestUpdateTitleModelRoutePersistsAndResetsToInherited(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "config.yaml")
@@ -1289,9 +1355,10 @@ func TestAgentConfigDefaultsAndBudgets(t *testing.T) {
 
 func TestBuiltInSubagentRoleContracts(t *testing.T) {
 	roles := builtInSubagentRoles()
-	readOnly := []string{"coding.list_files", "coding.glob", "coding.read_file", "coding.search", "ast_grep", "lsp", "web_search", "github", "recall", "coding.git_diff"}
-	all := append(append([]string(nil), readOnly...), "coding.edit_hashline", "coding.replace", "coding.write_file", "coding.delete_file", "coding.gofmt", "coding.go_test", "coding.shell", "debug", "eval", "browser", "computer", "hub", "generate_image", "tts", "retain", "memory_edit")
-	execute := append(append([]string(nil), readOnly...), "coding.go_test", "coding.shell", "debug", "eval", "browser", "computer", "hub")
+	readOnly := []string{"coding.list_files", "coding.glob", "coding.read_file", "coding.search", "recall", "coding.git_diff"}
+	nativeRead := append(append([]string(nil), readOnly...), "ast_grep", "inspect_image", "reflect", "web_search")
+	all := append(append([]string(nil), nativeRead...), "coding.edit_hashline", "coding.replace", "coding.write_file", "coding.delete_file", "coding.gofmt", "coding.go_test", "coding.shell", "hub", "retain", "memory_edit", "ast_edit", "coding.eval", "lsp", "browser", "computer", "debug", "github", "generate_image", "tts", "learn")
+	execute := append(append([]string(nil), nativeRead...), "coding.go_test", "coding.shell", "hub", "coding.eval", "lsp", "browser", "computer", "debug")
 	want := map[string]struct {
 		description string
 		capability  string
@@ -1304,15 +1371,15 @@ func TestBuiltInSubagentRoleContracts(t *testing.T) {
 		},
 		"explore": {
 			"Investigate the workspace without changes and return file-backed evidence.",
-			"read-only", readOnly, "Investigate the assigned workspace question",
+			"read-only", nativeRead, "Investigate the assigned workspace question",
 		},
 		"plan": {
 			"Produce a decision-complete implementation plan without changing the workspace.",
-			"read-only", readOnly, "Produce a decision-complete implementation plan",
+			"read-only", nativeRead, "Produce a decision-complete implementation plan",
 		},
 		"review": {
 			"Review a delegated change for requirement, correctness, and regression risks without editing.",
-			"read-only", readOnly, "Review the delegated change",
+			"read-only", nativeRead, "Review the delegated change",
 		},
 		"security-baseline": {
 			"Run one independent read-only source-backed security audit.",

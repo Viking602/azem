@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -91,6 +93,46 @@ func TestVibeWorkersRunConcurrentlyPersistAndAcceptFollowups(t *testing.T) {
 	}
 }
 
+func TestVibeWorkerNamesAndMailboxesAreSessionScoped(t *testing.T) {
+	runtime := &subagentRuntime{
+		active: map[string]*activeSubagent{
+			"a": {name: "SameName", run: agentservice.SubagentRun{SessionID: "session-a"}},
+			"b": {name: "SameName", run: agentservice.SubagentRun{SessionID: "session-b"}},
+		},
+		parked: map[string]*parkedSubagent{
+			"a": {name: "SameName", run: agentservice.SubagentRun{SessionID: "session-a"}},
+			"b": {name: "SameName", run: agentservice.SubagentRun{SessionID: "session-b"}},
+		},
+	}
+	a := &vibeDriver{runtime: runtime, parent: subagentParentRuntime{SessionID: "session-a"}}
+	b := &vibeDriver{runtime: runtime, parent: subagentParentRuntime{SessionID: "session-b"}}
+	a.saveRecord(vibeRecord{Name: "SameName", RunID: "a", CLI: "fast", State: "idle"})
+	if _, exists := b.record("SameName"); exists {
+		t.Fatal("registry leaked into another session")
+	}
+	b.saveRecord(vibeRecord{Name: "SameName", RunID: "b", CLI: "good", State: "idle"})
+	if a.screens(nil)[0].RunID != "a" || b.screens(nil)[0].RunID != "b" {
+		t.Fatal("active names crossed sessions")
+	}
+	if hubPeerMailboxKey("session-a", "SameName") == hubPeerMailboxKey("session-b", "SameName") {
+		t.Fatal("mailboxes cross sessions")
+	}
+	runtime.active = nil
+	killed := b.kill(context.Background(), tool.Call{ID: "kill-b", Name: vibeKillTool, Arguments: json.RawMessage(`{"session":"SameName"}`)})
+	if killed.IsError {
+		t.Fatal(killed.Content)
+	}
+	if _, exists := runtime.parked["a"]; !exists {
+		t.Fatal("kill removed another session's parked worker")
+	}
+	if _, exists := runtime.parked["b"]; exists {
+		t.Fatal("kill retained its own parked worker")
+	}
+	if a.screens(nil)[0].State != "idle" || b.screens(nil)[0].State != "dead" {
+		t.Fatal("kill state crossed sessions")
+	}
+}
+
 func TestProviderRuntimeVibeDirectorUsesOnlyReadAndVibeTools(t *testing.T) {
 	var mainCalls atomic.Int32
 	harness := newSkillRuntimeHarness(t, "---\nname: demo\ndescription: stable catalog\n---\nstable body\n", nil, func(_ int, body string, writer http.ResponseWriter) {
@@ -130,7 +172,7 @@ func TestProviderRuntimeVibeDirectorUsesOnlyReadAndVibeTools(t *testing.T) {
 	}
 	harness.service.providers.Attach(harness.service, nil, subagentStore)
 	runID, err := harness.service.StartConfiguredTurn(TurnRequest{
-		SessionID: "vibe-e2e", Prompt: "Direct workers to inspect the task", Provider: "chatgpt", Model: "gpt-skill", Reasoning: "minimal", AgentMode: "single", VibeMode: true,
+		SessionID: "vibe-e2e", Prompt: "Direct workers to inspect the task", Provider: "chatgpt", Model: "gpt-skill", Reasoning: "minimal", AgentMode: "vibe",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -187,4 +229,95 @@ func executeVibe(t *testing.T, ctx context.Context, driver tool.Driver, input st
 		t.Fatal(err)
 	}
 	return result
+}
+
+func TestVibeWaitReturnsFirstWorkerWithoutWaitingForOthers(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	runtime, provider, coding, _ := newGatedForegroundHarness(t, ctx, 0)
+	defer runtime.Shutdown(ctx)
+	defer coding.Close(ctx)
+	parent := subagentParentRuntime{SessionID: "session", ParentRunID: "director", ProviderID: "test", AccountID: "test-account", ModelID: "model", Reasoning: "high", Driver: provider, Coding: coding, WorkspaceRoot: t.TempDir(), DirectorReadOnly: true}
+	if _, err := runtime.Drivers(parent); err != nil {
+		t.Fatal(err)
+	}
+	drivers, err := newVibeDrivers(runtime, parent, config.VibeConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spawn := vibeTool(t, drivers, vibeSpawnTool)
+	for _, input := range []string{`{"cli":"fast","name":"A","prompt":"work A"}`, `{"cli":"good","name":"B","prompt":"work B"}`} {
+		if result := executeVibe(t, ctx, spawn, input); result.IsError {
+			t.Fatal(result.Content)
+		}
+	}
+	for range 2 {
+		select {
+		case <-provider.started:
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		}
+	}
+	provider.release <- struct{}{}
+	start := time.Now()
+	result := executeVibe(t, ctx, vibeTool(t, drivers, vibeWaitTool), `{"sessions":["A","B"],"timeout":2}`)
+	if result.IsError || !strings.Contains(result.Content, "completed") || !strings.Contains(result.Content, "Still running:") || time.Since(start) >= time.Second {
+		t.Fatalf("wait did not return first completion: elapsed=%v result=%#v", time.Since(start), result)
+	}
+	provider.release <- struct{}{}
+}
+
+func TestWorkflowSettingPersistsAndRejectsInvalidChanges(t *testing.T) {
+	ctx := context.Background()
+	cfg := config.Default()
+	cfg.Agents.Fusion = config.ModelRouteConfig{Provider: "grok", Model: "grok-test", Reasoning: "high"}
+	s := NewService(ctx, cfg)
+	s.configPath = filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(s.configPath, []byte("version: 1\n# preserve existing route settings\nagents:\n  fusion:\n    provider: grok\n    model: grok-test\n    reasoning: high\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s.activeRun, s.activeSession = "existing-run", "existing-session"
+	for _, mode := range []string{"fusion", "vibe"} {
+		if err := s.ExecuteAction(ctx, Action{Kind: ActionSetWorkflowMode, Target: mode}); err != nil {
+			t.Fatal(err)
+		}
+		loaded, err := config.Load(s.configPath, t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if loaded.Agents.Workflow != mode || loaded.Agents.Fusion != cfg.Agents.Fusion || s.WorkflowMode() != mode || s.modelRoutesEvent("listed").Data["workflow_mode"] != mode {
+			t.Fatalf("wrong workflow configuration: %#v", loaded.Agents)
+		}
+	}
+	if s.activeRun != "existing-run" || s.activeSession != "existing-session" {
+		t.Fatal("workflow setting changed the active run")
+	}
+	before, _ := os.ReadFile(s.configPath)
+	for _, mode := range []string{"", "single", "team", "unknown"} {
+		if err := s.setWorkflowMode(ctx, mode); err == nil {
+			t.Fatalf("accepted %q", mode)
+		}
+	}
+	s.cfg.Agents.Fusion = config.ModelRouteConfig{}
+	if err := s.setWorkflowMode(ctx, "fusion"); err == nil {
+		t.Fatal("accepted unconfigured Fusion")
+	}
+	after, _ := os.ReadFile(s.configPath)
+	if string(before) != string(after) || s.WorkflowMode() != "vibe" {
+		t.Fatal("failed setting changed saved selection")
+	}
+}
+
+func TestWorkflowInstructionsAreExclusiveAndStable(t *testing.T) {
+	for _, mode := range []string{"single", "vibe", "fusion"} {
+		instructions, fingerprint := turnInstructionsWithProject(false, "project", mode)
+		_, again := turnInstructionsWithProject(false, "project", mode)
+		if fingerprint != again || strings.Contains(instructions, vibeInstructions) != (mode == "vibe") || strings.Contains(instructions, fusionInstructions) != (mode == "fusion") {
+			t.Fatalf("wrong %s instructions", mode)
+		}
+	}
+	request := normalizeTurnRequest(TurnRequest{VibeMode: true, AgentMode: "single"}, config.Default().Defaults)
+	if request.AgentMode != "vibe" || !request.VibeMode {
+		t.Fatal("legacy Vibe request was not normalized")
+	}
 }

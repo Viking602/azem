@@ -340,6 +340,11 @@ func normalizeTurnRequest(request TurnRequest, defaults config.DefaultsConfig) T
 	if request.AgentMode == "" {
 		request.AgentMode = defaults.AgentMode
 	}
+	if request.AgentMode == "vibe" {
+		request.VibeMode = true
+	} else if request.VibeMode && request.AgentMode == "single" {
+		request.AgentMode = "vibe"
+	}
 	return request
 }
 
@@ -716,7 +721,7 @@ func (s *Service) runProviderTurn(ctx context.Context, request TurnRequest, run 
 		if err != nil {
 			runErr = fmt.Errorf("finalize checkpoint history: %w", err)
 		} else {
-			_, instructionFingerprint := turnInstructionsWithProject(request.PlanMode, request.projectContext)
+			_, instructionFingerprint := turnInstructionsWithProject(request.PlanMode, request.projectContext, request.AgentMode)
 			manifest := extractArchiveContextManifest(historyMessages)
 			history := session.ModelHistory{
 				ProviderID: request.Provider, ModelID: engine.Model,

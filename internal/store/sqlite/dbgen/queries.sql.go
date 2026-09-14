@@ -1136,6 +1136,23 @@ func (q *Queries) GetPromptQueue(ctx context.Context, sessionID string) (GetProm
 	return i, err
 }
 
+const getProviderMeteringState = `-- name: GetProviderMeteringState :one
+SELECT cache_epoch,checkpoint_generation,usage FROM session_projections WHERE session_id=?
+`
+
+type GetProviderMeteringStateRow struct {
+	CacheEpoch           int64  `db:"cache_epoch"`
+	CheckpointGeneration int64  `db:"checkpoint_generation"`
+	Usage                []byte `db:"usage"`
+}
+
+func (q *Queries) GetProviderMeteringState(ctx context.Context, sessionID string) (GetProviderMeteringStateRow, error) {
+	row := q.db.QueryRowContext(ctx, getProviderMeteringState, sessionID)
+	var i GetProviderMeteringStateRow
+	err := row.Scan(&i.CacheEpoch, &i.CheckpointGeneration, &i.Usage)
+	return i, err
+}
+
 const getRecap = `-- name: GetRecap :one
 SELECT session_id,anchor,covered_boundary,revision,goal,summary,open_items,updated_at FROM recaps WHERE session_id=? AND anchor=?
 `
@@ -1445,7 +1462,9 @@ func (q *Queries) GetToolCallCharge(ctx context.Context, arg GetToolCallChargePa
 }
 
 const getWorkspaceSession = `-- name: GetWorkspaceSession :one
-SELECT session_id FROM workspace_session_state WHERE anchor=?
+SELECT w.session_id FROM workspace_session_state w
+LEFT JOIN session_ui_state ui ON ui.session_id=w.session_id
+WHERE w.anchor=? AND COALESCE(ui.archived,0)=0
 `
 
 func (q *Queries) GetWorkspaceSession(ctx context.Context, anchor string) (string, error) {

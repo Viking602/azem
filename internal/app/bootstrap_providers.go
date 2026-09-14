@@ -16,6 +16,7 @@ import (
 	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/provider/catalog"
 	cursordriver "github.com/Viking602/azem/internal/provider/cursor"
+	devindriver "github.com/Viking602/azem/internal/provider/devin"
 )
 
 // buildProviderServices assembles the credential stores, authentication
@@ -84,9 +85,16 @@ func (b *bootstrapAssembly) buildProviderServices() error {
 		importConfiguredCredentials(b.ctx, b.cfg, b.authentication)
 	}
 	b.modelCatalog = catalog.NewService(b.store.DB(), b.authentication)
-	b.modelCatalog.TTL["chatgpt"] = b.cfg.Providers.ChatGPT.CatalogTTL
-	b.modelCatalog.TTL["grok"] = b.cfg.Providers.Grok.CatalogTTL
-	b.modelCatalog.TTL["cursor"] = b.cfg.Providers.Cursor.CatalogTTL
+	for _, id := range config.SubscriptionProviderIDs() {
+		b.modelCatalog.TTL[id] = b.cfg.Providers.Subscription(id).CatalogTTL
+	}
+	b.modelCatalog.Fetchers["devin"] = func(ctx context.Context, accountID string) ([]catalog.Model, error) {
+		credential, err := b.authentication.Credential(ctx, "devin", accountID)
+		if err != nil {
+			return nil, err
+		}
+		return devindriver.FetchModels(ctx, credential.AccessToken)
+	}
 	b.modelCatalog.Fetchers["cursor"] = func(ctx context.Context, accountID string) ([]catalog.Model, error) {
 		credential, err := b.authentication.Credential(ctx, "cursor", accountID)
 		if err != nil {

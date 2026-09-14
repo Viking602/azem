@@ -15,7 +15,80 @@ consumes the stream, while `durable.Runtime` settles provider/tool effects.
 | `chatgpt` | Existing Codex Responses subscription driver |
 | `grok` | Existing xAI API or CLI-proxy subscription driver |
 | `cursor` | Native `api2.cursor.sh` Connect protobuf agent driver |
+| `devin` | Personal Devin CLI browser Auth and Codeium Cascade Connect protobuf driver |
 | llmux profile IDs | `internal/provider/llmux`, backed by llmux v0.3.2 |
+
+Codex requests send the stable prompt-cache identity as `session-id` and
+`thread-id`, matching the [official client's session headers](https://github.com/openai/codex/blob/main/codex-rs/codex-api/src/requests/headers.rs); the legacy
+`conversation_id`/`session_id` headers retain the same value. Instructions, tool
+definitions and prior input items remain unchanged within a turn. Identical
+prefixes permit cache reuse but do not guarantee a hit on every request.
+Each ChatGPT logical turn also owns an in-memory routing map. When a successful
+response first returns `x-codex-turn-state`, subsequent requests and retries
+replay that exact value. The scope includes account, endpoint, exact model and
+prompt-cache identity. A new main/Team/Sidekick turn starts with an empty map;
+tokens are neither persisted nor retained on shared transport drivers. This
+follows the [Codex per-turn routing contract](https://github.com/openai/codex/blob/main/codex-rs/core/src/client.rs).
+
+Devin uses the personal-account CLI flow: PKCE browser authorization at
+`https://app.devin.ai/auth/cli/continue`, a state-checked loopback callback on
+`127.0.0.1:59653`, and token exchange at `https://api.devin.ai/auth/cli/token`.
+The daemon's existing credential store owns the resulting session token;
+Settings and TUI never receive it. There is no separate refresh-token grant;
+expired credentials require another login.
+
+`GetCliModelConfigs` is the authenticated model inventory. Discovery advertises
+the native `chisel` dev-channel identity; chat/auth use `devin-cli` version
+`3000.6.2` with `ideType=chisel`. Disabled/internal models are removed, exact
+model IDs and account-advertised capabilities are retained, and a successful
+fetch replaces the account cache. Empty or failed discovery is an error;
+only the shared catalog's explicitly stale last-successful cache may survive.
+Effort variants remain exact model rows. Native family/depth/Fast controls resolve
+only enabled account IDs, using account labels for opaque legacy IDs and keeping
+context sizes and Fusion companions separate. No wire reasoning flag is invented.
+Adaptive routers resolve through `AssignModel` before `GetChatMessage`.
+
+The driver preserves ordered private context, images, tool IDs/results,
+same-account/model reasoning signatures, phase markers and stable conversation
+IDs derived from the existing prompt-cache key. Tool calls finalize once,
+only after a successful Connect completion trailer and validated JSON arguments.
+Transport version 2 records the updated wire contract in durable execution
+profiles. SWE rejects dotted function names and mid-conversation `SYSTEM_PROMPT` rows.
+Tool names use the shared collision-safe ASCII mapping; the CLI-native `read`,
+`write`, `edit`, and `exec` map back to the existing governed file/shell tools.
+`edit` translates one unique `old_string`/`new_string` pair; `exec` supports a
+supervised command and optional absolute `workdir`. Persistent shell IDs,
+interactive/background options and replace-all are not advertised by this
+native subset. Existing extensions win name collisions, and incompatible
+older batch/async history retains its generic tool schema. Native arguments
+are retained in account/model-scoped provider state for exact history replay;
+approval, execution and durable records still use canonical Azem calls.
+Late host context uses a labeled USER envelope at the same message position,
+as in the Anthropic adapter; it is never hoisted into the cached system prefix
+or selected as the Adaptive router's active user action.
+Truncation, errors and incomplete tools fail explicitly. Transport/decompressed
+frames and requests are bounded to 16 MiB, decoded protobuf fields to 65,536,
+and tool calls to 1,024. Auth redirects cannot forward credentials to arbitrary
+hosts. Input usage includes cache reads/writes; absent stream usage remains
+unreported. Account quota comes from the read-only
+`/exa.seat_management_pb.SeatManagementService/GetUserStatus` RPC using the same
+CLI session metadata, bounded unary transport, and shared asynchronous Settings
+refresh. Daily/weekly percentages, reset timestamps and any reported overage
+balance are projected without exposing the session. Structured response format
+is unsupported. The endpoint and quota field names were verified against the
+[official CLI release](https://static.devin.ai/cli/current/manifest.json).
+
+Wire references: [devin-gateway login](https://github.com/CaiJingLong/devin-gateway)
+and [Oh My Pi Devin protocol](https://github.com/can1357/oh-my-pi/blob/main/packages/catalog/src/discovery/devin-proto.ts).
+The [devin-opencode](https://github.com/karthiknish/devin-opencode) plugin
+exposes cloud-session tools with API keys; it does not supply personal Auth
+or a model transport.
+
+Received HTTP/Connect failures retain bounded, credential-redacted details.
+Non-retryable rejections settle immediately. Retryable response failures settle
+after the existing retry budget; both are failed model attempts, rather than
+unknown outcomes left running. Lost transport without a failure response still
+requires reconciliation and must not be replayed automatically.
 
 Cursor still advertises Azem tools as MCP definitions. Composer also emits
 built-in execs (`read`/`shell`/`write`/`delete`/`grep`/`ls` and `pi_*`
@@ -65,13 +138,13 @@ Changing the advertised coding tools or the Cursor wire version resets the
 Cursor cache identity once; later turns extend the stable root prefix.
 
 The llmux adapter supports its native OpenAI, Anthropic, Google, Mistral,
-Cohere, and xAI providers plus its OpenAI-compatible registry. ChatGPT, Grok, and Cursor
+Cohere, and xAI providers plus its OpenAI-compatible registry. ChatGPT, Grok, Cursor, and Devin
 IDs remain reserved so an existing subscription configuration cannot silently
 change authentication or protocol.
 
 Those reserved subscription transports still appear in desktop Model settings
 as login cards. Their actions call ChatGPT browser OAuth, Grok device authorization,
-or Cursor's `loginDeepControl` poll; successful login refreshes the authenticated model
+Cursor's `loginDeepControl` poll, or Devin CLI browser Auth; successful login refreshes the authenticated model
 catalog, while logout removes the active account projection.
 
 The desktop catalog loads provider profiles in 24-item batches as its directory
@@ -138,6 +211,15 @@ automated and human harm-prevention review:
 <https://prod.cursor.com/docs/enterprise/privacy-and-data-governance#models-with-data-retention>.
 
 ## Request mapping
+
+The shared Codex/Grok Responses adapter preserves native tool-result images
+inside their original `function_call_output`, together with ordered text parts
+and the original call ID. Image bytes become data URLs using detected PNG,
+JPEG, GIF, or WebP MIME types; missing or unsupported image data fails explicitly.
+Text-only results retain their existing string representation and structured
+fallback. `inspect_image`, image reads, and browser screenshots must not become
+empty strings or metadata-only results. `TestInspectImageReachesResponsesProvider`
+checks the native tool through the durable runtime to the HTTP request.
 
 The adapter converts Venat system/developer/user/assistant/tool messages,
 structured tool schemas, stop sequences, output limits, response schemas,
@@ -298,6 +380,16 @@ and stream errors retain typed provider categories. Caller cancellation and
 deadlines abort rather than retry. A response-header timeout or transport
 cancellation while the caller remains healthy may retry only at the
 pre-stream boundary.
+
+Confirmed permission rejections (including HTTP 403) become terminal error
+events after that retry boundary. Durability records a failed model attempt,
+not an unknown outcome requiring reconciliation. Network failures with unknown
+outcomes retain their existing non-replay protection. Streaming authentication
+leaves the rejection body available to the provider parser, which reads the
+bounded code/detail before cancelling its request context. A 403 does not trigger
+token refresh or an automatic retry. Grok's `SAFETY_CHECK_TYPE_DATA_LEAKAGE` is a
+server content rejection, not evidence of an expired login; preserve that reason
+and stop the handoff without executing tools.
 
 Context archiving does not open a provider stream and therefore has no retry,
 inactivity-watchdog, or model-usage path. Automatic, manual, rebuild, main,

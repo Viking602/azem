@@ -12,6 +12,12 @@ import (
 )
 
 var modelActionHandlers = map[ActionKind]actionHandler{
+	ActionSetWorkflowMode: func(s *Service, ctx context.Context, action Action) error {
+		return s.setWorkflowMode(ctx, action.Target)
+	},
+	ActionSetSessionMode: func(s *Service, ctx context.Context, action Action) error {
+		return s.setSessionMode(ctx, action.SessionID, action.Target)
+	},
 	ActionListModelRoutes: func(s *Service, ctx context.Context, action Action) error {
 		s.emit(ctx, s.modelRoutesEvent("listed"))
 		return nil
@@ -48,6 +54,12 @@ var modelActionHandlers = map[ActionKind]actionHandler{
 			modelIDs = batch.ModelIDs
 		}
 		return s.setModelsEnabled(ctx, action.Target, modelIDs, enabled)
+	},
+	ActionSetModelExtendedContext: func(s *Service, ctx context.Context, action Action) error {
+		if action.Decision != "true" && action.Decision != "false" {
+			return fmt.Errorf("extended context state must be true or false")
+		}
+		return s.setModelExtendedContext(ctx, action.Target, action.Name, action.Decision == "true")
 	},
 	ActionSetModelRoute: func(s *Service, ctx context.Context, action Action) error {
 		return s.updateModelRoute(ctx, action.Route, false)

@@ -81,23 +81,26 @@ fn floating_environment_stays_separate_from_the_animated_side_panel() {
         .split("fn side_panel(")
         .next()
         .unwrap();
-    assert!(environment.contains(".right(px(right_inset))"));
+    assert!(environment.split_whitespace().collect::<String>().contains(
+        ".right(px(layout.right_inset-crate::ENVIRONMENT_PANEL_RESERVED_WIDTH*layout.tuck_progress))"
+    ));
+    assert!(environment.contains(".top(px(12. + 18. * layout.tuck_progress))"));
     assert!(environment.contains(".max_h(px(520.))"));
-    assert!(environment.contains("\"environment-panel-return\""));
+    assert!(!environment.contains(".with_animation("));
     assert!(!environment.contains(".overflow_hidden()"));
-    assert!(environment.contains(".w(px(312. * progress.max(0.)))"));
-    assert!(environment.contains(".opacity(progress.clamp(0., 1.))"));
+    assert!(environment.contains(".w(px(312.))"));
+    assert!(environment.contains("opacity: layout.opacity"));
+    assert!(environment.contains("open: this.environment_open"));
     assert!(!environment.contains(".left(px(-48."));
     assert!(!environment.contains(".top(px(6."));
     assert!(!source.contains(".border_l_1()"));
-    assert!(source.contains(".left(px(3.))"));
-}
-
-#[test]
-fn environment_return_spring_has_stable_endpoints() {
-    assert_eq!(super::environment_panel_return_spring(0.), 0.);
-    assert_eq!(super::environment_panel_return_spring(1.), 1.);
-    assert!(super::environment_panel_return_spring(0.4) > 0.9);
+    assert!(source.contains(".w(px(7.))"));
+    assert!(
+        source
+            .split_whitespace()
+            .collect::<String>()
+            .contains(".left(px(0.)).w(px(1.)).bg(palette.border)")
+    );
 }
 
 #[test]
@@ -596,7 +599,7 @@ fn historical_subagent_snapshots_attach_to_their_parent_run() {
     ));
     let task_call = Block {
         kind: Arc::from("tool"),
-        extra: HashMap::from([("toolCallId".to_string(), json!("call-1"))]),
+        tool_call_id: Arc::from("call-1"),
         ..Default::default()
     };
     assert!(agent_matches_group(
@@ -615,6 +618,73 @@ fn historical_subagent_snapshots_attach_to_their_parent_run() {
     };
     assert_eq!(resolved_agent_state(Some(&failed), "running"), "failed");
     assert_eq!(resolved_agent_state(Some(&block), "completed"), "completed");
+}
+
+#[test]
+fn workflow_dispatch_cards_use_wire_call_ids_and_actual_worker_models() {
+    use super::timeline::process::subagent_dispatch_label;
+    let locale = Locale::resolve("zh-CN");
+    for (name, args, label) in [
+        (
+            "vibe_spawn",
+            json!({"cli":"fast"}),
+            "Vibe fast · GPT 5.6 Luna",
+        ),
+        (
+            "vibe_spawn",
+            json!(r#"{"cli":"good"}"#),
+            "Vibe good · GPT 5.6 Luna",
+        ),
+    ] {
+        let block: Block = serde_json::from_value(json!({
+            "kind":"tool", "title":name, "toolCallId":"dispatch-1", "arguments":args
+        }))
+        .unwrap();
+        let group = std::slice::from_ref(&block);
+        let agent = json!({"id":"worker-1", "parentRunId":"run-1",
+            "parentToolCallId":"dispatch-1", "type":"worker", "model":"gpt-5.6-luna"});
+        assert!(agent_matches_group(&agent, group, "run-1"));
+        assert!(!agent_matches_group(
+            &json!({"parentRunId":"run-1", "parentToolCallId":"other"}),
+            group,
+            "run-1"
+        ));
+        assert_eq!(subagent_dispatch_label(&agent, group, locale), label);
+        assert_eq!(tool_activity_kind(&block), ToolActivityKind::Subagent);
+    }
+    let mut expansion = crate::ProcessExpansion::default();
+    assert!(expansion.group_is_expanded("dispatch", true));
+    expansion.toggle("dispatch");
+    assert!(!expansion.group_is_expanded("dispatch", true));
+    assert!(!expansion.group_is_expanded("dispatch", false));
+    assert!(expansion.group_is_expanded("dispatch", true));
+}
+
+#[test]
+fn fusion_tools_stay_in_the_main_timeline_without_a_worker_panel() {
+    let mut state = AppState::default();
+    state.navigation.current_session_id = "session".into();
+    // The backend projects actual execution tools with main-run presentation
+    // IDs while keeping their original execution identities in the metadata.
+    for kind in ["tool_started", "tool_finished"] {
+        state.apply_direct_event(json!({"kind":kind,"sessionId":"session","runId":"root",
+            "toolCallId":"fusion:child:read", "state":if kind == "tool_started" {"running"} else {"completed"},
+            "text":"file evidence", "data":{"name":"coding.read_file", "arguments":"{\"path\":\"README.md\"}",
+                "executionRunId":"child", "executionToolCallId":"read"}}));
+        let environment = super::environment_snapshot(&state);
+        assert!(!environment.has_subagents);
+        assert_eq!(environment.running_agents + environment.completed_agents, 0);
+        assert!(state.runtime.selected_agent_id.is_empty());
+    }
+    let blocks = state.transcript.blocks.borrow();
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0].run_id.as_ref(), "root");
+    assert_eq!(blocks[0].state.as_ref(), "completed");
+    assert_eq!(tool_activity_kind(&blocks[0]), ToolActivityKind::Read);
+    for name in ["fusion", "sidekick"] {
+        let block: Block = serde_json::from_value(json!({"kind":"tool","title":name})).unwrap();
+        assert_eq!(tool_activity_kind(&block), ToolActivityKind::Other);
+    }
 }
 
 #[test]
@@ -952,6 +1022,8 @@ fn core_route_list_covers_native_settings() {
     assert!(is_core_settings_route("advisor"));
     assert!(!is_core_settings_route("main"));
     assert!(!is_core_settings_route("subagent"));
+    assert!(!is_core_settings_route("vibe"));
+    assert!(!is_core_settings_route("fusion"));
     assert_eq!(
         settings_route_title("title", "", "Title", Locale::resolve("zh-CN")),
         "会话标题"
@@ -1149,6 +1221,12 @@ fn model_catalog_filters_providers_and_handles_subscription_auth_state() {
     assert_eq!(login["kind"], "login");
     assert_eq!(login["target"], "chatgpt");
     assert!(login.get("provider").is_none());
+    let devin_login = model_provider_action(
+        &json!({"id": "devin", "subscription": true, "enabled": false}),
+        "session-1",
+    );
+    assert_eq!(devin_login["kind"], "login");
+    assert_eq!(devin_login["target"], "devin");
     let catalog_source = crate::SURFACES_SOURCE;
     assert!(catalog_source.contains(".when(subscription, |actions|"));
     assert!(!catalog_source.contains(".when(subscription && enabled, |actions|"));
@@ -2145,4 +2223,57 @@ fn route_menus_fit_the_window_and_rows_use_shared_borders() {
     assert!(row.contains(".snap_to_window_with_margin(px(8.))"));
     assert!(row.contains("gpui::AnchoredPositionMode::Local"));
     assert!(row.contains("div().absolute().top_0().left_0().child("));
+}
+#[test]
+fn quota_windows_preserve_daily_weekly_and_reset_times() {
+    use serde_json::json;
+    assert_eq!(
+        super::provider_quota_windows(&json!({"quotaAvailable":true,"quotaBreakdown":[
+            {"id":"daily","usedPercent":25,"resetsAt":2000000000},
+            {"id":"weekly","usedPercent":100,"resetsAt":2000500000}
+        ]})),
+        vec![
+            ("daily".into(), 75., 2000000000),
+            ("weekly".into(), 0., 2000500000)
+        ]
+    );
+    assert!(super::provider_quota_windows(&json!({})).is_empty());
+    assert_eq!(
+        super::provider_quota_windows(
+            &json!({"quotaAvailable":true,"quotaPeriod":"monthly","quotaUsedPercent":30})
+        ),
+        vec![("monthly".into(), 70., 0)]
+    );
+}
+
+#[test]
+fn fusion_handoff_is_readable_and_child_report_has_source_without_final_footer() {
+    use super::timeline::process::{fusion_source_label, tool_step_detail};
+    let handoff: crate::state::Block = serde_json::from_value(json!({
+        "kind":"tool", "title":"sidekick", "state":"completed",
+        "arguments":{"prompt":"Read the first line."},
+        "content":"{\"output\":\"The report is already inline.\"}"
+    }))
+    .unwrap();
+    assert_eq!(
+        tool_step_detail(&handoff, &[]).unwrap().content,
+        "Read the first line."
+    );
+    let mut failed = handoff.clone();
+    failed.state = "interrupted".into();
+    failed.content = "worker disconnected".into();
+    assert_eq!(
+        tool_step_detail(&failed, &[]).unwrap().content,
+        "Read the first line.\n\nworker disconnected"
+    );
+    let report: crate::state::Block = serde_json::from_value(json!({
+        "kind":"assistant", "textPhase":"commentary", "state":"completed", "content":"Report",
+        "data":{"fusionRole":"sidekick", "sourceLabel":"Sidekick · actual-model"}
+    }))
+    .unwrap();
+    assert_eq!(
+        fusion_source_label(&report),
+        Some("Sidekick · actual-model")
+    );
+    assert!(!super::timeline::final_reply_footer_target(0, &[report]));
 }

@@ -335,6 +335,7 @@ pub(super) fn settings_extensions_body(
                                 .text_size(px(9.))
                                 .child(count.to_string()),
                         )
+                        .animate_selection(selected, palette.paper_muted, palette.paper, cx)
                 })),
         )
         .child(
@@ -544,7 +545,7 @@ fn extension_button(
             }
         }))
         .child(if switch {
-            settings_switch(checked, palette).into_any_element()
+            settings_switch(checked, palette, cx).into_any_element()
         } else {
             div().child(label).into_any_element()
         })
@@ -894,6 +895,12 @@ fn settings_marketplace_body(
                                 cx.notify();
                             }))
                             .child(label)
+                            .animate_selection(
+                                controls.scope == scope,
+                                palette.paper,
+                                palette.hover,
+                                cx,
+                            )
                     }),
                 ),
         )

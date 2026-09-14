@@ -18,6 +18,7 @@ import (
 
 	"github.com/Viking602/azem/internal/auth/chatgpt"
 	"github.com/Viking602/azem/internal/auth/cursor"
+	"github.com/Viking602/azem/internal/auth/devin"
 	"github.com/Viking602/azem/internal/auth/grok"
 	"github.com/Viking602/azem/internal/netproxy"
 	"github.com/Viking602/azem/internal/store/sqlite/dbgen"
@@ -51,6 +52,8 @@ func (e EntitlementError) Error() string {
 	return fmt.Sprintf("%s subscription does not permit this operation (HTTP %d)", e.Provider, e.Status)
 }
 
+func (EntitlementError) Category() hyprovider.ErrorKind { return hyprovider.ErrorPermission }
+
 // streamingResponseHeaderTimeout bounds how long a streaming request may wait
 // for the first response headers after the body is written. Go 1.25 reports
 // that stall as context.DeadlineExceeded, which Venat treats as caller
@@ -66,6 +69,7 @@ type Service struct {
 	chatgpt          *chatgpt.Client
 	grok             *grok.Client
 	cursor           *cursor.Client
+	devin            *devin.Client
 	httpClient       *resty.Client
 	streamClient     *resty.Client
 	refresh          singleflight.Group
@@ -92,7 +96,7 @@ func NewService(db *sql.DB, store CredentialStore, chatgptClient *chatgpt.Client
 	}).SetResponseDoNotParse(true)
 	netproxy.ConfigureTransport(streamClient.Transport())
 	return &Service{
-		db: db, store: store, chatgpt: chatgptClient, grok: grokClient, cursor: cursor.NewClient(),
+		db: db, store: store, chatgpt: chatgptClient, grok: grokClient, cursor: cursor.NewClient(), devin: devin.NewClient(),
 		httpClient: httpClient, streamClient: streamClient,
 	}
 }
@@ -174,6 +178,14 @@ func (s *Service) LoginGrok(ctx context.Context, notify func(grok.DeviceAuthoriz
 	return s.storeGrok(ctx, s.completeGrokTokens(tokens))
 }
 
+func (s *Service) LoginDevin(ctx context.Context, openURL func(string) error) (Account, error) {
+	tokens, err := s.devin.Login(ctx, openURL)
+	if err != nil {
+		return Account{}, err
+	}
+	return s.storeCredential(ctx, Credential{Provider: "devin", AccountID: stableAccountID(tokens.AccountID, tokens.Email, tokens.AccessToken), AccessToken: tokens.AccessToken, Email: tokens.Email, DisplayName: firstNonEmpty(tokens.Email, "Devin"), ExpiresAt: tokens.ExpiresAt})
+}
+
 func (s *Service) LoginCursor(ctx context.Context, openURL func(string) error) (Account, error) {
 	tokens, err := s.cursor.Login(ctx, openURL)
 	if err != nil {
@@ -250,6 +262,12 @@ func (s *Service) Credential(ctx context.Context, provider string, accountID str
 	credential, err := s.store.Get(ctx, provider, accountID)
 	if err != nil {
 		return Credential{}, err
+	}
+	if provider == "devin" && !credential.ExpiresAt.IsZero() && time.Now().After(credential.ExpiresAt) {
+		if err := s.markStatus(ctx, provider, accountID, "reauth_required"); err != nil {
+			return Credential{}, err
+		}
+		return Credential{}, fmt.Errorf("Devin session expired; sign in again")
 	}
 	if !credential.ExpiresAt.IsZero() && time.Until(credential.ExpiresAt) < time.Minute && credential.RefreshToken != "" {
 		return s.Refresh(ctx, provider, accountID)
@@ -453,7 +471,7 @@ func (s *Service) doWithRefresh(
 		if err != nil {
 			return nil, err
 		}
-		if response.StatusCode() == 403 {
+		if response.StatusCode() == 403 && client != s.streamClient {
 			closeResponseBody(response)
 			return nil, EntitlementError{Provider: provider, Status: response.StatusCode()}
 		}

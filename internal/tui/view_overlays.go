@@ -958,7 +958,7 @@ func (m AppModel) overlayDescription() []string {
 	case OverlayProvider:
 		if m.overlayPurpose == "login" {
 			return []string{
-				m.tr("overlay.signin.chatgpt"), m.tr("overlay.signin.grok"), m.tr("overlay.signin.cursor"), m.tr("overlay.signin.existing"),
+				m.tr("overlay.signin.chatgpt"), m.tr("overlay.signin.grok"), m.tr("overlay.signin.cursor"), m.tr("overlay.signin.devin"), m.tr("overlay.signin.existing"),
 			}
 		}
 	case OverlayModel:

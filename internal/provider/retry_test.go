@@ -8,10 +8,13 @@ import (
 	"github.com/Viking602/venat/message"
 	"github.com/Viking602/venat/tool"
 	"github.com/Viking602/venat/tool/kit"
+	"io"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Viking602/azem/internal/auth"
+	"github.com/Viking602/azem/internal/provider/responses"
 	hyprovider "github.com/Viking602/venat/provider"
 )
 
@@ -23,6 +26,8 @@ func (retryableFixtureError) Retryable() bool       { return true }
 type retryFixtureDriver struct {
 	streams [][]hyprovider.Event
 	calls   int
+	openErr error
+	recvErr error
 }
 
 func (*retryFixtureDriver) Metadata() hyprovider.Metadata {
@@ -31,9 +36,110 @@ func (*retryFixtureDriver) Metadata() hyprovider.Metadata {
 
 func (driver *retryFixtureDriver) Stream(context.Context, hyprovider.Request) (hyprovider.Stream, error) {
 	driver.calls++
+	if driver.openErr != nil {
+		return nil, driver.openErr
+	}
 	events := driver.streams[0]
 	driver.streams = driver.streams[1:]
+	if driver.recvErr != nil {
+		return &failureAfterEvents{Stream: hyprovider.NewSliceStream(events), failure: driver.recvErr}, nil
+	}
 	return hyprovider.NewSliceStream(events), nil
+}
+
+type failureAfterEvents struct {
+	hyprovider.Stream
+	failure error
+}
+
+func (s *failureAfterEvents) Recv() (hyprovider.Event, error) {
+	event, err := s.Stream.Recv()
+	if err == io.EOF {
+		return hyprovider.Event{}, s.failure
+	}
+	return event, err
+}
+
+func TestRejectedStreamingTrailerIsTerminalWithoutReplay(t *testing.T) {
+	for _, status := range []int{400, 401, 403, 404, 429, 502} {
+		for _, partial := range []bool{false, true} {
+			for _, retries := range []int{0, 2} {
+				t.Run(fmt.Sprintf("%d/partial=%t/retries=%d", status, partial, retries), func(t *testing.T) {
+					failure := hyprovider.NewHTTPError("devin", status, "request rejected")
+					var events []hyprovider.Event
+					if partial {
+						events = append(events, hyprovider.Event{Kind: hyprovider.EventTextDelta, Text: "partial"})
+					}
+					inner := &retryFixtureDriver{streams: [][]hyprovider.Event{events, events, events}, recvErr: failure}
+					stream, err := WithRetry(inner, RetryConfig{MaxRetries: retries}).Stream(context.Background(), hyprovider.Request{})
+					if err != nil {
+						t.Fatal(err)
+					}
+					assertRejectedStream(t, stream, failure, partial)
+					expectedCalls := 1
+					if !partial && (status == 429 || status == 502) {
+						expectedCalls += retries
+					}
+					if inner.calls != expectedCalls {
+						t.Fatalf("physical calls=%d want=%d", inner.calls, expectedCalls)
+					}
+					_ = stream.Close()
+				})
+			}
+		}
+	}
+}
+
+func TestLostTransportRetainsUnknownOutcome(t *testing.T) {
+	unknown := errors.New("connection lost")
+	inner := &retryFixtureDriver{streams: [][]hyprovider.Event{nil}, recvErr: unknown}
+	stream, err := WithRetry(inner, RetryConfig{}).Stream(context.Background(), hyprovider.Request{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	if _, err := stream.Recv(); !errors.Is(err, unknown) {
+		t.Fatalf("unknown outcome was changed: %v", err)
+	}
+}
+
+func assertRejectedStream(t *testing.T, stream hyprovider.Stream, failure error, partial bool) {
+	t.Helper()
+	if partial {
+		event, err := stream.Recv()
+		if err != nil || event.Text != "partial" {
+			t.Fatal("lost partial text")
+		}
+	}
+	event, err := stream.Recv()
+	if err != nil || event.Kind != hyprovider.EventError || !errors.Is(event.Err, failure) {
+		t.Fatalf("terminal event=%+v err=%v", event, err)
+	}
+	if _, err := stream.Recv(); err != io.EOF {
+		t.Fatalf("terminal error repeated: %v", err)
+	}
+}
+
+func TestForbiddenResponseIsTerminalWithoutRetryOrUnknownOutcome(t *testing.T) {
+	for _, failure := range []error{auth.EntitlementError{Provider: "grok", Status: 403}, &responses.APIError{Kind: responses.ErrorEntitlement, StatusCode: 403, Message: "not permitted"}, hyprovider.NewHTTPError("cursor", 403, "not permitted"), hyprovider.NewHTTPError("devin", 400, "invalid_argument")} {
+		for _, retries := range []int{0, 2} {
+			inner := &retryFixtureDriver{openErr: failure}
+			stream, err := WithRetry(inner, RetryConfig{MaxRetries: retries}).Stream(context.Background(), hyprovider.Request{})
+			if err != nil {
+				t.Fatalf("confirmed HTTP rejection escaped as uncertain stream-open failure: %v", err)
+			}
+			event, err := stream.Recv()
+			_ = stream.Close()
+			if err != nil || event.Kind != hyprovider.EventError || !errors.Is(event.Err, failure) || inner.calls != 1 {
+				t.Fatalf("event=%+v err=%v calls=%d", event, err, inner.calls)
+			}
+		}
+	}
+	unknown := errors.New("connection lost after request was sent")
+	inner := &retryFixtureDriver{openErr: unknown}
+	if stream, err := WithRetry(inner, RetryConfig{}).Stream(context.Background(), hyprovider.Request{}); stream != nil || err != unknown {
+		t.Fatalf("uncertain transport outcome was changed: stream=%v err=%v", stream, err)
+	}
 }
 
 func TestWithRetryReopensOnlyBeforeFirstValidEvent(t *testing.T) {

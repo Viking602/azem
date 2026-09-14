@@ -73,11 +73,9 @@ at Azem storage.
 | Hooks | Cataloged in the Extensions Hooks tab even before trust; executed only when `plugins.trust_hooks: true` and the command is not listed in `hooks.disabled` |
 | `.app.json` | Cataloged as an App requirement; requires separate connector authorization |
 | Interface assets | Validated and cataloged; supported icons up to 1 MiB render from bounded image data |
-| Commands | Markdown commands and extension-registered handlers share the normal slash-command path |
-| Tools and extensions | Loaded in the bounded Bun host with duplicate-name rejection and governed tool definitions |
+| Commands | Markdown commands share the normal slash-command path |
 | Agents and providers | Validated and merged into the existing subagent/provider registries |
 | Themes | Discovered from validated plugin roots and projected as token maps |
-| LSP/DAP descriptors | Copied and resolved through the existing language/debug runtimes |
 
 Directly installed plugins are loaded at desktop startup. Codex plugins first
 appear as available choices; selecting one persists its ID in
@@ -108,12 +106,6 @@ and advertised version. `plugins.marketplace_auto_update` is `off`, `notify`
 Desktop Settings → Extensions → Marketplace and TUI `/marketplace` expose the
 same application actions. The desktop re-reads the typed catalog after each
 mutation. Neither UI receives a cache path as an executable capability.
-
-Custom extension modules may register file write/delete fallbacks. The Bun host
-runs handlers in registration order, skips a throwing handler, and accepts the
-first explicit `true`. Azem calls this seam only after a local ordinary-file
-mutation fails with `EACCES`, `EPERM`, or `EROFS`; it passes the resolved
-workspace destination and preserves the original error if no handler accepts.
 
 ## Security boundary
 

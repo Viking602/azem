@@ -3,7 +3,9 @@ package app
 import (
 	"context"
 	"fmt"
+	"io"
 	"sync"
+	"time"
 
 	"github.com/Viking602/azem/internal/agentruntime"
 	hyagent "github.com/Viking602/venat/agent"
@@ -36,6 +38,7 @@ type turnControlMessage struct {
 	Kind                  turnControlKind
 	Message               message.Message
 	DiscardRejectedOutput bool
+	InterruptStream       bool
 }
 
 // turnControlQueue is an app-owned FIFO. Drain reserves matching messages;
@@ -164,20 +167,38 @@ func turnControlMessages(batch []turnControlMessage) []message.Message {
 // turnControlRuntime maps the app FIFO onto v0.16 extension points. Steers are
 // appended immediately before a model effect. Controls arriving during that
 // effect are consumed by the terminal guardrail and continue as a follow-up.
+// Trusted stream guards can end text-only generation at the next event boundary.
 type turnControlRuntime struct {
 	queue *turnControlQueue
 
-	mu       sync.Mutex
-	observed []string
+	mu           sync.Mutex
+	observed     []string
+	deadlineAt   time.Time
+	wrapUpAt     time.Time
+	wrapUpQueued bool
 }
 
-func bindTurnControl(engine hyagent.Engine, queue *turnControlQueue) hyagent.Engine {
+func bindTurnControl(engine hyagent.Engine, queue *turnControlQueue, deadlineAt time.Time) hyagent.Engine {
 	if queue == nil {
 		return engine
 	}
-	runtime := &turnControlRuntime{queue: queue}
+	runtime := &turnControlRuntime{queue: queue, deadlineAt: deadlineAt}
+	if !deadlineAt.IsZero() {
+		runtime.wrapUpAt = deadlineAt.Add(-min(90*time.Second, max(0, time.Until(deadlineAt)/5)))
+	}
 	engine.Hooks = engine.Hooks.Prepend(runtime)
-	engine.OutputGuardrails = append(engine.OutputGuardrails, runtime)
+	engine.OutputGuardrails = append([]hyagent.OutputGuardrail{runtime}, engine.OutputGuardrails...)
+	engine.ModelInterceptor = hyprovider.ChainStreamInterceptors(hyprovider.StreamInterceptorFunc(func(ctx context.Context, next hyprovider.Driver, request hyprovider.Request) (hyprovider.Stream, error) {
+		stream, err := next.Stream(ctx, request)
+		if err != nil {
+			return nil, err
+		}
+		identity := hyprovider.StreamIdentity{Provider: next.Metadata(), Model: request.Model}
+		if identified, ok := stream.(hyprovider.IdentifiedStream); ok {
+			identity = identified.Identity()
+		}
+		return &turnControlStream{Stream: stream, ctx: ctx, queue: queue, identity: identity}, nil
+	}), engine.ModelInterceptor)
 	engine.Boundaries = hyagent.JoinBoundaryObservers(engine.Boundaries, runtime)
 	prior := engine.StepObserver
 	engine.StepObserver = hyagent.StepObserverFunc(func(ctx context.Context, step hyagent.Step) error {
@@ -191,11 +212,67 @@ func bindTurnControl(engine hyagent.Engine, queue *turnControlQueue) hyagent.Eng
 	return engine
 }
 
+type turnControlStream struct {
+	hyprovider.Stream
+	ctx         context.Context
+	queue       *turnControlQueue
+	identity    hyprovider.StreamIdentity
+	unsafeToCut bool
+	interrupted bool
+}
+
+func (stream *turnControlStream) Identity() hyprovider.StreamIdentity { return stream.identity }
+
+func (stream *turnControlStream) Recv() (hyprovider.Event, error) {
+	if stream.interrupted {
+		return hyprovider.Event{}, io.EOF
+	}
+	if !stream.unsafeToCut && stream.ctx.Err() == nil && stream.queue.shouldInterruptStream() {
+		if err := stream.Stream.Close(); err != nil {
+			return hyprovider.Event{}, err
+		}
+		stream.interrupted = true
+		// This is an explicit host abort, never a fabricated provider completion.
+		// The pending control makes the output guardrail continue the same run.
+		return hyprovider.Event{Kind: hyprovider.EventDone, StopReason: hyprovider.StopReasonAborted}, nil
+	}
+	event, err := stream.Stream.Recv()
+	switch event.Kind {
+	case hyprovider.EventToolCallDelta, hyprovider.EventToolCall, hyprovider.EventDone, hyprovider.EventError:
+		// Preserve partial tool calls, provider-side exec effects and real terminals.
+		stream.unsafeToCut = true
+	}
+	return event, err
+}
+
+func (stream *turnControlStream) Close() error {
+	if stream.interrupted {
+		return nil
+	}
+	return stream.Stream.Close()
+}
+
+func (queue *turnControlQueue) shouldInterruptStream() bool {
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
+	for _, control := range queue.pending {
+		if control.InterruptStream {
+			if _, reserved := queue.reserved[control.ID]; !reserved {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (*turnControlRuntime) TransformContext(_ context.Context, messages []message.Message) ([]message.Message, error) {
 	return messages, nil
 }
 
 func (runtime *turnControlRuntime) BeforeModelCall(ctx context.Context, request *hyprovider.Request) error {
+	if err := runtime.enqueueDeadlineWrapUp(ctx); err != nil {
+		return err
+	}
 	batch, err := runtime.queue.Drain(ctx, turnControlBeforeModel)
 	if err != nil {
 		return err
@@ -206,7 +283,36 @@ func (runtime *turnControlRuntime) BeforeModelCall(ctx context.Context, request 
 
 func (*turnControlRuntime) BeforeToolCall(context.Context, *tool.Call) error  { return nil }
 func (*turnControlRuntime) AfterToolCall(context.Context, *tool.Result) error { return nil }
-func (*turnControlRuntime) OnEvent(context.Context, hyprovider.Event) error   { return nil }
+func (runtime *turnControlRuntime) OnEvent(ctx context.Context, event hyprovider.Event) error {
+	// Leave final prose and provider terminal events alone. The stream wrapper
+	// also defers interruption once a tool call or provider-side effect starts.
+	if event.Kind == hyprovider.EventThinkingDelta {
+		return runtime.enqueueDeadlineWrapUp(ctx)
+	}
+	return nil
+}
+
+func (runtime *turnControlRuntime) enqueueDeadlineWrapUp(ctx context.Context) error {
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	now := time.Now()
+	if runtime.wrapUpQueued || runtime.deadlineAt.IsZero() || ctx.Err() != nil ||
+		now.Before(runtime.wrapUpAt) || !now.Before(runtime.deadlineAt) {
+		return nil
+	}
+	text := "[Host deadline: wrap up]\n" + runtimeDeadlineContext(ctx, runtime.deadlineAt) +
+		"\nSave the current best deliverable to the required files now if the task requires file outputs; otherwise finish the requested response. " +
+		"If required checks already pass, preserve the working result and finish. " +
+		"Stop optional optimization and repeated analysis. Use tools for necessary completion work, " +
+		"and report unresolved limitations honestly."
+	if err := runtime.queue.Enqueue(turnControlMessage{
+		Kind: turnControlSteer, Message: privateTurnControlMessage(text), InterruptStream: true,
+	}); err != nil {
+		return err
+	}
+	runtime.wrapUpQueued = true
+	return nil
+}
 
 func (*turnControlRuntime) Name() string { return "turn-control" }
 

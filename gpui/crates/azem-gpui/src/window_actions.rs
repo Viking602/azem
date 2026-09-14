@@ -227,6 +227,7 @@ impl AzemWindow {
             .search
             .update(cx, |input, cx| input.clear(cx));
         if section == "catalog" {
+            self.refresh_model_catalog();
             self.settings_provider_search
                 .update(cx, |input, cx| input.clear(cx));
             self.settings_model_search
@@ -298,7 +299,7 @@ impl AzemWindow {
             self.subagent_setting_menu = None;
             self.archive_days_menu_open = false;
         }
-        if self.settings_open && self.state.catalogs.providers.is_empty() {
+        if self.settings_open {
             self.refresh_model_catalog();
         }
         cx.notify();
@@ -565,6 +566,58 @@ impl AzemWindow {
         self.commit_session_rename(window, cx);
     }
 
+    pub(super) fn return_to_workspace(&mut self, cx: &mut Context<Self>) {
+        self.state.navigation.surface = Surface::Projects;
+        self.request_surface(Surface::Projects);
+        cx.notify();
+    }
+
+    pub(super) fn add_project(
+        &mut self,
+        _: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.state.navigation.project_picker_open
+            || self
+                .pending_requests
+                .values()
+                .any(|request| matches!(request, PendingRequest::OpenProject))
+        {
+            return;
+        }
+        let locale = Locale::resolve(&self.state.settings.language);
+        self.state.navigation.project_error = "".into();
+        self.state.navigation.project_picker_open = true;
+        let selection = rfd::AsyncFileDialog::new()
+            .set_parent(window)
+            .set_title(locale.text("sidebar.addProject"))
+            .set_can_create_directories(true)
+            .pick_folder();
+        cx.spawn(async move |this, cx| {
+            let selected = selection.await;
+            let _ = this.update(cx, |this, cx| {
+                this.state.navigation.project_picker_open = false;
+                if let Some(selected) = selected {
+                    let Some(path) = selected.path().to_str() else {
+                        this.state.navigation.project_error =
+                            locale.text("sidebar.projectPathEncoding").into();
+                        cx.notify();
+                        return;
+                    };
+                    let id = this
+                        .runtime
+                        .request(Method::OpenProject, json!({"path":path}));
+                    this.pending_requests
+                        .insert(id, PendingRequest::OpenProject);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     pub(super) fn close_overlay(
         &mut self,
         _: &CloseOverlay,
@@ -609,6 +662,16 @@ impl AzemWindow {
             self.reply_popover = None;
         } else if self.state.navigation.surface == Surface::Search {
             self.state.navigation.surface = self.search_return_surface;
+        } else if self.state.navigation.surface == Surface::PullRequests
+            && !self.state.pull_requests.selected.is_null()
+        {
+            self.state.pull_requests.selected = serde_json::Value::Null;
+        } else if matches!(
+            self.state.navigation.surface,
+            Surface::Files | Surface::Changes | Surface::PullRequests
+        ) {
+            self.return_to_workspace(cx);
+            return;
         }
         cx.notify();
     }
@@ -646,6 +709,7 @@ impl AzemWindow {
         if self.branch_request_pending()
             || self.approval_request_pending()
             || self.queue_request_pending()
+            || self.workflow_mode_pending()
         {
             return;
         }
@@ -719,8 +783,11 @@ impl AzemWindow {
             };
         let prompt = payload["prompt"].as_str().unwrap_or_default().to_owned();
         let request_id = self.runtime.request(Method::StartTurn, payload);
-        self.state
-            .append_optimistic_user(request_id.as_str(), prompt, attachments.clone());
+        self.state.append_optimistic_user(
+            request_id.as_str(),
+            crate::text_input::display_session_references(&prompt),
+            attachments.clone(),
+        );
         self.state.runtime.running = true;
         self.state.runtime.activity = "starting".into();
         self.scroll_transcript_to_bottom(cx);

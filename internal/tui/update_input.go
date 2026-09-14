@@ -2429,7 +2429,7 @@ func (m AppModel) executeCommand(command Command) (tea.Model, tea.Cmd) {
 			}
 			target := provider
 			if len(command.Args) == 2 {
-				if (provider == "chatgpt" && command.Args[1] != "--import-codex") || ((provider == "grok" || provider == "cursor") && command.Args[1] != "--import") {
+				if provider == "devin" || (provider == "chatgpt" && command.Args[1] != "--import-codex") || ((provider == "grok" || provider == "cursor") && command.Args[1] != "--import") {
 					m.errorBanner = m.tr("command.usage.login_import")
 					break
 				}

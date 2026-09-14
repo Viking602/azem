@@ -237,7 +237,7 @@ func (transaction *durableTransaction) loadWithGraph(ctx context.Context, execut
 	if err := validateExecutionHashes(execution); err != nil {
 		return nil, executionError(executionID, err)
 	}
-	if err := transaction.loadAttempts(ctx, executionID, record); err != nil {
+	if err := transaction.loadAttempts(ctx, executionID, record, ""); err != nil {
 		return nil, err
 	}
 	if err := transaction.loadReceipts(ctx, executionID, record); err != nil {
@@ -249,8 +249,14 @@ func (transaction *durableTransaction) loadWithGraph(ctx context.Context, execut
 	return record, nil
 }
 
-func (transaction *durableTransaction) loadAttempts(ctx context.Context, executionID durable.ExecutionID, record *durableRecord) error {
-	rows, err := transaction.unit.tx.QueryContext(ctx, `SELECT operation_id,attempt_number,kind,input_hash,status,lease_owner,lease_token,version,attempt_inline,attempt_digest FROM agent_effect_attempts WHERE execution_id=? ORDER BY operation_id,attempt_number`, executionID)
+func (transaction *durableTransaction) loadAttempts(ctx context.Context, executionID durable.ExecutionID, record *durableRecord, operationID string) error {
+	query := `SELECT operation_id,attempt_number,kind,input_hash,status,lease_owner,lease_token,version,attempt_inline,attempt_digest FROM agent_effect_attempts WHERE execution_id=?`
+	args := []any{executionID}
+	if operationID != "" {
+		query += ` AND operation_id=?`
+		args = append(args, operationID)
+	}
+	rows, err := transaction.unit.tx.QueryContext(ctx, query+` ORDER BY operation_id,attempt_number`, args...)
 	if err != nil {
 		return fmt.Errorf("list durable attempts for %q: %w", executionID, err)
 	}
@@ -432,6 +438,25 @@ func (transaction *durableTransaction) saveReceipts(ctx context.Context, record 
 	return nil
 }
 
+// Attempt mutations need only the named operation. Execution transitions and
+// recovery still validate the complete graph, including uncertain outcomes.
+func (transaction *durableTransaction) loadForMutation(ctx context.Context, executionID durable.ExecutionID, operationID string) (*durableRecord, error) {
+	if operationID == "" {
+		return transaction.load(ctx, executionID)
+	}
+	record, err := transaction.loadWithGraph(ctx, executionID, false)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateExecutionHashes(record.execution); err != nil {
+		return nil, executionError(executionID, err)
+	}
+	if err := transaction.loadAttempts(ctx, executionID, record, operationID); err != nil {
+		return nil, err
+	}
+	return record, nil
+}
+
 func (backend *DurableBackend) withRecord(ctx context.Context, executionID durable.ExecutionID, operationID string, mutate func(*durableRecord, time.Time) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -441,7 +466,7 @@ func (backend *DurableBackend) withRecord(ctx context.Context, executionID durab
 		return err
 	}
 	defer transaction.rollback()
-	record, err := transaction.load(ctx, executionID)
+	record, err := transaction.loadForMutation(ctx, executionID, operationID)
 	if err != nil {
 		if operationID != "" && errors.Is(err, durable.ErrNotFound) {
 			return attemptError(executionID, operationID, 0, durable.ErrNotFound)

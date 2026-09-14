@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -486,6 +487,73 @@ func TestLoginChatGPTCallbackPersistsLargeCredentialInSQLite(t *testing.T) {
 	}
 }
 
+func TestPersonalDevinLoginPersistsAndExpires(t *testing.T) {
+	ctx := context.Background()
+	db, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close(ctx)
+	store := NewSQLiteStore(db.DB())
+	service := NewService(db.DB(), store, nil, nil)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"token":"personal-token"}`))
+	}))
+	defer server.Close()
+	service.devin.TokenURL = server.URL
+	service.devin.ListenCallback = func() (net.Listener, error) { return net.Listen("tcp4", "127.0.0.1:0") }
+	account, err := service.LoginDevin(ctx, func(raw string) error {
+		u, err := url.Parse(raw)
+		if err != nil {
+			return err
+		}
+		callback, err := url.Parse(u.Query().Get("redirect_uri"))
+		if err != nil {
+			return err
+		}
+		callback.RawQuery = url.Values{"state": {u.Query().Get("state")}, "code": {"code"}}.Encode()
+		res, err := http.Get(callback.String())
+		if err != nil {
+			return err
+		}
+		return res.Body.Close()
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account.Provider != "devin" || account.Status != "active" || !strings.HasPrefix(account.CredentialRef, "sqlite:devin:") {
+		t.Fatalf("account = %+v", account)
+	}
+	credential, err := service.Credential(ctx, "devin", account.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if credential.AccessToken != "devin-session-token$personal-token" || credential.RefreshToken != "" {
+		t.Fatal("personal session was not stored correctly")
+	}
+	encoded, err := json.Marshal(account)
+	if err != nil || strings.Contains(string(encoded), "personal-token") {
+		t.Fatal("public account exposed a secret")
+	}
+	credential.ExpiresAt = time.Now().Add(-time.Hour)
+	if _, err := service.storeCredential(ctx, credential); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Credential(ctx, "devin", account.ID); err == nil {
+		t.Fatal("expired session remained active")
+	}
+	accounts, err := service.Accounts(ctx, "devin")
+	if err != nil || len(accounts) != 1 || accounts[0].Status != "reauth_required" {
+		t.Fatalf("expired account = %+v, %v", accounts, err)
+	}
+	if err := service.Logout(ctx, "devin", account.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Get(ctx, "devin", account.ID); err == nil {
+		t.Fatal("logout retained credential")
+	}
+}
+
 func TestRefreshRetryForbiddenAndBestEffortLogout(t *testing.T) {
 	ctx := context.Background()
 	provider, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "state.db"))
@@ -535,6 +603,7 @@ func TestRefreshRetryForbiddenAndBestEffortLogout(t *testing.T) {
 		calls.Add(1)
 		if request.URL.Path == "/forbidden" {
 			writer.WriteHeader(http.StatusForbidden)
+			_, _ = writer.Write([]byte(`{"error":{"code":"permission_denied","message":"not permitted"}}`))
 			return
 		}
 		if request.Header.Get("ChatGPT-Account-ID") != "acct" {
@@ -561,6 +630,15 @@ func TestRefreshRetryForbiddenAndBestEffortLogout(t *testing.T) {
 	var entitlement EntitlementError
 	if !errors.As(err, &entitlement) {
 		t.Fatalf("forbidden error = %v", err)
+	}
+	response, err = service.DoStreamWithRefresh(ctx, "chatgpt", account.ID, resty.MethodGet, resource.URL+"/forbidden", nil)
+	if err != nil {
+		t.Fatalf("stream rejection lost its response: %v", err)
+	}
+	detail, readErr := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if readErr != nil || response.StatusCode() != 403 || !strings.Contains(string(detail), "permission_denied") {
+		t.Fatalf("stream rejection status=%d body=%q err=%v", response.StatusCode(), detail, readErr)
 	}
 	if refreshes.Load() != 1 {
 		t.Fatalf("403 triggered refresh; count=%d", refreshes.Load())

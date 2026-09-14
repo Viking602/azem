@@ -232,11 +232,26 @@ impl AzemWindow {
             side_panel_add_menu_open: false,
             side_panel_closing: false,
             side_panel_width: SIDE_PANEL_DEFAULT_WIDTH,
+            session_side_panel_widths: window_state_path
+                .as_deref()
+                .map(load_session_side_panel_widths)
+                .unwrap_or_default(),
             surface_motion: SurfaceMotion::default(),
-            popup_motions: HashMap::new(),
+            popup_motions: [(
+                "environment",
+                PopupMotion {
+                    open: true,
+                    opacity: 1.,
+                    ..Default::default()
+                },
+            )]
+            .into(),
             sidebar_open: true,
+            sidebar_width: SIDEBAR_WIDTH,
             sidebar_visible_width: SIDEBAR_WIDTH,
             sidebar_animation: None,
+            sidebar_resize_drag: None,
+            sidebar_resize_focus: cx.focus_handle(),
             side_panel_visible_width: 0.,
             side_panel_animation_started: None,
             side_panel_animation_from: 0.,
@@ -244,13 +259,19 @@ impl AzemWindow {
             terminal_open: false,
             terminal_input,
             terminal_scroll: ScrollHandle::new(),
+            workspace_changes_scroll: gpui::UniformListScrollHandle::new(),
+            workspace_source: surfaces::WorkspaceSource::default(),
+            workspace_overview_scroll: gpui::UniformListScrollHandle::new(),
+            workspace_tree_scroll: ScrollHandle::new(),
+            workspace_preview_scroll: ScrollHandle::new(),
+            workspace_image: None,
             terminal_emulators: HashMap::new(),
             queued_prompts: Vec::new(),
             editing_queued_id: None,
             pending_requests: HashMap::new(),
             open_projects: HashSet::new(),
             process_expansion: Rc::new(RefCell::new(ProcessExpansion::default())),
-            show_all_sessions: false,
+            sidebar_tree: SidebarTreeState::default(),
             startup_started: Instant::now(),
             snapshot_ready_logged: false,
             provider_catalog_logged: false,
@@ -302,6 +323,9 @@ impl AzemWindow {
         cx: &mut Context<Self>,
     ) {
         self.runtime.detach();
+        self.sidebar_tree
+            .expanded
+            .insert(workspace.to_string(), true);
         self.runtime_generation = self.runtime_generation.wrapping_add(1);
         let options = {
             let mut options = self.runtime_options.borrow_mut();
@@ -313,6 +337,7 @@ impl AzemWindow {
         self.pending_workspace_sequence = sequence;
         self.new_session_after_workspace_switch = start_new_session;
         self.pending_requests.clear();
+        self.state.pull_requests.loading = false;
         self.queued_prompts.clear();
         self.terminal_emulators.clear();
         self.sidebar_context_menu = None;
@@ -339,6 +364,12 @@ impl AzemWindow {
             self.state.runtime.running,
         );
         let old_session_id = self.state.navigation.current_session_id.clone();
+        let was_archived = self
+            .state
+            .navigation
+            .sessions
+            .iter()
+            .any(|session| session.id == old_session_id && session.archived);
         match message {
             RuntimeMessage::Connecting(message) => {
                 self.state.connection.connected = false;
@@ -527,6 +558,10 @@ impl AzemWindow {
                 Ok(value) => {
                     if let Some(pending) = self.pending_requests.remove(&id) {
                         match pending {
+                            PendingRequest::OpenProject => {}
+                            PendingRequest::WorkflowMode(mode) => {
+                                self.state.settings.workflow_mode = mode.into();
+                            }
                             PendingRequest::PromptQueueRefresh => {
                                 self.state.apply_direct_event(
                                     json!({"kind":"prompt_queue_state","promptQueue":value}),
@@ -753,6 +788,7 @@ impl AzemWindow {
                                     .projects
                                     .retain(|project| project.path.as_ref() != workspace);
                                 self.open_projects.remove(&workspace);
+                                self.sidebar_tree.forget(&workspace);
                                 if let Some(next_workspace) = next_workspace {
                                     self.switch_workspace(&next_workspace, "", None, false, cx);
                                 }
@@ -765,12 +801,27 @@ impl AzemWindow {
                             PendingRequest::Attachment => {
                                 self.state.transcript.attachments.push(value)
                             }
-                            PendingRequest::Entries => self.state.workspace.file_tree = value,
-                            PendingRequest::File => self.state.workspace.selected_file = value,
+                            PendingRequest::Entries => {
+                                self.state.workspace.file_tree = value;
+                                self.workspace_tree_scroll
+                                    .set_offset(gpui::point(px(0.), px(0.)));
+                            }
+                            PendingRequest::File => {
+                                self.workspace_image = surfaces::workspace_image(&value);
+                                self.workspace_source.update(&value);
+                                self.state.workspace.selected_file = value;
+                                self.workspace_preview_scroll
+                                    .set_offset(gpui::point(px(0.), px(0.)));
+                            }
                             PendingRequest::Changes => self.state.workspace.changes = value,
-                            PendingRequest::Change => self.state.workspace.selected_file = value,
+                            PendingRequest::Change => {
+                                self.workspace_source.update(&value);
+                                self.state.workspace.selected_file = value;
+                            }
                             PendingRequest::PullRequests => {
-                                self.state.pull_requests.dashboard = value
+                                self.state.pull_requests.dashboard = value;
+                                self.state.pull_requests.loading = false;
+                                self.state.pull_requests.error = "".into();
                             }
                             PendingRequest::PullRequestDetail => {
                                 self.state.pull_requests.selected = value
@@ -830,6 +881,11 @@ impl AzemWindow {
                 }
                 Err(error) => {
                     let pending = self.pending_requests.remove(&id);
+                    if matches!(&pending, Some(PendingRequest::OpenProject)) {
+                        self.state.navigation.project_error = error.into();
+                        cx.notify();
+                        return;
+                    }
                     if let Some(PendingRequest::CompletionFiles { generation }) = pending {
                         self.completion
                             .receive_files(generation, Err(error), locale);
@@ -849,6 +905,9 @@ impl AzemWindow {
                     }
                     if matches!(&pending, Some(PendingRequest::ApprovalMode)) {
                         self.approval_picker.error = error.clone();
+                    }
+                    if matches!(&pending, Some(PendingRequest::WorkflowMode(_))) {
+                        self.state.settings.error = error.clone().into();
                     }
                     if matches!(&pending, Some(PendingRequest::CancelActive { .. })) {
                         self.state.runtime.activity = if self.state.runtime.running {
@@ -922,6 +981,9 @@ impl AzemWindow {
                     }
                     if matches!(pending, Some(PendingRequest::Search)) {
                         self.state.navigation.search_error = error.into();
+                    } else if matches!(pending, Some(PendingRequest::PullRequests)) {
+                        self.state.pull_requests.loading = false;
+                        self.state.pull_requests.error = error.into();
                     } else if matches!(pending, Some(PendingRequest::EnvironmentGit)) {
                         tracing::warn!(request_id = id, %error, "refresh environment metrics");
                     } else if matches!(&pending, Some(PendingRequest::Attachment)) {
@@ -944,6 +1006,26 @@ impl AzemWindow {
                     }
                 }
             },
+        }
+        // A refreshed catalog confirms the archive; failed requests never move selection.
+        if !was_archived
+            && old_session_id == self.state.navigation.current_session_id
+            && self
+                .state
+                .navigation
+                .sessions
+                .iter()
+                .any(|session| session.id == old_session_id && session.archived)
+        {
+            let request = if let Some(next) = self.state.next_session_after_archive() {
+                self.runtime
+                    .request(Method::SelectSession, json!({"sessionId":next.id}))
+            } else {
+                self.runtime.request(Method::CreateSession, json!({}))
+            };
+            self.pending_requests
+                .insert(request, PendingRequest::ResumeSession { sequence: None });
+            self.state.navigation.surface = Surface::Thread;
         }
         if old_language != self.state.settings.language {
             self.refresh_language(cx);
@@ -980,6 +1062,7 @@ impl AzemWindow {
         }
         let session_changed = old_session_id != self.state.navigation.current_session_id;
         if session_changed {
+            self.finish_side_panel_resize();
             self.completion.dismiss();
             if self.editing_queued_id.take().is_some() {
                 self.composer.update(cx, |composer, cx| composer.clear(cx));

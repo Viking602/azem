@@ -15,11 +15,11 @@ pub(super) struct DiffFile {
 }
 
 #[derive(Debug, PartialEq)]
-struct DiffLine<'a> {
+struct DiffLine<T> {
     old: Option<usize>,
     new: Option<usize>,
     sign: char,
-    text: &'a str,
+    text: T,
 }
 
 pub(super) fn source_from_read(path: String, content: &str) -> DiffFile {
@@ -98,7 +98,7 @@ fn hashline_row(line: &str) -> Option<(usize, &str)> {
     Some((number.parse().ok()?, text))
 }
 
-fn source_lines(file: &DiffFile) -> Vec<DiffLine<'_>> {
+fn source_lines(file: &DiffFile) -> Vec<DiffLine<&str>> {
     if file.kind == SourceKind::Read {
         let mut number = file.first_line;
         return file
@@ -119,7 +119,7 @@ fn source_lines(file: &DiffFile) -> Vec<DiffLine<'_>> {
     diff_lines(file)
 }
 
-fn diff_lines(file: &DiffFile) -> Vec<DiffLine<'_>> {
+fn diff_lines(file: &DiffFile) -> Vec<DiffLine<&str>> {
     let (mut old, mut new) = (file.first_line, file.first_line);
     let unified = file.diff.lines().any(|line| line.starts_with("@@ "));
     file.diff
@@ -251,95 +251,7 @@ pub(super) fn file_cards(
                                 .iter()
                                 .take(if show_all { usize::MAX } else { 16 })
                                 .map(|line| {
-                                    let color = match line.sign {
-                                        '+' => palette.positive,
-                                        '-' => palette.danger,
-                                        _ => palette.ink_soft,
-                                    };
-                                    let changed = matches!(line.sign, '+' | '-');
-                                    let mut row = div()
-                                        .w_full()
-                                        .min_w_0()
-                                        .flex()
-                                        .border_l_2()
-                                        .border_color(if changed {
-                                            color
-                                        } else {
-                                            palette.paper_muted
-                                        })
-                                        .bg(if changed {
-                                            Rgba { a: 0.12, ..color }
-                                        } else {
-                                            palette.paper_muted
-                                        });
-                                    if is_read {
-                                        row = row.child(
-                                            div()
-                                                .w(gutter_width)
-                                                .whitespace_nowrap()
-                                                .flex_none()
-                                                .text_right()
-                                                .pr_2()
-                                                .text_color(palette.faint)
-                                                .child(
-                                                    line.new
-                                                        .map(|n| n.to_string())
-                                                        .unwrap_or_default(),
-                                                ),
-                                        );
-                                    } else {
-                                        row = row
-                                            .child(
-                                                div()
-                                                    .w(gutter_width)
-                                                    .whitespace_nowrap()
-                                                    .flex_none()
-                                                    .text_right()
-                                                    .pr_2()
-                                                    .text_color(palette.faint)
-                                                    .child(
-                                                        line.old
-                                                            .map(|n| n.to_string())
-                                                            .unwrap_or_default(),
-                                                    ),
-                                            )
-                                            .child(
-                                                div()
-                                                    .w(gutter_width)
-                                                    .whitespace_nowrap()
-                                                    .flex_none()
-                                                    .text_right()
-                                                    .pr_2()
-                                                    .text_color(palette.faint)
-                                                    .child(
-                                                        line.new
-                                                            .map(|n| n.to_string())
-                                                            .unwrap_or_default(),
-                                                    ),
-                                            )
-                                            .child(
-                                                div()
-                                                    .w(px(20.))
-                                                    .flex_none()
-                                                    .text_center()
-                                                    .text_color(color)
-                                                    .child(if changed {
-                                                        line.sign.to_string()
-                                                    } else {
-                                                        String::new()
-                                                    }),
-                                            );
-                                    }
-                                    row.child(
-                                        div().flex_shrink_0().pr_3().whitespace_nowrap().child(
-                                            super::highlight::highlighted_code(
-                                                line.text,
-                                                language,
-                                                palette,
-                                                line.sign == '@',
-                                            ),
-                                        ),
-                                    )
+                                    source_row(line, language, gutter_width, palette, is_read)
                                 }),
                         ),
                 )
@@ -473,9 +385,240 @@ pub(super) fn file_cards(
         .into_any_element()
 }
 
+fn source_row(
+    line: &DiffLine<impl AsRef<str>>,
+    language: super::highlight::Language,
+    gutter_width: Pixels,
+    palette: ThemePalette,
+    is_read: bool,
+) -> gpui::Div {
+    let color = match line.sign {
+        '+' => palette.positive,
+        '-' => palette.danger,
+        _ => palette.ink_soft,
+    };
+    let changed = matches!(line.sign, '+' | '-');
+    let mut row = div()
+        .w_full()
+        .min_w_0()
+        .flex()
+        .border_l_2()
+        .border_color(if changed { color } else { palette.paper_muted })
+        .bg(if changed {
+            Rgba { a: 0.12, ..color }
+        } else {
+            palette.paper_muted
+        });
+    if is_read {
+        row = row.child(
+            div()
+                .w(gutter_width)
+                .whitespace_nowrap()
+                .flex_none()
+                .text_right()
+                .pr_2()
+                .text_color(palette.faint)
+                .child(line.new.map(|n| n.to_string()).unwrap_or_default()),
+        );
+    } else {
+        row = row
+            .child(
+                div()
+                    .w(gutter_width)
+                    .whitespace_nowrap()
+                    .flex_none()
+                    .text_right()
+                    .pr_2()
+                    .text_color(palette.faint)
+                    .child(line.old.map(|n| n.to_string()).unwrap_or_default()),
+            )
+            .child(
+                div()
+                    .w(gutter_width)
+                    .whitespace_nowrap()
+                    .flex_none()
+                    .text_right()
+                    .pr_2()
+                    .text_color(palette.faint)
+                    .child(line.new.map(|n| n.to_string()).unwrap_or_default()),
+            )
+            .child(
+                div()
+                    .w(px(20.))
+                    .flex_none()
+                    .text_center()
+                    .text_color(color)
+                    .child(if changed {
+                        line.sign.to_string()
+                    } else {
+                        String::new()
+                    }),
+            );
+    }
+    row.child(div().flex_shrink_0().pr_3().whitespace_nowrap().child(
+        super::highlight::highlighted_code(line.text.as_ref(), language, palette, line.sign == '@'),
+    ))
+}
+
+// Prepared once per file response; scrolling only builds the requested visible rows.
+pub(in crate::surfaces) struct SourcePreview {
+    lines: Vec<DiffLine<String>>,
+    language: super::highlight::Language,
+    widest_line: usize,
+    digits: usize,
+    is_read: bool,
+}
+
+impl SourcePreview {
+    pub(in crate::surfaces) fn new(path: &str, content: &str, is_read: bool) -> Self {
+        let file = DiffFile {
+            path: path.to_string(),
+            diff: content.to_string(),
+            first_line: None,
+            kind: SourceKind::Diff,
+        };
+        let lines: Vec<_> = if is_read {
+            // Keep the final empty source line and never interpret source as a patch.
+            content
+                .split('\n')
+                .enumerate()
+                .map(|(index, text)| DiffLine {
+                    old: None,
+                    new: Some(index + 1),
+                    sign: ' ',
+                    text,
+                })
+                .collect()
+        } else {
+            source_lines(&file)
+        };
+        let widest_line = lines
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, line)| line.text.len())
+            .map_or(0, |(index, _)| index);
+        let digits = lines
+            .iter()
+            .flat_map(|line| [line.old, line.new])
+            .flatten()
+            .max()
+            .unwrap_or(1)
+            .to_string()
+            .len();
+        Self {
+            lines: lines
+                .into_iter()
+                .map(|line| DiffLine {
+                    old: line.old,
+                    new: line.new,
+                    sign: line.sign,
+                    text: line.text.to_string(),
+                })
+                .collect(),
+            language: super::highlight::language_for_path(path),
+            widest_line,
+            digits,
+            is_read,
+        }
+    }
+
+    fn render_rows(
+        &self,
+        range: std::ops::Range<usize>,
+        palette: ThemePalette,
+    ) -> Vec<gpui::AnyElement> {
+        let gutter = px((self.digits as f32 * palette.code_font_size * 0.7 + 12.).max(34.));
+        self.lines[range]
+            .iter()
+            .map(|line| {
+                let content = if self.is_read {
+                    div()
+                        .flex()
+                        .child(
+                            div()
+                                .w(gutter)
+                                .flex_shrink_0()
+                                .text_right()
+                                .pr_3()
+                                .border_r_1()
+                                .border_color(palette.border)
+                                .text_color(palette.faint)
+                                .child(line.new.unwrap_or(1).to_string()),
+                        )
+                        .child(div().pl_3().flex_shrink_0().whitespace_nowrap().child(
+                            super::highlight::highlighted_code(
+                                &line.text,
+                                self.language,
+                                palette,
+                                false,
+                            ),
+                        ))
+                        .into_any_element()
+                } else {
+                    source_row(line, self.language, gutter, palette, false)
+                        .w_auto()
+                        .into_any_element()
+                };
+                div()
+                    .font_family("Menlo")
+                    .text_size(px(palette.code_font_size))
+                    .line_height(px(palette.code_font_size * 1.7))
+                    .h(px(palette.code_font_size * 1.7))
+                    .whitespace_nowrap()
+                    .child(content)
+                    .into_any_element()
+            })
+            .collect()
+    }
+
+    pub(in crate::surfaces) fn render(
+        self: &Rc<Self>,
+        scroll: &UniformListScrollHandle,
+        palette: ThemePalette,
+    ) -> gpui::AnyElement {
+        let source = self.clone();
+        uniform_list(
+            "workspace-source-lines",
+            self.lines.len(),
+            move |range, _, _| source.render_rows(range, palette),
+        )
+        .size_full()
+        .with_width_from_item(Some(self.widest_line))
+        .with_horizontal_sizing_behavior(gpui::ListHorizontalSizingBehavior::Unconstrained)
+        .track_scroll(scroll)
+        .into_any_element()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn large_preview_keeps_late_hunks_and_literal_source_lines() {
+        let mut patch = String::from("--- a/data.json\n+++ b/data.json\n@@ -0,0 +1,40000 @@\n");
+        for index in 0..40_000 {
+            patch.push_str(&format!("+{{\"row\":{index}}}\n"));
+        }
+        patch.push_str("@@ -90000,2 +90001,2 @@\n-old\n+中文 🦀\n unchanged\n");
+        let preview = SourcePreview::new("data.json", &patch, false);
+        assert_eq!(preview.lines.len(), 40_007);
+        let last = &preview.lines[40_003..];
+        assert_eq!(last[0].sign, '@');
+        assert_eq!((last[1].old, last[1].new), (Some(90_000), None));
+        assert_eq!((last[2].old, last[2].new), (None, Some(90_001)));
+        assert_eq!(last[2].text, "中文 🦀");
+        assert_eq!((last[3].old, last[3].new), (Some(90_001), Some(90_002)));
+        assert_eq!(preview.digits, 5);
+        let source = SourcePreview::new("source.txt", "+literal\n@@ -1 +2 @@\n", true);
+        assert_eq!(source.lines.len(), 3);
+        assert_eq!(source.lines[0].text, "+literal");
+        assert_eq!(source.lines[1].sign, ' ');
+        assert_eq!(source.lines[2].new, Some(3));
+        assert_eq!(source.lines[2].text, "");
+        assert_eq!(source.widest_line, 1);
+        assert!(SourcePreview::new("empty.diff", "", false).lines.is_empty());
+    }
 
     #[test]
     fn compact_diff_numbers_both_sides_without_counting_metadata() {

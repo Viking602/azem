@@ -2,11 +2,11 @@ use std::ops::Range;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    App, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
-    EntityInputHandler, FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Role, SharedString,
-    Style, Task, TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, div, fill,
-    point, prelude::*, px, relative, rgba, size,
+    App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, ElementId, ElementInputHandler,
+    Entity, EntityInputHandler, FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Role,
+    ScrollWheelEvent, SharedString, Style, Task, TextRun, UTF16Selection, UnderlineStyle, Window,
+    WrappedLine, actions, div, fill, point, prelude::*, px, relative, rgba, size,
 };
 use unicode_segmentation::*;
 
@@ -54,7 +54,7 @@ pub fn init(cx: &mut App) {
 pub struct TextInput {
     focus_handle: FocusHandle,
     content: SharedString,
-    file_references: Vec<FileReference>,
+    references: Vec<InlineReference>,
     placeholder: SharedString,
     show_placeholder: bool,
     selected_range: Range<usize>,
@@ -64,6 +64,7 @@ pub struct TextInput {
     last_layout: Option<TextLayout>,
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
+    reveal_cursor: bool,
     multiline: bool,
     compact: bool,
     terminal: bool,
@@ -73,10 +74,11 @@ pub struct TextInput {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct FileReference {
+struct InlineReference {
     // UTF-8 range in the displayed text, not in the serialized @path.
     range: Range<usize>,
-    path: String,
+    source: String,
+    glyph: &'static str,
 }
 
 fn file_label(path: &str) -> String {
@@ -90,6 +92,22 @@ fn file_label(path: &str) -> String {
 }
 
 pub(super) fn file_icon(path: &str) -> &'static str {
+    let name = std::path::Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match name.as_str() {
+        ".gitignore" | ".gitattributes" | ".gitmodules" => return "git-branch",
+        "makefile" | "gnumakefile" | "justfile" | "dockerfile" | "containerfile" => {
+            return "terminal";
+        }
+        "go.mod" | "go.sum" | "cargo.lock" | "bun.lock" | "yarn.lock" | "package-lock.json"
+        | "pnpm-lock.yaml" => return "box",
+        ".env" => return "settings",
+        _ if name.starts_with(".env.") => return "settings",
+        _ => {}
+    }
     let extension = std::path::Path::new(path)
         .extension()
         .and_then(|ext| ext.to_str())
@@ -100,6 +118,7 @@ pub(super) fn file_icon(path: &str) -> &'static str {
         | "h" | "cpp" | "hpp" | "cs" | "php" | "html" | "css" | "scss" | "vue" | "svelte" => {
             "file-code"
         }
+        "md" | "markdown" | "mdown" => "notebook-pen",
         "json" | "jsonc" | "yaml" | "yml" | "toml" | "xml" | "ini" => "braces",
         "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "ico" | "heic" => "image",
         "mp3" | "wav" | "flac" | "m4a" | "ogg" | "mp4" | "mov" | "webm" => "audio-lines",
@@ -122,7 +141,67 @@ pub(super) fn file_reference(path: &str) -> String {
     }
 }
 
-fn expand_file_range(files: &[FileReference], mut range: Range<usize>) -> Range<usize> {
+pub(super) fn session_reference(id: &str, title: &str) -> String {
+    let title = title
+        .replace(['\n', '\r'], " ")
+        .replace('\\', "\\\\")
+        .replace(']', "\\]");
+    format!("@[{title}](azem-session:{id})")
+}
+
+pub(super) fn session_reference_ranges(text: &str) -> Vec<(Range<usize>, String)> {
+    let mut references = Vec::new();
+    let mut offset = 0;
+    while let Some(start) = text[offset..].find("@[").map(|start| start + offset) {
+        let mut title = String::new();
+        let mut escaped = false;
+        let mut found = None;
+        for (index, ch) in text[start + 2..].char_indices() {
+            if ch == '\n' || ch == '\r' {
+                break;
+            }
+            if escaped {
+                title.push(ch);
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == ']' {
+                let tail_start = start + 2 + index;
+                if let Some(tail) = text[tail_start..].strip_prefix("](azem-session:")
+                    && let Some(end) = tail.find(')')
+                {
+                    let id = &tail[..end];
+                    if !id.is_empty()
+                        && id.len() <= 128
+                        && id
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+                    {
+                        found = Some(tail_start + "](azem-session:".len() + end + 1);
+                    }
+                }
+                break;
+            } else {
+                title.push(ch);
+            }
+        }
+        offset = found.unwrap_or(start + 2);
+        if let Some(end) = found {
+            references.push((start..end, title));
+        }
+    }
+    references
+}
+
+pub(super) fn display_session_references(text: &str) -> String {
+    let mut result = text.to_owned();
+    for (range, title) in session_reference_ranges(text).into_iter().rev() {
+        result.replace_range(range, &format!("@{title}"));
+    }
+    result
+}
+
+fn expand_file_range(files: &[InlineReference], mut range: Range<usize>) -> Range<usize> {
     for file in files {
         if range.is_empty() {
             if file.range.start < range.start && range.start < file.range.end {
@@ -136,7 +215,7 @@ fn expand_file_range(files: &[FileReference], mut range: Range<usize>) -> Range<
     range
 }
 
-fn reference_source(text: &str, files: &[FileReference], range: Range<usize>) -> String {
+fn reference_source(text: &str, files: &[InlineReference], range: Range<usize>) -> String {
     let range = expand_file_range(files, clamp_byte_range(text, range));
     let mut source = String::new();
     let mut offset = range.start;
@@ -145,7 +224,7 @@ fn reference_source(text: &str, files: &[FileReference], range: Range<usize>) ->
         .filter(|file| file.range.start >= range.start && file.range.end <= range.end)
     {
         source.push_str(&text[offset..file.range.start]);
-        source.push_str(&file_reference(&file.path));
+        source.push_str(&file.source);
         offset = file.range.end;
     }
     source.push_str(&text[offset..range.end]);
@@ -155,7 +234,7 @@ fn reference_source(text: &str, files: &[FileReference], range: Range<usize>) ->
 // All typing, paste, cut and IME edits go through the same atomic-span update.
 fn replace_input_text(
     content: &mut SharedString,
-    files: &mut Vec<FileReference>,
+    files: &mut Vec<InlineReference>,
     range: Range<usize>,
     text: &str,
 ) -> Range<usize> {
@@ -221,7 +300,7 @@ impl TextInput {
         Self {
             focus_handle,
             content: "".into(),
-            file_references: Vec::new(),
+            references: Vec::new(),
             placeholder: placeholder.into(),
             show_placeholder: true,
             selected_range: 0..0,
@@ -231,6 +310,7 @@ impl TextInput {
             last_layout: None,
             last_bounds: None,
             is_selecting: false,
+            reveal_cursor: true,
             multiline: false,
             compact: false,
             terminal: false,
@@ -273,6 +353,7 @@ impl TextInput {
     }
 
     fn notify_edit(&mut self, cx: &mut Context<Self>) {
+        self.reveal_cursor = true;
         if self.blink_task.is_some() {
             self.restart_blink(cx);
         } else {
@@ -306,7 +387,7 @@ impl TextInput {
     }
 
     pub fn submission_text(&self) -> String {
-        reference_source(&self.content, &self.file_references, 0..self.content.len())
+        reference_source(&self.content, &self.references, 0..self.content.len())
     }
 
     pub fn insert_file_reference(
@@ -316,14 +397,53 @@ impl TextInput {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let label = file_label(path);
+        self.insert_reference(
+            range,
+            file_label(path),
+            file_reference(path),
+            file_icon(path),
+            window,
+            cx,
+        );
+    }
+
+    pub fn insert_session_reference(
+        &mut self,
+        range: Range<usize>,
+        id: &str,
+        title: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let title = title.replace(['\n', '\r'], " ");
+        self.insert_reference(
+            range,
+            format!("\u{2003}\u{2060}{title}"),
+            session_reference(id, &title),
+            "message-square-text",
+            window,
+            cx,
+        );
+    }
+
+    fn insert_reference(
+        &mut self,
+        range: Range<usize>,
+        label: String,
+        source: String,
+        glyph: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.replace_byte_range(range, &format!("{label} "), window, cx);
         let end = self.selected_range.end - 1;
-        self.file_references.push(FileReference {
+        self.references.push(InlineReference {
             range: end - label.len()..end,
-            path: path.to_owned(),
+            source,
+            glyph,
         });
-        self.file_references.sort_by_key(|file| file.range.start);
+        self.references
+            .sort_by_key(|reference| reference.range.start);
     }
 
     pub fn completion_cursor(&self) -> Option<usize> {
@@ -383,7 +503,30 @@ impl TextInput {
 
     pub fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
         self.content = normalize_input_text(text, self.multiline).into();
-        self.file_references.clear();
+        self.references.clear();
+        let source = self.content.to_string();
+        let references = if self.multiline && !self.terminal && !self.password {
+            session_reference_ranges(&source)
+        } else {
+            Vec::new()
+        };
+        for (range, title) in references.into_iter().rev() {
+            let label = format!("\u{2003}\u{2060}{title}");
+            let start = range.start;
+            replace_input_text(
+                &mut self.content,
+                &mut self.references,
+                range.clone(),
+                &label,
+            );
+            self.references.push(InlineReference {
+                range: start..start + label.len(),
+                source: source[range].to_owned(),
+                glyph: "message-square-text",
+            });
+        }
+        self.references
+            .sort_by_key(|reference| reference.range.start);
         self.selected_range = self.content.len()..self.content.len();
         self.selection_reversed = false;
         self.marked_range = None;
@@ -479,6 +622,36 @@ impl TextInput {
         }
     }
 
+    fn on_scroll_wheel(
+        &mut self,
+        event: &ScrollWheelEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.multiline {
+            return;
+        }
+        let (Some(layout), Some(bounds)) = (&mut self.last_layout, self.last_bounds) else {
+            return;
+        };
+        if layout.height <= bounds.size.height {
+            return;
+        }
+        let offset = input_scroll_offset(
+            layout.scroll_y - event.delta.pixel_delta(layout.line_height).y,
+            layout.height,
+            bounds.size.height,
+            None,
+        );
+        self.reveal_cursor = false;
+        if offset != layout.scroll_y {
+            layout.scroll_y = offset;
+            cx.notify();
+        }
+        // A scrollable editor owns the gesture, including at its top/bottom edge.
+        cx.stop_propagation();
+    }
+
     fn show_character_palette(
         &mut self,
         _: &ShowCharacterPalette,
@@ -509,7 +682,7 @@ impl TextInput {
         if !self.selected_range.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(reference_source(
                 &self.content,
-                &self.file_references,
+                &self.references,
                 self.selected_range.clone(),
             )));
         }
@@ -518,7 +691,7 @@ impl TextInput {
         if !self.selected_range.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(reference_source(
                 &self.content,
-                &self.file_references,
+                &self.references,
                 self.selected_range.clone(),
             )));
             self.replace_text_in_range(None, "", window, cx)
@@ -527,7 +700,7 @@ impl TextInput {
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         let offset = self
-            .file_references
+            .references
             .iter()
             .find(|file| file.range.start < offset && offset < file.range.end)
             .map_or(offset, |file| {
@@ -640,7 +813,7 @@ impl TextInput {
     }
 
     fn file_boundary(&self, offset: usize, forward: bool) -> usize {
-        self.file_references
+        self.references
             .iter()
             .find(|file| file.range.start < offset && offset < file.range.end)
             .map_or(offset, |file| {
@@ -707,12 +880,7 @@ impl EntityInputHandler for TextInput {
             .map(|range_utf16| self.range_from_utf16(range_utf16))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
-        let range = replace_input_text(
-            &mut self.content,
-            &mut self.file_references,
-            range,
-            new_text,
-        );
+        let range = replace_input_text(&mut self.content, &mut self.references, range, new_text);
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
         self.selection_reversed = false;
         if self.marked_range.take().is_some() {
@@ -735,12 +903,7 @@ impl EntityInputHandler for TextInput {
             .map(|range_utf16| self.range_from_utf16(range_utf16))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
-        let range = replace_input_text(
-            &mut self.content,
-            &mut self.file_references,
-            range,
-            new_text,
-        );
+        let range = replace_input_text(&mut self.content, &mut self.references, range, new_text);
         if !new_text.is_empty() {
             self.marked_range = Some(range.start..range.start + new_text.len());
         } else {
@@ -808,12 +971,31 @@ fn normalize_input_text(text: &str, multiline: bool) -> String {
     }
 }
 
+fn input_scroll_offset(
+    previous: Pixels,
+    height: Pixels,
+    viewport: Pixels,
+    cursor: Option<Range<Pixels>>,
+) -> Pixels {
+    let maximum = (height - viewport).max(px(0.));
+    let mut offset = previous.clamp(px(0.), maximum);
+    if let Some(cursor) = cursor {
+        if cursor.start < offset {
+            offset = cursor.start.max(px(0.));
+        } else if cursor.end > offset + viewport {
+            offset = (cursor.end - viewport).clamp(px(0.), maximum);
+        }
+    }
+    offset
+}
+
 struct TextLayout {
     lines: Vec<WrappedLine>,
     starts: Vec<usize>,
     tops: Vec<Pixels>,
     line_height: Pixels,
     scroll_y: Pixels,
+    height: Pixels,
 }
 
 impl TextLayout {
@@ -837,6 +1019,7 @@ impl TextLayout {
             tops,
             line_height,
             scroll_y: px(0.),
+            height: top,
         }
     }
 
@@ -1011,7 +1194,7 @@ impl Element for TextElement {
             strikethrough: None,
         };
         let mut boundaries = vec![0, display_text.len()];
-        for file in &input.file_references {
+        for file in &input.references {
             boundaries.extend([file.range.start, file.range.end]);
         }
         if let Some(marked) = &input.marked_range {
@@ -1024,7 +1207,7 @@ impl Element for TextElement {
             .windows(2)
             .map(|range| {
                 let color = if input
-                    .file_references
+                    .references
                     .iter()
                     .any(|file| file.range.contains(&range[0]))
                 {
@@ -1065,7 +1248,17 @@ impl Element for TextElement {
             .collect();
         let mut layout = TextLayout::new(lines, line_height);
         let raw_cursor = layout.raw_position_for_index(cursor);
-        layout.scroll_y = (raw_cursor.y + line_height - bounds.size.height).max(px(0.));
+        layout.scroll_y = input_scroll_offset(
+            input
+                .last_layout
+                .as_ref()
+                .map_or(px(0.), |layout| layout.scroll_y),
+            layout.height,
+            bounds.size.height,
+            input
+                .reveal_cursor
+                .then_some(raw_cursor.y..raw_cursor.y + line_height),
+        );
 
         let cursor_pos = layout.position_for_index(cursor);
         let (selection, cursor) = if selected_range.is_empty() {
@@ -1108,64 +1301,67 @@ impl Element for TextElement {
             ElementInputHandler::new(bounds, self.input.clone()),
             cx,
         );
-        for selection in prepaint.selection.drain(..) {
-            window.paint_quad(selection)
-        }
-        let layout = prepaint.layout.take().unwrap();
-        for (index, line) in layout.lines.iter().enumerate() {
-            let origin = point(
-                bounds.left(),
-                bounds.top() + layout.tops[index] - layout.scroll_y,
-            );
-            line.paint(
-                origin,
-                layout.line_height,
-                gpui::TextAlign::Left,
-                Some(Bounds::new(
-                    origin,
-                    size(bounds.size.width, line.size(layout.line_height).height),
-                )),
-                window,
-                cx,
-            )
-            .unwrap();
-        }
-
-        let icon_size = window.text_style().font_size.to_pixels(window.rem_size()) * 0.85;
-        let color = ThemePalette::for_window(window, cx).accent.into();
-        for file in &self.input.read(cx).file_references {
-            let position = layout.position_for_index(file.range.start);
-            let icon_bounds = Bounds::new(
-                point(
-                    bounds.left() + position.x,
-                    bounds.top() + position.y + (layout.line_height - icon_size) / 2.,
-                ),
-                size(icon_size, icon_size),
-            );
-            if let Err(error) = window.paint_svg(
-                icon_bounds,
-                format!("icons/{}.svg", file_icon(&file.path)).into(),
-                None,
-                Default::default(),
-                color,
-                cx,
-            ) {
-                tracing::warn!(%error, "failed to paint file reference icon");
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            for selection in prepaint.selection.drain(..) {
+                window.paint_quad(selection)
             }
-        }
+            let layout = prepaint.layout.take().unwrap();
+            for (index, line) in layout.lines.iter().enumerate() {
+                let origin = point(
+                    bounds.left(),
+                    bounds.top() + layout.tops[index] - layout.scroll_y,
+                );
+                line.paint(
+                    origin,
+                    layout.line_height,
+                    gpui::TextAlign::Left,
+                    Some(Bounds::new(
+                        origin,
+                        size(bounds.size.width, line.size(layout.line_height).height),
+                    )),
+                    window,
+                    cx,
+                )
+                .unwrap();
+            }
 
-        if caret_visible(
-            focus_handle.is_focused(window),
-            window.is_window_active(),
-            self.input.read(cx).cursor_visible,
-        ) && let Some(cursor) = prepaint.cursor.take()
-        {
-            window.paint_quad(cursor);
-        }
+            let icon_size = window.text_style().font_size.to_pixels(window.rem_size()) * 0.85;
+            let color = ThemePalette::for_window(window, cx).accent.into();
+            for file in &self.input.read(cx).references {
+                let position = layout.position_for_index(file.range.start);
+                let icon_bounds = Bounds::new(
+                    point(
+                        bounds.left() + position.x,
+                        bounds.top() + position.y + (layout.line_height - icon_size) / 2.,
+                    ),
+                    size(icon_size, icon_size),
+                );
+                if let Err(error) = window.paint_svg(
+                    icon_bounds,
+                    format!("icons/{}.svg", file.glyph).into(),
+                    None,
+                    Default::default(),
+                    color,
+                    cx,
+                ) {
+                    tracing::warn!(%error, "failed to paint file reference icon");
+                }
+            }
 
-        self.input.update(cx, |input, _cx| {
-            input.last_layout = Some(layout);
-            input.last_bounds = Some(bounds);
+            if caret_visible(
+                focus_handle.is_focused(window),
+                window.is_window_active(),
+                self.input.read(cx).cursor_visible,
+            ) && let Some(cursor) = prepaint.cursor.take()
+            {
+                window.paint_quad(cursor);
+            }
+
+            self.input.update(cx, |input, _cx| {
+                input.last_layout = Some(layout);
+                input.last_bounds = Some(bounds);
+                input.reveal_cursor = false;
+            });
         });
     }
 }
@@ -1216,6 +1412,7 @@ impl Render for TextInput {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
+            .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             .size_full()
             .bg(rgba(0x00000000))
             .line_height(px(line_height))
@@ -1247,6 +1444,51 @@ mod tests {
     use super::*;
 
     #[test]
+    fn conversation_spans_preserve_unicode_titles_and_identity_when_copied_or_deleted() {
+        let title = "方案 ] \\ 中文 / API";
+        let wire = session_reference("session-123", title);
+        let draft = format!("继续 {wire} 和 @src/main.rs");
+        assert_eq!(session_reference_ranges(&draft)[0].1, title);
+        assert_eq!(
+            display_session_references(&draft),
+            format!("继续 @{title} 和 @src/main.rs")
+        );
+        let label = format!("\u{2003}\u{2060}{title}");
+        let mut text: SharedString = format!("继续 {label} ").into();
+        let start = "继续 ".len();
+        let mut refs = vec![InlineReference {
+            range: start..start + label.len(),
+            source: wire.clone(),
+            glyph: "message-square-text",
+        }];
+        assert_eq!(
+            reference_source(&text, &refs, 0..text.len()),
+            format!("继续 {wire} ")
+        );
+        replace_input_text(&mut text, &mut refs, start + 3..start + 6, "");
+        assert!(refs.is_empty());
+        assert_eq!(text.as_ref(), "继续  ");
+        assert!(session_reference_ranges("@[fake](azem-session:../other)").is_empty());
+    }
+
+    #[test]
+    fn manual_input_scroll_survives_redraw_and_edits_reveal_only_when_needed() {
+        let scroll =
+            |previous, cursor| input_scroll_offset(px(previous), px(1000.), px(200.), cursor);
+        assert_eq!(scroll(0., Some(px(980.)..px(1000.))), px(800.));
+        assert_eq!(scroll(400., None), px(400.)); // manual scroll, including blink redraws
+        assert_eq!(scroll(400., Some(px(440.)..px(460.))), px(400.)); // click/edit in viewport
+        assert_eq!(scroll(400., Some(px(980.)..px(1000.))), px(800.));
+        assert_eq!(scroll(800., Some(px(0.)..px(20.))), px(0.));
+        assert_eq!(scroll(-100., None), px(0.));
+        assert_eq!(scroll(1200., None), px(800.));
+        assert_eq!(
+            input_scroll_offset(px(800.), px(100.), px(200.), None),
+            px(0.)
+        );
+    }
+
+    #[test]
     fn password_mask_keeps_ascii_length_and_hides_secret() {
         let secret = "sk-test";
         let masked = password_mask(secret);
@@ -1266,13 +1508,15 @@ mod tests {
         let first_start = "inspect ".len();
         let second_start = first_start + label.len() + " and ".len();
         let files = vec![
-            FileReference {
+            InlineReference {
                 range: first_start..first_start + label.len(),
-                path: first.into(),
+                source: file_reference(first),
+                glyph: file_icon(first),
             },
-            FileReference {
+            InlineReference {
                 range: second_start..second_start + label.len(),
-                path: second.into(),
+                source: file_reference(second),
+                glyph: file_icon(second),
             },
         ];
         let source = reference_source(&text, &files, 0..text.len());
@@ -1298,8 +1542,14 @@ mod tests {
             "@\"docs/中文 \\\"文件\\\\.md\""
         );
         for (path, glyph) in [
-            (first, "file-text"),
+            (first, "notebook-pen"),
             ("a.rs", "file-code"),
+            ("README.MD", "notebook-pen"),
+            ("go.mod", "box"),
+            (".gitignore", "git-branch"),
+            ("Makefile", "terminal"),
+            (".env.local", "settings"),
+            ("LICENSE", "file-text"),
             ("a.JSON", "braces"),
             ("a.png", "image"),
             ("a.sql", "database"),
@@ -1321,9 +1571,10 @@ mod tests {
         let prefix = "👩‍🚒 请看 ";
         let label = file_label(path);
         let mut text: SharedString = format!("{prefix}{label} 后文").into();
-        let mut files = vec![FileReference {
+        let mut files = vec![InlineReference {
             range: prefix.len()..prefix.len() + label.len(),
-            path: path.into(),
+            source: file_reference(path),
+            glyph: file_icon(path),
         }];
         // The same replacement path is used for both IME preedit and commit.
         replace_input_text(&mut text, &mut files, 0..0, "zhong");

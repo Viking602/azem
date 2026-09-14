@@ -45,12 +45,13 @@ type hubPeerIdentity struct {
 }
 
 type hubPeerTarget struct {
-	identity hubPeerIdentity
-	control  *turnControlQueue
-	host     providerHost
-	parked   *parkedSubagent
-	parent   subagentParentRuntime
-	runtime  *subagentRuntime
+	identity         hubPeerIdentity
+	parentToolCallID string
+	control          *turnControlQueue
+	host             providerHost
+	parked           *parkedSubagent
+	parent           subagentParentRuntime
+	runtime          *subagentRuntime
 }
 
 func (r *subagentRuntime) ExecuteHubPeer(ctx context.Context, request agentservice.HubPeerRequest) (agentservice.HubPeerResponse, error) {
@@ -137,6 +138,7 @@ func (r *subagentRuntime) sendHubPeer(ctx context.Context, request agentservice.
 	delivered := make([]int, 0, len(targets))
 	for index, target := range targets {
 		message := messages[index]
+		target.parentToolCallID = request.ToolCallID
 		deliveryErr := deliverHubPeerControl(target, message)
 		receipts[index] = hubPeerReceipt{ID: message.ID, To: target.identity.label, Outcome: "delivered"}
 		if deliveryErr != nil {
@@ -226,8 +228,8 @@ func (r *subagentRuntime) waitHubPeerInbox(ctx context.Context, caller agentserv
 
 func (r *subagentRuntime) hubPeerCallerLocked(caller agentservice.Invocation) hubPeerIdentity {
 	for _, active := range r.active {
-		if active.run.ChildRunID == caller.TeamRunID || active.run.ID == caller.AgentID || active.name == caller.AgentID {
-			return hubPeerIdentity{key: hubPeerMailboxKey(active.name), label: active.name, parentRunID: active.run.ParentRunID, sessionID: active.run.SessionID}
+		if active.run.ChildRunID == caller.TeamRunID || active.run.ID == caller.AgentID || active.name == caller.AgentID && active.run.ParentRunID == caller.TeamRunID {
+			return hubPeerIdentity{key: hubPeerMailboxKey(active.run.SessionID, active.name), label: active.name, parentRunID: active.run.ParentRunID, sessionID: active.run.SessionID}
 		}
 	}
 	runID := strings.TrimSpace(caller.TeamRunID)
@@ -241,26 +243,26 @@ func (r *subagentRuntime) hubPeerCallerLocked(caller agentservice.Invocation) hu
 	return identity
 }
 
-func hubPeerMailboxKey(name string) string {
-	return "Agent:" + strings.ToLower(strings.TrimSpace(name))
+func hubPeerMailboxKey(sessionID, name string) string {
+	return "Agent:" + sessionID + "\x00" + strings.ToLower(strings.TrimSpace(name))
 }
 
 func (r *subagentRuntime) hubPeerTargetsLocked(from hubPeerIdentity, to string) ([]hubPeerTarget, error) {
 	parent, parentFound := r.parents[from.parentRunID]
 	if !parentFound && !from.main {
 		for _, active := range r.active {
-			if hubPeerMailboxKey(active.name) == from.key {
+			if hubPeerMailboxKey(active.run.SessionID, active.name) == from.key {
 				parent, parentFound = active.parent, true
 				break
 			}
 		}
 	}
 	appendParked := func(targets []hubPeerTarget, parked *parkedSubagent) []hubPeerTarget {
-		if !parentFound || parked.run.SessionID != parent.SessionID || hubPeerMailboxKey(parked.name) == from.key {
+		if !parentFound || parked.run.SessionID != parent.SessionID || hubPeerMailboxKey(parked.run.SessionID, parked.name) == from.key {
 			return targets
 		}
 		return append(targets, hubPeerTarget{
-			identity: hubPeerIdentity{key: hubPeerMailboxKey(parked.name), label: parked.name, parentRunID: parent.ParentRunID, sessionID: parent.SessionID},
+			identity: hubPeerIdentity{key: hubPeerMailboxKey(parked.run.SessionID, parked.name), label: parked.name, parentRunID: parent.ParentRunID, sessionID: parent.SessionID},
 			parked:   parked, parent: parent, runtime: r,
 		})
 	}
@@ -273,7 +275,7 @@ func (r *subagentRuntime) hubPeerTargetsLocked(from hubPeerIdentity, to string) 
 			}
 		}
 		for _, active := range r.active {
-			key := hubPeerMailboxKey(active.name)
+			key := hubPeerMailboxKey(active.run.SessionID, active.name)
 			if active.run.ParentRunID == from.parentRunID && key != from.key {
 				targets = append(targets, hubPeerTarget{identity: hubPeerIdentity{key: key, label: active.name, parentRunID: active.run.ParentRunID, sessionID: active.run.SessionID}, control: active.control})
 			}
@@ -298,7 +300,7 @@ func (r *subagentRuntime) hubPeerTargetsLocked(from hubPeerIdentity, to string) 
 	}
 	for _, active := range r.active {
 		if active.run.ParentRunID == from.parentRunID && (strings.EqualFold(active.name, to) || active.run.ID == to) {
-			key := hubPeerMailboxKey(active.name)
+			key := hubPeerMailboxKey(active.run.SessionID, active.name)
 			if key == from.key {
 				return nil, fmt.Errorf("peer cannot send a message to itself")
 			}
@@ -306,7 +308,7 @@ func (r *subagentRuntime) hubPeerTargetsLocked(from hubPeerIdentity, to string) 
 		}
 	}
 	for _, parked := range r.parked {
-		if strings.EqualFold(parked.name, to) || parked.run.ID == to {
+		if parked.run.SessionID == from.sessionID && (strings.EqualFold(parked.name, to) || parked.run.ID == to) {
 			targets := appendParked(nil, parked)
 			if len(targets) == 0 {
 				break
@@ -333,6 +335,7 @@ func (r *subagentRuntime) reviveParkedPeer(target hubPeerTarget, peer hubPeerMes
 		Name: target.parked.name, Prompt: "Resume your prior task context and respond to the incoming peer message.",
 		Description: target.parked.run.Description, ResumeFrom: target.parked.run.ID,
 		initialPeerMessages: []hubPeerMessage{peer},
+		parentToolCallID:    target.parentToolCallID,
 	}
 	if target.parked.contract != nil {
 		input.OutputSchema = append(json.RawMessage(nil), target.parked.contract.raw...)

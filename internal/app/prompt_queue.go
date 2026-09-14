@@ -176,6 +176,10 @@ func (s *Service) guideQueuedPrompt(ctx context.Context, mutation PromptQueueMut
 	if err := s.validatePromptQueueAttachments(mutation.SessionID, item.Attachments); err != nil {
 		return current, err
 	}
+	text, references, err := s.resolveSessionReferences(ctx, mutation.SessionID, item.Text)
+	if err != nil {
+		return current, err
+	}
 	s.mu.Lock()
 	if s.shuttingDown || s.activeSession != mutation.SessionID || s.activeRun != mutation.RunID || mutation.RunID == "" {
 		s.mu.Unlock()
@@ -189,10 +193,11 @@ func (s *Service) guideQueuedPrompt(ctx context.Context, mutation PromptQueueMut
 	next := current.Clone()
 	next.Items = append(next.Items[:index], next.Items[index+1:]...)
 	saved, sequence, err := s.sessions.SavePromptQueueWithGuidance(ctx, mutation.SessionID, mutation.ExpectedRevision, next, session.Block{
-		Kind: "user", State: "guidance", Title: "Guidance", RunID: mutation.RunID, Content: item.Text, Attachments: item.Attachments,
+		Kind: "user", State: "guidance", Title: "Guidance", RunID: mutation.RunID, Content: text, Attachments: item.Attachments,
+		Data: map[string]string{sessionReferenceDataKey: references},
 	})
 	if err == nil {
-		err = control.Enqueue(turnControlMessage{ID: fmt.Sprintf("%s:%d", mutation.RunID, sequence), Kind: turnControlSteer, Message: UserMessageWithAttachments(item.Text, item.Attachments)})
+		err = control.Enqueue(turnControlMessage{ID: fmt.Sprintf("%s:%d", mutation.RunID, sequence), Kind: turnControlSteer, Message: UserMessageWithAttachments(text+sessionReferenceEvidence(references), item.Attachments)})
 	}
 	s.mu.Unlock()
 	if err != nil {

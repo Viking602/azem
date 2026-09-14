@@ -264,6 +264,12 @@ func drainTurn(ctx context.Context, service *app.Service, runID string, printEve
 			fmt.Fprintf(os.Stderr, "%s %s %s\n", event.Kind, event.State, truncate(event.Text, 160))
 		}
 		switch event.Kind {
+		case app.EventRecoveryState:
+			if event.RunID == runID && event.State == "suspended" {
+				// No operator can reconcile uncertain effects in an unattended trial.
+				// Preserve the suspension; do not replay or cancel it as a timeout.
+				return fmt.Errorf("run suspended: kind=%q reason=%q (run %s)", event.Data["kind"], event.Text, runID)
+			}
 		case app.EventApprovalRequested:
 			return fmt.Errorf("approval requested under YOLO: %s", event.ApprovalID)
 		case app.EventUserInputRequested:

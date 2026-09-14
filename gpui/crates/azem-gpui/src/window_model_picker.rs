@@ -688,7 +688,8 @@ impl AzemWindow {
                                                         this.toggle_fast_mode(cx)
                                                     }))
                                             })
-                                            .child(icon(fast_icon_name, 18., fast_icon_color)),
+                                            .child(icon(fast_icon_name, 18., fast_icon_color))
+                                            .animate_selection(modes.fast, palette.paper, palette.accent_soft, cx),
                                     )
                                 }),
                         )

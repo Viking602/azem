@@ -75,7 +75,8 @@ Durable coordination and transient engine construction stay separate:
 
 ## Single and Team modes
 
-Single mode is the default (`defaults.agent_mode`). Team mode preserves the
+Explicit TUI/API requests default to single mode (`defaults.agent_mode`). The
+native composer selects Vibe or Fusion from `agents.workflow`. Team mode preserves the
 deterministic planner → implementer → reviewer → at most one revision →
 reviewer → reporter policy in `internal/agent/scheduler.go`.
 
@@ -90,6 +91,71 @@ allowlists, workspace policy, approval/UI state, concurrency, and the
 configured tick ceiling.
 
 ## Subagent scheduling
+
+### Vibe dispatch
+
+The native workflow setting admits `agent_mode=vibe`; the legacy
+`single` + `vibeMode=true` request is normalized to the same durable mode.
+The director has read-only workspace tools and the five Vibe control tools;
+fast/good workers use the existing governed subagent scheduler. `vibe_wait`
+returns when any watched run settles, while ordinary subagent Query retains
+wait-all semantics. Subscribe to state changes before reading snapshots so a
+completion cannot be lost between observation and waiting.
+Vibe policy belongs to the fingerprinted root instructions. Switching Vibe,
+Fusion, or ordinary/Plan mode rebuilds context once from durable evidence, and
+legacy private Vibe policy is not replayed into the new mode. This intentionally
+changes the static cache prefix at a mode switch; repeated same-mode turns keep
+it stable. Existing worker resume and background delivery use the shared runtime.
+
+### Fusion handoffs
+
+Fusion exposes one `sidekick` tool to the lead instead of arbitrary subagent
+spawning. The lead plans, reads evidence, and reviews; the configured Sidekick
+implements and verifies through the existing governed worker runtime. Each handoff
+waits in the foreground, retains approvals and durable tool records, and is
+cancelled when the parent tool wait is cancelled. The Sidekick cannot delegate.
+Both models retain ordinary per-provider/model usage accounting; Fusion does not
+promise a fixed cost reduction.
+
+The display projection treats Fusion as one conversation. `fusionHost` forwards
+child thinking, progress, reports and actual tools into the parent timeline with
+source metadata, while suppressing worker lifecycle events. Child text remains
+commentary in the parent projection so only the lead can finish the conversation.
+Handoffs retain their actual prompt and result. Tool records retain their original
+child run/call identity; only display IDs are namespaced. Selection and reconnect
+identify Fusion through the durable parent `sidekick` call, hide worker rows, and
+interleave child prose from the retained execution transcript with actual tools.
+Display-only prose keeps the parent call's anchor without renumbering durable
+blocks; resumed context before the current handoff is not repeated. Private system,
+hook and compaction messages are excluded. Failures and approval/control routing
+keep their original identities. Child prose and tool records never become the
+lead's activated skills or tool-continuity context. Both histories and cached
+prompt prefixes remain independent across handoffs.
+
+Only `agent_mode=fusion` resolves the Sidekick route or exposes its tool and
+read-only lead policy. Turning it off restores ordinary tools, even if the saved
+Sidekick route is unavailable. Fusion policy belongs to the current root
+instructions and their fingerprint, not replayed private-hook history. Switching
+modes rebuilds model context from the durable conversation and tool evidence;
+legacy checkpoints containing private Fusion policy rebuild once as well.
+This intentionally changes the cache prefix on a mode switch. Repeated turns in
+the same mode keep their prefix stable; ordinary sessions keep their existing
+root instructions. Stored conversation and tool records are retained.
+
+The Sidekick's stable identity includes the session, workspace, provider, account,
+exact model and reasoning. Subsequent handoffs (including later user turns and
+restored sessions) resume its full conversation, including tool call/result pairs
+and provider state. Deterministic archives expand from verified session artifacts;
+fresh public system instructions replace previous public system messages. Private
+hook/deadline messages retain their original history positions; current notices
+append beside the new handoff so a changing countdown does not rewrite the cache
+prefix. Initial and resumed workers use the same canonical workspace path.
+Other subagent resume paths retain their existing behavior. Changing the Sidekick route or account starts
+an independent context. Unreadable or incomplete transcripts fail explicitly.
+An explicit provider permission rejection ends the child as failed and returns
+its reason to the lead. It must not park the child for unknown-attempt
+reconciliation or automatically repeat the rejected handoff.
+
 
 `subagentRuntime` (`internal/app/subagent_runtime.go`) remains the
 application-owned child lifecycle and scheduler. Each child worker is a
@@ -276,6 +342,12 @@ restore. Provider usage facts remain an Azem session concern; Venat durable
 attempt payloads are execution-settlement evidence and are not a second usage
 ledger.
 
+Request admission and terminal usage aggregation read only cache epoch,
+checkpoint generation and the usage snapshot through `LoadProviderMeteringState`.
+They must not hydrate provider history, transcript blocks or tool payloads.
+The query reads current values for each call; it does not cache stale epochs or
+relax integrity checks in ordinary history readers.
+
 ## Budgets
 
 Hard budgets terminate; the soft budget only advises.
@@ -296,6 +368,11 @@ Hard budgets terminate; the soft budget only advises.
 Budget failures are wrapped with configuration hints
 (`increase agents.main.max_tokens ...`) before they reach the UI.
 
+Workspace revision hashes stream complete source/data files within the existing
+8 MiB aggregate evidence budget. The 1 MiB inline text preview limit does not
+cap hashing. Media keeps its separate 32 MiB budget and rooted file access;
+missing or over-budget evidence still blocks verification explicitly.
+
 ## Run controls
 
 Azem keeps every mode on the same application run, v1 durable execution, and
@@ -312,10 +389,38 @@ durable session:
   Todo or verification guardrails.
 - Advisor observes independently and may emit bounded inline advice without
   becoming the execution owner.
-- TTSR evaluates configured text/AST stream rules and reinjects one durable
+- TTSR evaluates configured text stream rules and reinjects one durable
   interruption according to repeat and context policy.
+- Main turns with a known wall-clock deadline enqueue one private wrap-up
+  steer during the last 90 seconds, capped at 20% of the remaining budget when
+  the engine is bound. It asks the model to save required outputs, preserve
+  passing work, stop optional optimization, and complete necessary checks.
+  The control is checked before model calls and during reasoning; continuing
+  reasoning can be interrupted through the same safe stream boundary as loop
+  guards. It does not interrupt final prose, change the hard deadline, or bypass
+  verification. Unbounded turns and independent child budgets keep their
+  existing behavior. The reminder appends once to the private message tail;
+  static instructions and earlier messages retain their cache prefixes.
+- Loop detection also recognizes four exact repetitions of a short 8–64-word
+  suffix with at least four distinct words, using a bounded 4096-byte tail.
+  The existing minimum generated length and long-block/paragraph checks remain.
+- Loop guards and interrupting TTSR rules close text-only generation at the next
+  stream event boundary and record an aborted attempt before continuing the same
+  run. They do not wait for a stalled provider to finish. Tool deltas/calls defer
+  the interruption to the normal boundary so partial calls and provider-side
+  effects remain intact. Ordinary user steering stays boundary-based. An early
+  close leaves physical request usage unknown unless the provider reported it.
+- Rejected text/reasoning loops use the existing discard policy for the next
+  model request. Original attempt events remain durable, as do earlier messages
+  and tool results; tool-call loops keep their existing context. After three
+  retries, the fourth detection records a terminal control, settles through the
+  same safe abort boundary, and fails in `BeforeModelCall` before opening another
+  physical attempt. Throwing from the streaming `OnEvent` hook at exhaustion
+  would leave an unsettled model attempt and mask the loop failure with
+  reconciliation (LOOP-002). Provider errors and genuinely unknown effects still
+  retain their normal reconciliation semantics.
 - Prewalk and Plan YOLO translate an approved plan into execution context.
-  Vibe owns persistent fast/good read-only workers and does not expose ordinary
+  Vibe owns persistent fast/good coding workers and does not expose ordinary
   workspace mutation tools to its director.
 - The model-facing Hub combines peer messaging, background jobs, supervised
   processes, and waits. Parked agents revive on addressed messages without
@@ -328,15 +433,16 @@ clients without a responder terminate the waiting context explicitly.
 ## Coding tool runtime
 
 `internal/agent` owns the built-in read, write, Hashline edit, glob, grep,
-AST, LSP, DAP, eval, browser, computer, web search, GitHub, SSH, jobs, media,
-and memory drivers. Bun bridges are bounded subprocess protocols, not agent
-loops. Python, JavaScript, Ruby, and Julia eval kernels are persistent per
-session/language when the host runtime is available.
-
-Custom extension file fallbacks are consulted only after an ordinary local
-write/delete fails with `EACCES`, `EPERM`, or `EROFS`. Archive, SQLite,
-unresolved-symlink, non-permission, and out-of-workspace mutations never reach
-that seam.
+format, test, diff, shell, background-job, and memory drivers. Shell execution
+runs in a governed local runtime with policy and concurrency limits; `hub`
+exposes background job wait/cancel/list operations, peer messaging and scoped
+native process supervision. Native AST, LSP, Python, CDP, DAP, desktop and
+media drivers share existing tool governance and durable result projection;
+see [native tool coverage](native-tools.md) for prerequisites and limits.
+Default workers receive these tools through both config validation and the
+capability intersection. Vibe/Fusion directors retain their workflow-specific
+tool boundaries. The new inventory changes the tool-schema fingerprint once;
+stable subsequent turns preserve the prefix.
 
 ## Background security runs
 
@@ -395,6 +501,39 @@ this source context so source lines never become synthetic changes.
 The last `todo done` performs the existing deterministic evidence checks before
 changing the Todo revision. Missing or failed checks leave that item in progress
 and return the specific checks to finish. Main and Team tools share this rule.
+`todo verify` is read-only and uses the same gate to return `verification.ready`
+and missing-check/error details without changing the Todo revision. A successful
+`done` that leaves one open item also includes this preview, so required commands
+arrive before final completion. Preview failure does not undo that successful
+Todo mutation; final `done` still rechecks and rejects missing evidence.
+Run each listed command verbatim in a separate `coding.shell` call with its
+listed directory and environment. Appended `echo`, combined checks and alternate
+package managers do not prove the selected check. Exit status is already recorded.
+
+Successful native `coding.read_file` results with structured `kind=directory`
+are directory listings, not file-byte observations. Keep their tool records and
+listing content, but do not add the directory to file revision hashing. The same
+classification applies when deriving evidence from older records that already
+contain a directory observation with `limit_exceeded`. Ordinary file errors,
+unknown/malformed result kinds, writes and full-file hash limits remain enforced.
+No stored history is rewritten to repair the classification (VERIF-009).
+
+Readback freshness follows the observed file's last mutation and current SHA;
+an unrelated file edit does not invalidate it. Mutations without file observations
+remain a conservative global boundary. Command checks retain the global mutation
+boundary and exact matching. These tool/prompt updates change the static prefix
+once; no per-call dynamic instructions are inserted into that prefix.
+
+The implementation prompt asks for an early runnable version and measured tests,
+then completion once the requested behavior and required checks pass. It does
+not lower reasoning depth, relax requirements, or extend deadlines.
+
+Hashline's schema presents a concrete valid patch, with operation grammar outside
+the delimiters. Syntax rejection states that no files changed and preserves the
+current tags for retry. Inverted ranges explicitly direct insertion to gap
+locators. Stale tags still require a new read; parsing never guesses corrected
+ranges or silently accepts a different edit.
+
 The final-output guard still checks freshness, but successful current evidence
 does not request another test run. Evidence hydration omits ModelHistory and
 assistant blocks and selects only the relevant runs’ tool records in SQLite
@@ -407,6 +546,20 @@ New sends and restored Team runs build their input from canonical messages,
 current model history and the existing archive/checkpoint. They do not perform
 keyword history recall or query-based memory/recap injection before admission.
 The IPC receipt therefore does not wait for optional recall.
+
+Explicit composer conversation mentions are the exception: a user-selected
+`@[title](azem-session:id)` reference loads the source Recap (when available)
+and recent visible prose on its active branch before accepting the message.
+Sources must belong to the current project and cannot be current, archived,
+missing or empty sessions. Up to four distinct references are allowed. Retrieval
+has a two-second deadline, examines at most 64 recent prose blocks, and retains
+the latest three user exchanges with a 4,000-character per-message and
+16,000-character per-source excerpt budget, marking omissions explicitly.
+It does not hydrate tool payloads or provider checkpoints, generate a new summary,
+or recursively copy references held by the source. The immutable JSON snapshot
+is saved in the user block's `data.sessionReferences` alongside the visible
+title. Provider assembly and canonical replay include it as historical user
+data; instructions and permissions still come from the current task.
 
 Main and Team agents can explicitly call `context.search_history` when prior
 context is missing. It is a read-only, current-session tool with a focused query,

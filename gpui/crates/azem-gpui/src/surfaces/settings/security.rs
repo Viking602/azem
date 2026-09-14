@@ -87,6 +87,7 @@ pub(super) fn settings_security_body(
                 }
             }))
             .child(label)
+            .animate_selection(mode == value, palette.paper, palette.accent_soft, cx)
             .into_any_element()
     })
     .collect::<Vec<_>>();
@@ -118,7 +119,7 @@ pub(super) fn settings_security_body(
                                     cx.notify();
                                 }
                             }))
-                            .child(settings_switch(enabled, palette))
+                            .child(settings_switch(enabled, palette, cx))
                             .into_any_element(),
                         palette,
                     )

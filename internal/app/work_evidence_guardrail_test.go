@@ -36,6 +36,32 @@ func TestIncompleteTodoItemsKeepsOpenWork(t *testing.T) {
 	}
 }
 
+func TestRuntimeRevisionStreamsLargeInputWithoutTruncatingHash(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "text.gcode")
+	content := []byte(strings.Repeat("G1 X1 Y2 E3\n", maxWorkspaceFileBytes/11+10))
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	records := []session.ToolRecord{{State: session.ToolCompleted, Name: "coding.read_file", Observations: []session.FileObservation{{Path: "text.gcode", Operation: "read"}}}}
+	files, _, _, failures := runtimeRevisionFiles(root, records)
+	if len(failures) != 0 || len(files) != 1 || files[0].SHA256 != sha256Hex(content) {
+		t.Fatalf("large input capture: files=%v errors=%v", files, failures)
+	}
+	content[maxWorkspaceFileBytes+1] = '9'
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	changed, _, _, failures := runtimeRevisionFiles(root, records)
+	if len(failures) != 0 || len(changed) != 1 || changed[0].SHA256 != sha256Hex(content) || changed[0].SHA256 == files[0].SHA256 {
+		t.Fatalf("hash missed bytes beyond inline limit: files=%v errors=%v", changed, failures)
+	}
+	remaining, mediaRemaining := int64(len(content)-1), int64(32<<20)
+	if _, err := hashWorkspaceEvidence(root, "text.gcode", &remaining, &mediaRemaining); err != errWorkspaceEvidenceLimit {
+		t.Fatalf("aggregate budget was bypassed: %v", err)
+	}
+}
+
 func TestVerificationRetryStaysInRunWithoutReplacingTodo(t *testing.T) {
 	message := verificationRetryMessage(runtimeEvidenceSnapshot{}, []string{"Run the focused test"})
 	for _, required := range []string{
@@ -44,6 +70,9 @@ func TestVerificationRetryStaysInRunWithoutReplacingTodo(t *testing.T) {
 		"answer the original user request",
 		"entire run, including work completed before this retry",
 		"Do not initialize or replace the session Todo",
+		"Run each listed command verbatim in a separate coding.shell call",
+		"the tool already records the exit status",
+		"Resolve the listed missing checks before retrying completion",
 		"- Run the focused test",
 	} {
 		if !strings.Contains(message, required) {
@@ -259,5 +288,41 @@ func TestLiteralEvalVerificationEvidence(t *testing.T) {
 				t.Fatalf("got %+v, want status %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestReadbackFreshnessTracksTheObservedFile(t *testing.T) {
+	now := time.Now()
+	read := session.ToolRecord{RunID: "r", ToolCallID: "read-a", Name: "coding.read_file", State: session.ToolCompleted,
+		StartedAt: now, CompletedAt: now.Add(time.Second),
+		Observations: []session.FileObservation{{Path: "a.txt", Operation: "read", SHA256: "current"}}}
+	mutation := session.ToolRecord{Name: "coding.write_file", State: session.ToolCompleted,
+		StartedAt: now.Add(2 * time.Second), CompletedAt: now.Add(3 * time.Second),
+		Observations: []session.FileObservation{{Path: "b.txt", Operation: "write", SHA256: "other"}}}
+	snapshot := runtimeEvidenceSnapshot{
+		revision: session.WorkRevisionV1{Files: []session.WorkRevisionFileV1{{Path: "a.txt", SHA256: "current", Touched: true}}},
+		plan:     session.VerificationPlanV1{Checks: []session.VerificationCheckV1{{ID: "read-a", Kind: "artifact", ArtifactRef: "file:a.txt"}}},
+		records:  []session.ToolRecord{read, mutation}, latestMutationAt: mutation.CompletedAt,
+	}
+	if state := evaluateRuntimeChecks(snapshot); state.status != "pass" {
+		t.Fatalf("unrelated write invalidated matching read: %+v", state)
+	}
+	snapshot.revision.Files[0].SHA256 = "changed-outside-tool"
+	if state := evaluateRuntimeChecks(snapshot); state.status == "pass" {
+		t.Fatal("read of different bytes accepted")
+	}
+	snapshot.revision.Files[0].SHA256 = "current"
+	snapshot.records[1].Observations[0].Path = "a.txt"
+	if state := evaluateRuntimeChecks(snapshot); state.status == "pass" {
+		t.Fatal("read before same-file mutation accepted, even with identical bytes")
+	}
+	snapshot.records[1].Observations = nil
+	if state := evaluateRuntimeChecks(snapshot); state.status == "pass" {
+		t.Fatal("unscoped known mutation must still invalidate prior readback")
+	}
+	snapshot.records[0].StartedAt = mutation.CompletedAt.Add(time.Second)
+	snapshot.records[0].CompletedAt = mutation.CompletedAt.Add(2 * time.Second)
+	if state := evaluateRuntimeChecks(snapshot); state.status != "pass" {
+		t.Fatalf("fresh same-file read rejected: %+v", state)
 	}
 }

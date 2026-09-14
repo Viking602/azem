@@ -2,11 +2,48 @@ package session
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 
 	sqlitestore "github.com/Viking602/azem/internal/store/sqlite"
 )
+
+func TestWorkspaceSessionDoesNotRestoreArchivedConversation(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitestore.Open(ctx, filepath.Join(t.TempDir(), "projects.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(ctx)
+	service := NewService(store.DB(), store.Blobs())
+	workspace, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Ensure(ctx, Session{ID: "archived-selection", Workspace: workspace}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SetWorkspaceSession(ctx, workspace, "archived-selection"); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SetArchived(ctx, "archived-selection", true); err != nil {
+		t.Fatal(err)
+	}
+	if id, err := service.WorkspaceSession(ctx, workspace); id != "" || !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("archived workspace selection = %q, %v", id, err)
+	}
+	if _, err := service.LoadSession(ctx, "archived-selection"); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SetArchived(ctx, "archived-selection", false); err != nil {
+		t.Fatal(err)
+	}
+	if id, err := service.WorkspaceSession(ctx, workspace); err != nil || id != "archived-selection" {
+		t.Fatalf("restored workspace selection = %q, %v", id, err)
+	}
+}
 
 func TestProjectCatalogOwnsSessionsAndRestoresMostRecentWorkspace(t *testing.T) {
 	ctx := context.Background()

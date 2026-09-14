@@ -21,6 +21,12 @@ version: **27**.
 | Attachments, plugins, worktrees | `$AZEM_HOME` |
 | Runtime state and logs | `$AZEM_HOME` |
 
+GPUI keeps window size/placement and the `sessionSidePanelWidths` map in
+`gpui-window.json` under its state directory (`--state-dir`, then `$AZEM_HOME`,
+then `~/.azem`). Panel widths use session IDs as keys and are atomically saved
+at the end of a resize and on window teardown. Older files without the map
+retain the default panel sizing; invalid entries are ignored individually.
+
 The first launch that uses the default `~/.azem` home moves a previous
 `~/.config/azem` tree, the platform data directory (`~/Library/Application Support/azem` on macOS, `%AppData%\azem` on Windows, `~/.local/share/azem` on Linux), and the platform cache directory into that home. It refuses to start if the old database is still locked. `AZEM_HOME` disables that migration. Project-local `{workspace}/.azem` is unchanged.
 
@@ -224,6 +230,16 @@ Schema 27 is the clean Venat v0.16 execution boundary:
 - `agent_execution_bindings` maps an Azem session/run/agent/kind/segment to
   the immutable executable manifest and profile hash. This is the only bridge
   between application orchestration and Venat durable execution.
+
+Attempt mutations (`StartAttempt`, `FinishAttempt`, `MarkAttemptUnknown`, and
+`ReconcileAttempt`) load and save only the named operation's attempt history.
+They still validate the execution hashes, fenced lease, attempt numbers,
+versions and payload integrity. Unrelated attempts and receipts are untouched.
+Execution transitions, recovery and `LoadExecution` retain full graph validation,
+including unknown-attempt handling and idempotency receipts. This prevents each
+tool call from rewriting the entire accumulated history; no schema change is
+needed. `TestAttemptMutationDoesNotRewriteUnrelatedHistory` guards the write scope
+and `BenchmarkDurableAttemptWithHistory` measures scaling.
 
 All four payload families use the schema-21 BlobStore threshold and verify
 SHA-256 on hydration. Schema 27 does not delete the v0.15 application tables:

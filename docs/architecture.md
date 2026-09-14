@@ -420,10 +420,6 @@ sealing, and terminal state. See [Security scanning](security-scanning.md).
   commands, agents, providers, tools, themes, and App requirements into the
   existing runtime boundaries. Runtime capability paths never point at Codex
   storage.
-- **Custom extensions:** `internal/customtools` owns the bounded Bun subprocess
-  protocol. Registration is atomic per module. Permission-only file
-  write/delete fallbacks receive a symlink-resolved workspace destination and
-  cannot expand Azem's filesystem boundary.
 - **Skills:** add user, project, configured, or bundled Skill directories;
   activation must flow through the existing `activeSkills` request field.
 - **Hooks:** discover supported hook sources through `internal/hooks`; preserve
@@ -438,9 +434,8 @@ sealing, and terminal state. See [Security scanning](security-scanning.md).
 Azem implements its user-facing capabilities through product-owned runtime
 boundaries:
 
-- `internal/agent` owns the portable coding tools and bridges only specialized
-  runtimes that require Bun, language servers, DAP, browser, desktop, or media
-  processes.
+- `internal/agent` owns the portable coding tools, governed shell and
+  background-job runtimes, and tool policies.
 - `internal/app` owns Goal, Advisor, Vibe, TTSR, prewalk, loop guards,
   checkpoint/rewind, subagent Hub, and the one provider/event pipeline.
 - `internal/session`, `sessionimport`, `sessionexport`, `sessionshare`, and

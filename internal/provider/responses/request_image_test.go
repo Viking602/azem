@@ -2,6 +2,7 @@ package responses
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -12,6 +13,66 @@ import (
 	"github.com/Viking602/venat/message"
 	hyprovider "github.com/Viking602/venat/provider"
 )
+
+func TestBuildPreservesImagesInToolOutputs(t *testing.T) {
+	for _, caption := range []string{"", "rendered path"} {
+		t.Run(caption, func(t *testing.T) {
+			parts := []message.ContentPart{{Kind: message.ContentImage, Data: testPNG(), MediaType: "image/png"}}
+			if caption != "" {
+				parts = append([]message.ContentPart{message.TextPart(caption)}, parts...)
+			}
+			data, err := Build(hyprovider.Request{Model: "grok-4.6", Messages: []message.Message{
+				message.NewText(message.RoleUser, "read the rendered path"),
+				{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{{ID: "image-1", Name: "inspect_image", Arguments: json.RawMessage(`{"path":"path.png"}`)}}},
+				message.NewToolResult(message.ToolResult{ToolCallID: "image-1", Name: "inspect_image", Parts: parts}),
+			}}, BuildOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var payload struct {
+				Input []struct {
+					Type   string `json:"type"`
+					CallID string `json:"call_id"`
+					Output []struct {
+						Type     string `json:"type"`
+						Text     string `json:"text"`
+						ImageURL string `json:"image_url"`
+					} `json:"output"`
+				} `json:"input"`
+			}
+			if err := json.Unmarshal(data, &payload); err != nil {
+				t.Fatalf("tool image output is not multimodal: %v", err)
+			}
+			if len(payload.Input) != 3 {
+				t.Fatalf("input items=%d, want original user, call, result", len(payload.Input))
+			}
+			result := payload.Input[2]
+			if result.Type != "function_call_output" || result.CallID != "image-1" || len(result.Output) != len(parts) {
+				t.Fatalf("tool output=%+v", result)
+			}
+			last := result.Output[len(result.Output)-1]
+			if last.Type != "input_image" || last.ImageURL != "data:image/png;base64,"+base64.StdEncoding.EncodeToString(testPNG()) {
+				t.Fatal("tool image bytes were lost or changed")
+			}
+			if caption != "" && (result.Output[0].Type != "input_text" || result.Output[0].Text != caption) {
+				t.Fatalf("caption=%+v", result.Output[0])
+			}
+		})
+	}
+}
+
+func TestBuildRejectsInvalidToolImageData(t *testing.T) {
+	for _, data := range [][]byte{nil, []byte("not an image")} {
+		_, err := Build(hyprovider.Request{Model: "grok-4.6", Messages: []message.Message{
+			message.NewToolResult(message.ToolResult{ToolCallID: "image-1", Parts: []message.ContentPart{
+				{Kind: message.ContentImage, Data: data, MediaType: "image/png"},
+			}}),
+		}}, BuildOptions{})
+		if err == nil || !strings.Contains(err.Error(), "unsupported or empty image data") {
+			t.Fatalf("invalid image error=%v", err)
+		}
+	}
+}
 
 func TestBuildUserMessageWithImageAttachment(t *testing.T) {
 	dir := t.TempDir()

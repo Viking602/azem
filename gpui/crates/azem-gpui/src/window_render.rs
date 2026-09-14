@@ -71,6 +71,7 @@ impl Render for AzemWindow {
             self.model_picker_render_target = self.route_picker_target.clone();
         }
         for (key, open) in [
+            ("environment", self.environment_open),
             ("settings", self.settings_open),
             ("search", search_open),
             ("rename", self.renaming_session_id.is_some()),
@@ -241,34 +242,26 @@ impl Render for AzemWindow {
                 } else {
                     0.
                 };
-                let environment_returning = !self.side_panel_agents_open
-                    && selected_agent.is_empty()
-                    && self.environment_open
-                    && self.side_panel_closing
-                    && environment_panel_fits(current_workspace_width, 0.);
-                let environment_visible = !self.side_panel_agents_open
-                    && selected_agent.is_empty()
-                    && self.environment_open
-                    && (environment_returning
-                        || environment_panel_fits(
-                            current_workspace_width,
-                            side_panel_layout_width,
-                        ));
-                let environment = if environment_visible {
-                    Some(environment_panel(
-                        self,
-                        palette,
-                        labels,
-                        if environment_returning {
-                            0.
-                        } else {
-                            side_panel_layout_width
-                        },
-                        cx,
-                    ))
-                } else {
-                    None
-                };
+                let environment_fits = !agent_panel_visible
+                    && environment_panel_fits(current_workspace_width, side_panel_layout_width);
+                let fit_motion = self.popup_motions.entry("environment-fit").or_default();
+                // Only resizing gets its own transition; opening/closing keeps the panel clock.
+                let settle_fit = reduced_motion || fit_motion.open != environment_fits;
+                if fit_motion.update(environment_fits, settle_fit, Instant::now()) {
+                    window.request_animation_frame();
+                }
+                let alongside_visibility = fit_motion.opacity;
+                let environment_layout = environment_panel_layout(
+                    current_workspace_width,
+                    side_panel_layout_width,
+                    self.side_panel_visible_width,
+                    alongside_visibility,
+                    self.popup_motion("environment").opacity,
+                );
+                let environment = environment_layout
+                    .as_ref()
+                    .filter(|layout| layout.opacity > 0.)
+                    .map(|layout| environment_panel(self, palette, labels, layout, cx));
                 let side_panel = if side_panel_visible {
                     Some(side_panel(self, palette, labels, cx))
                 } else {
@@ -287,20 +280,12 @@ impl Render for AzemWindow {
                         cx,
                     ))
                 };
-                let right_panel_width = if environment_returning {
-                    self.side_panel_visible_width
-                        .max(ENVIRONMENT_PANEL_RESERVED_WIDTH)
-                } else {
-                    side_panel_layout_width
-                        + if environment.is_some() {
-                            ENVIRONMENT_PANEL_RESERVED_WIDTH
-                        } else {
-                            0.
-                        }
-                };
+                let right_panel_width = environment_layout
+                    .as_ref()
+                    .map_or(side_panel_layout_width, |layout| layout.reserved_width);
                 let column_gutter =
                     chat_column_gutter((current_workspace_width - right_panel_width).max(0.));
-                let column_animation_offset = if environment_returning {
+                let column_animation_offset = if environment_layout.is_some() {
                     0.
                 } else {
                     chat_column_animation_offset(
@@ -387,9 +372,29 @@ impl Render for AzemWindow {
                     .into_any_element()
             }
             Surface::Search => div().into_any_element(),
-            Surface::Projects => projects_surface(&self.state, palette, labels, cx),
-            Surface::Files => workspace_files_surface(&self.state, palette, cx),
-            Surface::Changes => workspace_changes_surface(&self.state, palette, cx),
+            Surface::Projects => projects_surface(
+                &self.state,
+                palette,
+                labels,
+                &self.workspace_overview_scroll,
+                cx,
+            ),
+            Surface::Files => workspace_files_surface(
+                &self.state,
+                palette,
+                &self.workspace_tree_scroll,
+                &self.workspace_preview_scroll,
+                &self.workspace_source,
+                self.workspace_image.clone(),
+                cx,
+            ),
+            Surface::Changes => workspace_changes_surface(
+                &self.state,
+                palette,
+                &self.workspace_changes_scroll,
+                &self.workspace_source,
+                cx,
+            ),
             Surface::PullRequests => pull_requests_surface(&self.state, palette, cx),
             Surface::Security => security_surface(&self.state, &self.runtime, palette),
             Surface::Terminal => self.terminal_view(palette, cx),
@@ -398,11 +403,17 @@ impl Render for AzemWindow {
             &self.state,
             palette,
             labels,
-            &self.open_projects,
-            self.show_all_sessions,
+            &self.sidebar_tree,
             self.sidebar_context_menu.as_ref().map(|menu| &menu.target),
             cx,
-        );
+        )
+        .w(px(if self.sidebar_resize_drag.is_some() {
+            self.sidebar_visible_width.max(200.)
+        } else {
+            self.sidebar_width
+        }));
+        let resize_mouse_move = cx.listener(Self::sidebar_resize_mouse_move);
+        let resize_mouse_up = cx.listener(Self::sidebar_resize_mouse_up);
         let settings_modal = if self.popup_motion("settings").visible() {
             Some(self.settings_modal_view(palette, cx))
         } else {
@@ -690,6 +701,61 @@ impl Render for AzemWindow {
                             .child(icon("sidebar-simple", 14., palette.muted)),
                     )
                     .flex_shrink_0(),
+            )
+            .child(
+                div()
+                    .id("sidebar-resize-handle")
+                    .role(Role::Splitter)
+                    .aria_label(locale.text("ui.resizeSidebar"))
+                    .track_focus(&self.sidebar_resize_focus)
+                    .aria_value(format!("{} px", self.sidebar_visible_width.round() as i64))
+                    .tab_stop(true)
+                    .absolute()
+                    .top(px(46.))
+                    .bottom_0()
+                    .left(px((self.sidebar_visible_width - 4.).max(0.)))
+                    .w(px(8.))
+                    .cursor_col_resize()
+                    .hover(move |style| style.bg(palette.accent.opacity(0.12)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(Self::sidebar_resize_mouse_down),
+                    )
+                    .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                        let width = match event.keystroke.key.as_str() {
+                            "left" if this.sidebar_visible_width <= 200. => 0.,
+                            "left" => this.sidebar_visible_width - 20.,
+                            "right" => (this.sidebar_visible_width + 20.).max(200.),
+                            "home" => 0.,
+                            "end" => 400.,
+                            _ => return,
+                        };
+                        this.set_sidebar_width(width, cx);
+                        cx.stop_propagation();
+                    }))
+                    .child(
+                        gpui::canvas(
+                            |_, _, _| (),
+                            move |_, _, window, _| {
+                                window.on_mouse_event(
+                                    move |event: &MouseMoveEvent, phase, window, cx| {
+                                        if phase == gpui::DispatchPhase::Capture {
+                                            resize_mouse_move(event, window, cx);
+                                        }
+                                    },
+                                );
+                                window.on_mouse_event(
+                                    move |event: &MouseUpEvent, phase, window, cx| {
+                                        if phase == gpui::DispatchPhase::Capture {
+                                            resize_mouse_up(event, window, cx);
+                                        }
+                                    },
+                                );
+                            },
+                        )
+                        .absolute()
+                        .inset_0(),
+                    ),
             )
             .when_some(search_modal, |root, modal| root.child(modal))
             .when_some(settings_modal, |root, modal| root.child(modal))

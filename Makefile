@@ -6,7 +6,7 @@ LDFLAGS := -X 'main.version=$(VERSION)' -X 'main.gitCommit=$(GIT_COMMIT)' -X 'ma
 RIPGREP ?= $(shell command -v rg 2>/dev/null)
 DAEMON_EXE := azem-daemon$(if $(filter windows,$(shell go env GOOS)),.exe,)
 
-.PHONY: build azem-eval azem-eval-linux bundle-ripgrep daemon runtime-js gpui test test-gpui sqlc architecture-check contracts contracts-check
+.PHONY: build azem-eval azem-eval-linux bundle-ripgrep daemon gpui test test-gpui sqlc architecture-check contracts contracts-check
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/azem
@@ -29,10 +29,7 @@ daemon: bundle-ripgrep
 	mkdir -p dist/bin
 	GOWORK=off go build -ldflags "$(LDFLAGS)" -o dist/bin/$(DAEMON_EXE) ./cmd/azem-daemon
 
-runtime-js:
-	cd runtime-js && bun install --frozen-lockfile
-
-gpui: daemon runtime-js
+gpui: daemon
 	cd gpui && cargo build --locked --release -p azem-gpui
 ifeq ($(shell uname -s),Darwin)
 	mkdir -p dist/Azem-GPUI.app/Contents/MacOS dist/Azem-GPUI.app/Contents/Resources

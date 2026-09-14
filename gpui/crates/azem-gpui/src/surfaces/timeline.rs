@@ -1,10 +1,10 @@
 use super::*;
-mod diff;
-mod highlight;
+pub(super) mod diff;
+pub(super) mod highlight;
 pub(super) mod process;
 use process::{
-    is_agent_block, is_hidden_process_block, is_process_tool_block, is_thinking_text,
-    pending_process_entry, process_detail_row, thinking_belongs_to_tool_group,
+    fusion_source_caption, is_agent_block, is_hidden_process_block, is_process_tool_block,
+    is_thinking_text, pending_process_entry, process_detail_row, thinking_belongs_to_tool_group,
     thinking_process_entry, tool_group_entry,
 };
 
@@ -255,7 +255,20 @@ pub(super) fn timeline_entry_unfolded(
                                 .text_size(px(palette.chat_font_size))
                                 .line_height(px(palette.chat_font_size * 1.6))
                                 .whitespace_normal()
-                                .child(block.content.clone()),
+                                .child(crate::selectable_text::selectable(
+                                    ("user-selection", index),
+                                    block.content.clone(),
+                                    {
+                                        let text = block.content.clone();
+                                        move |selection| {
+                                            crate::selectable_text::selection_text(
+                                                gpui::StyledText::new(text),
+                                                selection,
+                                            )
+                                            .into_any_element()
+                                        }
+                                    },
+                                )),
                         )
                     })
                     .when_some(time, |bubble, time| {
@@ -322,6 +335,7 @@ pub(super) fn timeline_entry_unfolded(
             })
             .text_size(px(palette.chat_font_size))
             .line_height(px(palette.chat_font_size * 1.6))
+            .children(fusion_source_caption(block, palette))
             .child(markdown_view(
                 index,
                 content,

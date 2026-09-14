@@ -15,6 +15,7 @@ import (
 	"github.com/Viking602/azem/internal/app"
 	backgroundservice "github.com/Viking602/azem/internal/background"
 	"github.com/Viking602/azem/internal/collab"
+	"github.com/Viking602/azem/internal/config"
 	"github.com/Viking602/azem/internal/desktopclient"
 	"github.com/Viking602/azem/internal/i18n"
 	"github.com/Viking602/azem/internal/memory"
@@ -794,7 +795,7 @@ func (m *AppModel) moveTranscriptCursor(delta int) {
 	m.transcriptCursor = indices[position]
 }
 
-var subscriptionProviderIDs = []string{"chatgpt", "grok", "cursor"}
+var subscriptionProviderIDs = config.SubscriptionProviderIDs()
 
 func (m AppModel) providerIDs(loginOnly bool) []string {
 	if loginOnly {
