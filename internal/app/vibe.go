@@ -178,7 +178,10 @@ func (driver *vibeDriver) spawn(ctx context.Context, call tool.Call) tool.Result
 		return vibeError(call, err)
 	}
 	record := vibeRecord{Name: input.Name, CLI: input.CLI, RunID: run.ID, State: "running", Model: firstNonempty(route.Model, driver.parent.ModelID)}
-	driver.saveRecord(record)
+	if !driver.commitSpawn(input.Name, record) {
+		driver.abandonSpawn(input.Name, run.ID)
+		return vibeError(call, fmt.Errorf("vibe session %q was killed", input.Name))
+	}
 	if err := driver.persistRegistry(ctx); err != nil {
 		driver.abandonSpawn(input.Name, run.ID)
 		return vibeError(call, err)
@@ -350,7 +353,7 @@ func (driver *vibeDriver) screens(filter []string) []vibeRecord {
 		}
 		if runID := driver.activeRunIDLocked(record.Name); runID != "" {
 			record.RunID, record.State = runID, "running"
-		} else if record.State != "dead" {
+		} else if record.State != "dead" && record.State != "starting" {
 			record.State = "idle"
 		}
 		result = append(result, record)
@@ -405,6 +408,18 @@ func (driver *vibeDriver) reserveName(name, cli string) error {
 	return nil
 }
 
+func (driver *vibeDriver) commitSpawn(name string, record vibeRecord) bool {
+	key := vibeSessionKey{driver.parent.SessionID, strings.ToLower(name)}
+	driver.runtime.mu.Lock()
+	defer driver.runtime.mu.Unlock()
+	current, exists := driver.runtime.vibe[key]
+	if !exists || current.State == "dead" {
+		return false
+	}
+	driver.runtime.vibe[key] = record
+	return true
+}
+
 func (driver *vibeDriver) forgetRecord(name string) {
 	driver.runtime.mu.Lock()
 	delete(driver.runtime.vibe, vibeSessionKey{driver.parent.SessionID, strings.ToLower(name)})
@@ -435,6 +450,15 @@ func (driver *vibeDriver) abandonSpawn(name, runID string) {
 		select {
 		case <-done:
 		case <-time.After(5 * time.Second):
+			if driver.activeRunID(name) != "" {
+				record, exists := driver.record(name)
+				if !exists {
+					record = vibeRecord{Name: name}
+				}
+				record.RunID, record.State = runID, "running"
+				driver.saveRecord(record)
+				return
+			}
 		}
 	}
 	driver.dropParked(name)

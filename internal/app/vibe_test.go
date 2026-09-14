@@ -515,6 +515,92 @@ func TestVibeParallelSpawnRejectsDuplicateNames(t *testing.T) {
 	}
 }
 
+func TestVibeScreensKeepStartingReservation(t *testing.T) {
+	runtime := &subagentRuntime{vibe: map[vibeSessionKey]vibeRecord{}}
+	driver := &vibeDriver{runtime: runtime, parent: subagentParentRuntime{SessionID: "session"}}
+	driver.saveRecord(vibeRecord{Name: "WorkerA", CLI: "fast", State: "starting"})
+	screens := driver.screens(nil)
+	if len(screens) != 1 || screens[0].State != "starting" {
+		t.Fatalf("starting reservation = %#v", screens)
+	}
+}
+
+func TestVibeKillDuringSpawnAbandonsWorker(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	runtime, provider, coding, store := newGatedForegroundHarness(t, ctx, 0)
+	defer runtime.Shutdown(ctx)
+	defer coding.Close(ctx)
+	defer func() {
+		for {
+			select {
+			case <-provider.started:
+				provider.release <- struct{}{}
+			default:
+				return
+			}
+		}
+	}()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	runtime.store = blockingVibeCreateStore{SubagentRunStore: store, started: started, release: release}
+	parent := subagentParentRuntime{
+		SessionID: "session", ParentRunID: "director", ProviderID: "test", AccountID: "test-account", ModelID: "model", Reasoning: "high",
+		Driver: provider, Coding: coding, WorkspaceRoot: t.TempDir(), DirectorReadOnly: true,
+	}
+	drivers, err := newVibeDrivers(runtime, parent, config.VibeConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spawn := vibeTool(t, drivers, vibeSpawnTool).(*vibeDriver)
+	results := make(chan tool.Result, 1)
+	go func() {
+		result, executeErr := spawn.Execute(ctx, tool.Call{ID: "spawn", Name: vibeSpawnTool, Arguments: json.RawMessage(`{"cli":"fast","name":"WorkerA","prompt":"inspect kill race"}`)}, nil)
+		if executeErr != nil {
+			results <- tool.Result{IsError: true, Content: executeErr.Error()}
+			return
+		}
+		results <- result
+	}()
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal("spawn did not reach create")
+	}
+	killed := executeVibe(t, ctx, vibeTool(t, drivers, vibeKillTool), `{"session":"WorkerA"}`)
+	if killed.IsError {
+		t.Fatal(killed.Content)
+	}
+	close(release)
+	spawned := <-results
+	if !spawned.IsError || !strings.Contains(spawned.Content, "killed") {
+		t.Fatalf("in-flight spawn = %#v", spawned)
+	}
+	if record, exists := spawn.record("WorkerA"); exists && record.State == "running" {
+		t.Fatalf("killed spawn left running %#v", record)
+	}
+}
+
+type blockingVibeCreateStore struct {
+	agentservice.SubagentRunStore
+	started chan struct{}
+	release chan struct{}
+}
+
+func (s blockingVibeCreateStore) Create(ctx context.Context, run agentservice.SubagentRun) error {
+	select {
+	case <-s.started:
+	default:
+		close(s.started)
+	}
+	select {
+	case <-s.release:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return s.SubagentRunStore.Create(ctx, run)
+}
+
 type mapVibeRunStore struct {
 	runs  map[string]agentservice.SubagentRun
 	fatal error
